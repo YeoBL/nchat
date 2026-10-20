@@ -244,6 +244,7 @@ enum DownloadFileAction
   DownloadFileActionNone = 0,
   DownloadFileActionOpen = 1,
   DownloadFileActionSave = 2,
+  DownloadFileActionTranscribe = 4,
   DownloadFileActionCacheOnly = 3, // Local cache client: never open or redraw a chat.
 };
 

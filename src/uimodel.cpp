@@ -35,6 +35,7 @@
 #include "uidialog.h"
 #include "uiattachmentlistdialog.h"
 #include "uiclientactiondialog.h"
+#include "featuremedia.h"
 #include "featureutil.h"
 #include "uichatlistdialog.h"
 #include "uiconfig.h"
@@ -1207,6 +1208,30 @@ void UiModel::Impl::OnKeyOpenAttachment(std::string p_FilePath /*= std::string()
   OpenAttachment(p_FilePath);
 }
 
+void UiModel::Impl::OnKeyTranscribe(std::string p_FilePath, std::map<std::string, std::string> p_Context)
+{
+  if (p_FilePath.empty() && !GetMessageAttachmentPath(p_FilePath, DownloadFileActionTranscribe)) return;
+  if (p_Context.empty())
+  {
+    p_Context["profile"] = m_CurrentChat.first;
+    p_Context["chatId"] = m_CurrentChat.second;
+    const auto& ids = m_MessageVec[m_CurrentChat.first][m_CurrentChat.second];
+    const int offset = m_MessageOffset[m_CurrentChat.first][m_CurrentChat.second];
+    if (offset >= 0 && offset < static_cast<int>(ids.size())) p_Context["msgId"] = ids[offset];
+  }
+  m_PendingTranscription = p_FilePath;
+  m_PendingTranscriptionContext = std::move(p_Context);
+}
+
+std::string UiModel::Impl::TakePendingTranscription(std::map<std::string, std::string>& p_Context)
+{
+  if (m_ListDialogActive || m_MessageDialogActive || m_FileListDialogActive) return "";
+  const auto path = m_PendingTranscription;
+  m_PendingTranscription.clear();
+  p_Context = std::move(m_PendingTranscriptionContext);
+  return path;
+}
+
 void UiModel::Impl::OpenLink(const std::string& p_Url)
 {
   static const std::string cmdTemplate = []()
@@ -2075,6 +2100,12 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           {
             OnKeySaveAttachment(fileInfo.filePath);
           }
+        }
+        else if (downloadFileAction == DownloadFileActionTranscribe)
+        {
+          FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(fileInfoStr);
+          if (UiModel::Impl::IsAttachmentDownloaded(fileInfo))
+            OnKeyTranscribe(fileInfo.filePath, {{"profile", profileId}, {"chatId", chatId}, {"msgId", msgId}});
         }
 
         UpdateHistory();
@@ -4711,6 +4742,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyFolders = UiKeyConfig::GetKey("folders");
   static wint_t keyBookmarks = UiKeyConfig::GetKey("bookmarks");
   static wint_t keyBulkSelect = UiKeyConfig::GetKey("bulk_select");
+  static wint_t keyTranscribe = UiKeyConfig::GetKey("transcribe");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4916,6 +4948,11 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyFolders) OnKeyClientActions("local.folders");
   else if (p_Key == keyBookmarks) OnKeyClientActions("local.bookmarks");
   else if (p_Key == keyBulkSelect) OnKeyClientActions("local.bulk");
+  else if (p_Key == keyTranscribe)
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    GetImpl().OnKeyTranscribe();
+  }
   else if (p_Key == keyReact)
   {
     OnKeyReact();
@@ -5021,7 +5058,16 @@ bool UiModel::Process()
     GetImpl().HandleProtocolUiControlEnd();
   }
 
-  return GetImpl().Process();
+  const bool running = GetImpl().Process();
+  std::map<std::string, std::string> transcriptionContext;
+  const auto transcription = running ? GetImpl().TakePendingTranscription(transcriptionContext) : "";
+  lock.unlock();
+  if (!transcription.empty())
+  {
+    transcriptionContext["path"] = transcription;
+    OnKeyClientActions("local.transcribe", transcriptionContext);
+  }
+  return running;
 }
 
 void UiModel::RequestContacts()
@@ -5736,6 +5782,11 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
   auto dispatch = [this, context, chat, protocol, bulkMessages, selected, makeItem](
     const std::string& operation, const Params& values, std::function<void(ClientActionResult)> done) -> bool
   {
+    if (operation == "local.transcribe")
+    {
+      FeatureMedia::Transcribe(values, done);
+      return true;
+    }
     if (operation == "local.preview")
     {
       ClientActionResult result;
@@ -5761,6 +5812,8 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       makeItem(page, "Search messages across chats", "local.search", {}, "Search cached history without marking it read");
       makeItem(page, "Chat folders", "local.folders", {}, "Local lists, shared across your nchat accounts");
       makeItem(page, "Saved messages / bookmarks", "local.bookmarks", {}, "Local bookmarks; nothing is sent to the service");
+      makeItem(page, "Search saved audio transcripts", "local.transcripts", {}, "Search on-device transcripts without uploading audio",
+        {{"query", "Transcript contains (blank shows recent transcripts)", ""}});
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
       if (!chat.second.empty())
       {
@@ -5769,10 +5822,18 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       if (!Value(context, "msgId").empty())
       {
         makeItem(page, "Bookmark / unbookmark selected message", "local.bookmark.toggle");
+        if (!Value(context, "fileInfo").empty())
+        {
+          const auto file = ProtocolUtil::FileInfoFromHex(Value(context, "fileInfo"));
+          if (IsAttachmentDownloaded(file))
+            makeItem(page, "Transcribe selected audio / video", "local.transcribe", {{"path", file.filePath}},
+              "On-device speech recognition; the first use asks for permission");
+        }
       }
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
       if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
     }
+    else if (operation == "local.transcripts") page = FeatureMedia::SearchTranscripts(Value(values, "query"));
     else if (operation == "local.search")
     {
       page.title = "Search cached messages";

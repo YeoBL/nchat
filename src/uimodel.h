@@ -71,6 +71,9 @@ private:
     void OnKeyOpenMsg();
     bool GetMessageAttachmentPath(std::string& p_FilePath, DownloadFileAction p_DownloadFileAction);
     void OnKeyOpenAttachment(std::string p_FilePath = std::string());
+    void OnKeyTranscribe(std::string p_FilePath = std::string(),
+                         std::map<std::string, std::string> p_Context = {});
+    std::string TakePendingTranscription(std::map<std::string, std::string>& p_Context);
     void OpenLink(const std::string& p_Url);
     void OpenAttachment(const std::string& p_Path);
     bool RunCommand(const std::string& p_Cmd, std::string* p_StdOut = nullptr);
@@ -282,6 +285,8 @@ private:
     LocalFeatures m_LocalFeatures;
     std::set<LocalFeatures::Chat> m_LoadedDrafts;
     int64_t m_DraftChangedMs = 0;
+    std::string m_PendingTranscription;
+    std::map<std::string, std::string> m_PendingTranscriptionContext;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStrCleared;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPosCleared;
