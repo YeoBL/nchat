@@ -7,16 +7,85 @@
 
 #include "uihistoryview.h"
 
+#include <chrono>
+#include <map>
+
 #include "appconfig.h"
 #include "apputil.h"
 #include "fileutil.h"
 #include "log.h"
 #include "protocolutil.h"
 #include "strutil.h"
+#include "sysutil.h"
 #include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uimodel.h"
+
+namespace
+{
+  constexpr int s_DefaultThumbnailRows = 18;
+  constexpr int64_t s_ThumbnailDebounceMs = 500;
+  // All thumbnail output runs on the UI thread, after curses finishes drawing.
+  std::string s_PendingThumbnailCommand;
+  std::chrono::steady_clock::time_point s_ThumbnailDue;
+  unsigned s_ThumbnailDialogDepth = 0;
+  uint64_t s_ThumbnailRevision = 0;
+  const std::wstring s_ThumbnailLine = L"\x1";
+
+  std::string ThumbnailCommand()
+  {
+    const std::string configured = UiConfig::GetStr("thumbnail_command");
+    return configured.empty() ? "nchat-thumbnails" : configured;
+  }
+
+  struct ThumbnailPlacement
+  {
+    std::string path;
+    int row = 0;
+    int width = 0;
+    int rows = 0;
+  };
+
+  bool IsImageAttachment(const FileInfo& p_FileInfo)
+  {
+    std::string type = p_FileInfo.fileType;
+    if (type.empty() && FileUtil::Exists(p_FileInfo.filePath))
+    {
+      type = FileUtil::GetMimeType(p_FileInfo.filePath);
+    }
+    if (type.rfind("image/", 0) == 0) return true;
+
+    const std::string name = StrUtil::ToLower(FileUtil::BaseName(p_FileInfo.filePath));
+    if ((name == "[photo]") || (name == "[sticker]")) return true;
+
+    static const std::vector<std::string> extensions =
+      { ".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp" };
+    for (const auto& extension : extensions)
+    {
+      if ((name.size() >= extension.size()) &&
+          (name.compare(name.size() - extension.size(), extension.size(), extension) == 0)) return true;
+    }
+    return false;
+  }
+
+  int GetThumbnailRows(const std::string& p_Path)
+  {
+    static std::map<std::string, int> cache;
+    auto found = cache.find(p_Path);
+    if (found != cache.end()) return found->second;
+
+    std::string output;
+    const std::string command = ThumbnailCommand() + " --rows '" +
+      StrUtil::EscapeSingleQuote(p_Path) + "'";
+    SysUtil::RunCommand(command, &output);
+    const int reportedRows = StrUtil::ToInteger(output);
+    const int rows = ((reportedRows >= 8) && (reportedRows <= 28)) ?
+      reportedRows : s_DefaultThumbnailRows;
+    return cache.emplace(p_Path, rows).first->second;
+  }
+
+}
 
 UiHistoryView::UiHistoryView(const UiViewParams& p_Params)
   : UiViewBase(p_Params)
@@ -41,6 +110,12 @@ UiHistoryView::UiHistoryView(const UiViewParams& p_Params)
 
 UiHistoryView::~UiHistoryView()
 {
+  s_PendingThumbnailCommand.clear();
+  if (m_ThumbnailsVisible)
+  {
+    SysUtil::RunCommand(ThumbnailCommand());
+  }
+
   if (m_PaddedWin != nullptr)
   {
     delwin(m_PaddedWin);
@@ -50,6 +125,12 @@ UiHistoryView::~UiHistoryView()
 
 void UiHistoryView::Draw()
 {
+  if (m_ThumbnailRevision != s_ThumbnailRevision)
+  {
+    m_ThumbnailRevision = s_ThumbnailRevision;
+    m_ThumbnailCommand.clear();
+    m_Dirty = true;
+  }
   if (!m_Enabled || !m_Dirty) return;
   m_Dirty = false;
 
@@ -86,6 +167,7 @@ void UiHistoryView::Draw()
   wbkgd(m_PaddedWin, attributeTextNormal | colorPairTextRecv | ' ');
 
   m_HistoryShowCount = 0;
+  std::vector<ThumbnailPlacement> thumbnailPlacements;
 
   bool firstMessage = true;
   int y = m_PaddedH - 1;
@@ -122,6 +204,9 @@ void UiHistoryView::Draw()
     }();
 
     std::vector<std::wstring> wlines;
+    std::string thumbnailPath;
+    int thumbnailWidth = 0;
+    int thumbnailRows = 0;
     if (!msg.text.empty())
     {
       std::string text = msg.text;
@@ -181,7 +266,8 @@ void UiHistoryView::Draw()
         (AppConfig::GetNum("attachment_prefetch") == AttachmentPrefetchAll);
       static const bool isAttachmentPrefetchSelected =
         (AppConfig::GetNum("attachment_prefetch") == AttachmentPrefetchSelected);
-      if (isAttachmentPrefetchAll || (isSelectedMessage && isAttachmentPrefetchSelected))
+      if (isAttachmentPrefetchAll || (isSelectedMessage && isAttachmentPrefetchSelected) ||
+          IsImageAttachment(fileInfo))
       {
         if (!UiModel::IsAttachmentDownloaded(fileInfo) && UiModel::IsAttachmentDownloadable(fileInfo))
         {
@@ -222,6 +308,15 @@ void UiHistoryView::Draw()
 
       std::wstring fileStr = attachmentIndicator + StrUtil::ToWString(fileName + fileStatus);
       wlines.insert(wlines.begin(), fileStr);
+
+      if ((fileInfo.fileStatus == FileStatusDownloaded) &&
+          FileUtil::Exists(fileInfo.filePath) && IsImageAttachment(fileInfo))
+      {
+        thumbnailPath = fileInfo.filePath;
+        thumbnailWidth = std::min(42, std::max(12, m_PaddedW / 3));
+        thumbnailRows = GetThumbnailRows(thumbnailPath);
+        wlines.insert(std::next(wlines.begin()), thumbnailRows, s_ThumbnailLine);
+      }
     }
 
     // Reactions
@@ -314,13 +409,23 @@ void UiHistoryView::Draw()
       reactionLines = 0;
     }
 
+    int thumbnailRow = thumbnailPath.empty() ? -1 : thumbnailRows - 1;
     for (auto wline = wlines.rbegin(); wline != wlines.rend(); ++wline)
     {
+      bool isThumbnail = (*wline == s_ThumbnailLine);
       bool isAttachment = (wline->rfind(attachmentIndicator, 0) == 0);
       bool isQuote = (wline->rfind(quoteIndicator, 0) == 0);
       bool isReaction = (reactionLines == 1) && (std::distance(wline, wlines.rbegin()) == 0);
 
-      if (isAttachment)
+      if (isThumbnail)
+      {
+        if (!thumbnailPath.empty() && (thumbnailRow == 0))
+        {
+          thumbnailPlacements.push_back({ thumbnailPath, y, thumbnailWidth, thumbnailRows });
+        }
+        --thumbnailRow;
+      }
+      else if (isAttachment)
       {
         wattron(m_PaddedWin, attributeText | colorPairTextAttachment);
       }
@@ -337,22 +442,28 @@ void UiHistoryView::Draw()
         wattron(m_PaddedWin, attributeText | colorPairText);
       }
 
-      const std::wstring wdisp = isReaction ? *wline : StrUtil::TrimPadWString(*wline, m_PaddedW);
-      mvwaddnwstr(m_PaddedWin, y, 0, wdisp.c_str(), std::min((int)wdisp.size(), m_PaddedW));
+      if (!isThumbnail)
+      {
+        // Leave wrapped message text unpadded: terminal URL detection joins adjacent
+        // rows, but an inserted trailing space splits a long URL at every wrap.
+        const std::wstring wdisp = (isReaction || (!isAttachment && !isQuote)) ?
+          *wline : StrUtil::TrimPadWString(*wline, m_PaddedW);
+        mvwaddnwstr(m_PaddedWin, y, 0, wdisp.c_str(), std::min((int)wdisp.size(), m_PaddedW));
+      }
 
-      if (isAttachment)
+      if (!isThumbnail && isAttachment)
       {
         wattroff(m_PaddedWin, attributeText | colorPairTextAttachment);
       }
-      else if (isQuote)
+      else if (!isThumbnail && isQuote)
       {
         wattroff(m_PaddedWin, attributeText | colorPairTextQuoted);
       }
-      else if (isReaction)
+      else if (!isThumbnail && isReaction)
       {
         wattroff(m_PaddedWin, attributeTextNormal | colorPairTextReaction);
       }
-      else
+      else if (!isThumbnail)
       {
         wattroff(m_PaddedWin, attributeText | colorPairText);
       }
@@ -434,6 +545,60 @@ void UiHistoryView::Draw()
   }
 
   wrefresh(m_PaddedWin);
+
+  if (s_ThumbnailDialogDepth != 0)
+  {
+    m_ThumbnailCommand.clear();
+    return;
+  }
+
+  std::string thumbnailCommand = ThumbnailCommand();
+  for (const auto& placement : thumbnailPlacements)
+  {
+    thumbnailCommand += " '" + StrUtil::EscapeSingleQuote(placement.path) + "' " +
+      std::to_string(m_X + 1) + " " + std::to_string(m_Y + placement.row + 1) + " " +
+      std::to_string(placement.width) + " " + std::to_string(placement.rows);
+  }
+  if (thumbnailCommand != m_ThumbnailCommand)
+  {
+    if (m_ThumbnailsVisible)
+    {
+      SysUtil::RunCommand(ThumbnailCommand());
+      m_ThumbnailsVisible = false;
+    }
+
+    m_ThumbnailCommand = thumbnailCommand;
+    m_ThumbnailCommandHasImages = !thumbnailPlacements.empty();
+    m_ThumbnailsVisible = m_ThumbnailCommandHasImages;
+
+    s_PendingThumbnailCommand = m_ThumbnailCommand;
+    s_ThumbnailDue = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(s_ThumbnailDebounceMs);
+  }
+}
+
+void UiHistoryView::SuspendThumbnails()
+{
+  ++s_ThumbnailDialogDepth;
+  s_PendingThumbnailCommand.clear();
+  SysUtil::RunCommand(ThumbnailCommand());
+}
+
+void UiHistoryView::ResumeThumbnails()
+{
+  if (s_ThumbnailDialogDepth != 0) --s_ThumbnailDialogDepth;
+  ++s_ThumbnailRevision;
+}
+
+void UiHistoryView::FlushThumbnails()
+{
+  if ((s_ThumbnailDialogDepth == 0) && !s_PendingThumbnailCommand.empty() &&
+      (std::chrono::steady_clock::now() >= s_ThumbnailDue))
+  {
+    const std::string command = std::move(s_PendingThumbnailCommand);
+    s_PendingThumbnailCommand.clear();
+    SysUtil::RunCommand(command);
+  }
 }
 
 int UiHistoryView::GetHistoryShowCount()

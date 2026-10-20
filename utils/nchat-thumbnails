@@ -1,0 +1,85 @@
+#!/bin/zsh
+umask 077
+
+thumbnail_rows() {
+  local width=$1 height=$2 orientation=${3:-1} rows
+  (( width > 0 && height > 0 )) || return 1
+  if (( orientation >= 5 && orientation <= 8 )); then
+    local swap=$width
+    width=$height
+    height=$swap
+  fi
+  rows=$(( (18 * height + width / 2) / width ))
+  (( rows < 8 )) && rows=8
+  (( rows > 28 )) && rows=28
+  print "$rows"
+}
+
+if [[ ${1:-} == --self-test ]]; then
+  (( $# == 1 )) || exit 2
+  [[ $(thumbnail_rows 1600 900) == 10 &&
+     $(thumbnail_rows 1000 1000) == 18 &&
+     $(thumbnail_rows 900 1600) == 28 &&
+     $(thumbnail_rows 600 2400) == 28 &&
+     $(thumbnail_rows 1600 900 6) == 28 ]]
+  exit $?
+fi
+
+if [[ ${1:-} == --rows ]]; then
+  (( $# == 2 )) || exit 2
+  metadata=$(/usr/bin/sips -g pixelWidth -g pixelHeight -g orientation "$2" 2>/dev/null) || exit 1
+  width=$(print -r -- "$metadata" | /usr/bin/awk '/pixelWidth:/ {print $2; exit}')
+  height=$(print -r -- "$metadata" | /usr/bin/awk '/pixelHeight:/ {print $2; exit}')
+  orientation=$(print -r -- "$metadata" | /usr/bin/awk '/orientation:/ {print $2; exit}')
+  [[ $orientation == <-> ]] || orientation=1
+  thumbnail_rows "$width" "$height" "$orientation"
+  exit $?
+fi
+
+(( $# % 5 == 0 )) || exit 2
+
+render_tty=/dev/tty
+if [[ -n ${STY:-} ]]; then
+  screen_pid=${STY%%.*}
+  attached_tty=$(/usr/sbin/lsof -a -p "$screen_pid" -Fn 2>/dev/null |
+    /usr/bin/sed -n 's|^n\(/dev/tty[^ ]*\)$|\1|p' |
+    /usr/bin/head -n 1)
+  [[ -w $attached_tty ]] || exit 0
+  render_tty=$attached_tty
+fi
+
+# Prepare every image before touching the cursor: no conversion may outlive a
+# saved terminal cursor and race a subsequent curses/screen redraw.
+render_payload=$'\e7\e_Ga=d,d=A,q=2\e\\'
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/nchat-thumbnails"
+/bin/mkdir -p "$cache_dir"
+
+image_id=200
+while (( $# >= 5 )); do
+  image=$1 x=$2 y=$3 width=$4 height=$5
+  shift 5
+  [[ -f $image ]] || continue
+
+  file_state=$(/usr/bin/stat -f '%m:%z' "$image") || continue
+  cache_key=$(printf '%s:%s' "$image" "$file_state" |
+    /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')
+  png="$cache_dir/$cache_key.png"
+
+  if [[ ! -s $png ]]; then
+    temporary_png=$(/usr/bin/mktemp -t nchat-tty-graphics-protocol.XXXXXX) || continue
+    if ! /usr/bin/sips -s format png -Z 756 "$image" --out "$temporary_png" >/dev/null 2>&1; then
+      /bin/unlink "$temporary_png"
+      continue
+    fi
+    /bin/mv "$temporary_png" "$png"
+  fi
+
+  encoded_path=$(printf '%s' "$png" | /usr/bin/base64 | /usr/bin/tr -d '\n')
+  printf -v placement '\033[%d;%dH\033_Ga=T,f=100,t=f,q=2,i=%d,c=%d,r=%d,C=1;%s\033\\' \
+    "$(( y + 1 ))" "$(( x + 1 ))" "$image_id" "$width" "$height" "$encoded_path"
+  render_payload+=$placement
+  (( image_id++ ))
+done
+
+render_payload+=$'\e8'
+printf '%s' "$render_payload" > "$render_tty"

@@ -124,6 +124,7 @@ void UiView::Draw()
   m_UiHistoryView->Draw();
   m_UiEntryView->Draw();
   curs_set(1);
+  UiHistoryView::FlushThumbnails();
 }
 
 void UiView::TerminalBell()

@@ -10,6 +10,7 @@
 #include "strutil.h"
 #include "uicolorconfig.h"
 #include "uimodel.h"
+#include "uihistoryview.h"
 #include "uiview.h"
 
 UiDialog::UiDialog(const UiDialogParams& p_Params)
@@ -18,6 +19,7 @@ UiDialog::UiDialog(const UiDialogParams& p_Params)
   , m_WReq(p_Params.wReq)
   , m_HReq(p_Params.hReq)
 {
+  UiHistoryView::SuspendThumbnails();
   Init();
   curs_set(0);
 }
@@ -25,6 +27,7 @@ UiDialog::UiDialog(const UiDialogParams& p_Params)
 UiDialog::~UiDialog()
 {
   Cleanup();
+  UiHistoryView::ResumeThumbnails();
   curs_set(1);
 }
 

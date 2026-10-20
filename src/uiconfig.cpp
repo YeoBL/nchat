@@ -76,6 +76,7 @@ void UiConfig::Init()
     { "terminal_title", "" },
     { "top_enabled", "1" },
     { "top_show_version", "0" },
+    { "thumbnail_command", "nchat-thumbnails" },
     { "transfer_send_caption", "1" },
     { "typing_status_share", "1" },
     { "undo_clear_input", "1" },

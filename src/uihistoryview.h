@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "uiviewbase.h"
@@ -19,6 +20,9 @@ public:
 
   virtual void Draw();
   int GetHistoryShowCount();
+  static void SuspendThumbnails();
+  static void ResumeThumbnails();
+  static void FlushThumbnails();
 
 private:
   std::string GetTimeString(int64_t p_TimeSent);
@@ -28,4 +32,8 @@ private:
   int m_PaddedH = 0;
   int m_PaddedW = 0;
   int m_HistoryShowCount = 0;
+  std::string m_ThumbnailCommand;
+  bool m_ThumbnailCommandHasImages = false;
+  bool m_ThumbnailsVisible = false;
+  uint64_t m_ThumbnailRevision = 0;
 };
