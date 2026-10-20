@@ -38,6 +38,7 @@
 #include "forumreadstate.h"
 #include "tgfeatures_util.h"
 #include "tgmembership.h"
+#include "tgnotificationstate.h"
 #include "log.h"
 #include "messagecache.h"
 #include "protocolutil.h"
@@ -88,6 +89,7 @@ auto overloaded(F... f)
 
 class TgChat::Impl
 {
+  friend struct TelegramMuteHandlerTest;
 public:
   Impl()
   {
@@ -222,6 +224,8 @@ private:
   bool TrackForumMessage(const td::td_api::message& p_Message);
   void UpdateForumReadInbox(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId);
   void ReconcileForumReads(int64_t p_ChatId);
+  void RequestNotificationScopes();
+  void NotifyMute(int64_t p_ChatId, bool p_IsMuted);
 
 private:
   std::thread m_ServiceThread;
@@ -249,6 +253,7 @@ private:
   std::map<int64_t, int64_t> m_SupergroupChats, m_BasicGroupChats;
   std::map<int64_t, ContactInfo> m_ContactInfos;
   std::map<int64_t, ChatType> m_ChatTypes;
+  TelegramMuteState m_NotificationMutes;
   std::map<int64_t, std::vector<int32_t>> m_ActiveStories;
   int64_t m_CurrentChat = 0;
   const char m_SponsoredMessageMsgIdPrefix = '+';
@@ -606,6 +611,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
     case GetChatsRequestType:
       {
         LOG_DEBUG("Get chats");
+        RequestNotificationScopes();
         Status::Set(m_ProfileId, Status::FlagFetching);
         std::shared_ptr<GetChatsRequest> getChatsRequest =
           std::static_pointer_cast<GetChatsRequest>(p_RequestMessage);
@@ -948,6 +954,9 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
             if (!tchat) return;
 
+            m_NotificationMutes.SetChat(*tchat);
+            RequestNotificationScopes();
+
             if (tchat->type_->get_id() == td::td_api::chatTypePrivate::ID)
             {
               m_ChatTypes[tchat->id_] = ChatPrivate;
@@ -993,13 +1002,17 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
               LOG_WARNING("unknown chat type %d", tchat->type_->get_id());
             }
 
-            if (isGetTypeOnly) return;
+            if (isGetTypeOnly)
+            {
+              NotifyMute(tchat->id_, m_NotificationMutes.IsMuted(tchat->id_));
+              return;
+            }
 
             ChatInfo chatInfo;
             chatInfo.id = StrUtil::NumToHex(tchat->id_);
             chatInfo.isUnread = (tchat->unread_count_ > 0);
             chatInfo.isUnreadMention = (tchat->unread_mention_count_ > 0);
-            chatInfo.isMuted = (tchat->notification_settings_->mute_for_ > 0);
+            chatInfo.isMuted = m_NotificationMutes.IsMuted(tchat->id_);
             int64_t lastMessageTimeSec =
               (tchat->last_message_ != nullptr) ? tchat->last_message_->date_ : 0;
             int64_t lastMessageHash =
@@ -2182,7 +2195,9 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("new chat update");
 
+    if (!update_new_chat.chat_) return;
     const int64_t contactId = update_new_chat.chat_->id_;
+    NotifyMute(contactId, m_NotificationMutes.SetChat(*update_new_chat.chat_));
     ContactInfo contactInfo;
     contactInfo.id = StrUtil::NumToHex(contactId);
     contactInfo.name = update_new_chat.chat_->title_;
@@ -2520,21 +2535,15 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("update chat notification settings");
 
-    auto notification_settings_ =
-      td::move_tl_object_as<td::td_api::chatNotificationSettings>(update_chat_notification_settings.notification_settings_);
-    if (notification_settings_)
+    const auto chatId = update_chat_notification_settings.chat_id_;
+    NotifyMute(chatId, m_NotificationMutes.SetChatSettings(chatId,
+      update_chat_notification_settings.notification_settings_.get()));
+    RequestNotificationScopes();
+    if (!m_NotificationMutes.HasChatScope(chatId))
     {
-      std::string chatId = StrUtil::NumToHex(update_chat_notification_settings.chat_id_);
-      bool isMuted = (notification_settings_->mute_for_ > 0);
-
-      LOG_TRACE("update mute notify %s %d", chatId.c_str(), isMuted);
-
-      std::shared_ptr<UpdateMuteNotify> updateMuteNotify =
-        std::make_shared<UpdateMuteNotify>(m_ProfileId);
-      updateMuteNotify->success = true;
-      updateMuteNotify->chatId = chatId;
-      updateMuteNotify->isMuted = isMuted;
-      CallMessageHandler(updateMuteNotify);
+      auto details = std::make_shared<DeferGetChatDetailsRequest>();
+      details->chatIds.push_back(StrUtil::NumToHex(chatId));
+      SendRequest(details);
     }
   },
   [this](td::td_api::updateMessageInteractionInfo& update_message_interaction_info)
@@ -2605,9 +2614,12 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("update option");
   },
-  [](td::td_api::updateScopeNotificationSettings&)
+  [this](td::td_api::updateScopeNotificationSettings& update)
   {
     LOG_TRACE("update scope notification settings");
+    for (const auto& change : m_NotificationMutes.SetScope(
+      TelegramMuteState::GetScope(update.scope_.get()), update.notification_settings_.get()))
+      NotifyMute(change.first, change.second);
   },
   [](td::td_api::updateUnreadChatCount&)
   {
@@ -2744,6 +2756,7 @@ void TgChat::Impl::OnAuthStateUpdate()
     }
     else
     {
+      RequestNotificationScopes();
       if (m_IsReinit)
       {
         SetProtocolUiControl(false);
@@ -4578,6 +4591,36 @@ void TgChat::Impl::ReconcileForumReads(int64_t p_ChatId)
           CallMessageHandler(notify);
         }
       });
+  }
+}
+
+void TgChat::Impl::NotifyMute(int64_t p_ChatId, bool p_IsMuted)
+{
+  auto notify = std::make_shared<UpdateMuteNotify>(m_ProfileId);
+  notify->success = true;
+  notify->chatId = StrUtil::NumToHex(p_ChatId);
+  notify->isMuted = p_IsMuted;
+  CallMessageHandler(notify);
+}
+
+void TgChat::Impl::RequestNotificationScopes()
+{
+  using namespace td::td_api;
+  for (const auto scope : {TelegramMuteState::Private, TelegramMuteState::Group, TelegramMuteState::Channel})
+  {
+    const auto request = m_NotificationMutes.BeginScopeRequest(scope);
+    if (!request) continue;
+    object_ptr<NotificationSettingsScope> queryScope;
+    if (scope == TelegramMuteState::Private) queryScope = make_object<notificationSettingsScopePrivateChats>();
+    else if (scope == TelegramMuteState::Group) queryScope = make_object<notificationSettingsScopeGroupChats>();
+    else queryScope = make_object<notificationSettingsScopeChannelChats>();
+    SendQuery(make_object<getScopeNotificationSettings>(std::move(queryScope)), [this, scope, request](Object object)
+    {
+      const auto settings = object && object->get_id() == scopeNotificationSettings::ID ?
+        static_cast<scopeNotificationSettings*>(object.get()) : nullptr;
+      for (const auto& change : m_NotificationMutes.SetScope(scope, settings, request))
+        NotifyMute(change.first, change.second);
+    });
   }
 }
 

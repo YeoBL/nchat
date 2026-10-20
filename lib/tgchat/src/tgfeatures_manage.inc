@@ -645,15 +645,17 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
 
   if (operation == "tg.chat.info")
   {
-    SendQuery(make_object<getChat>(chatId), [checked, finish, item](Object object)
+    SendQuery(make_object<getChat>(chatId), [this, checked, finish, item](Object object)
     {
       if (!checked(object)) return;
       const auto& chat = static_cast<const td::td_api::chat&>(*object);
       ClientActionResult result;
       result.title = chat.title_;
       result.text = "Unread messages: " + std::to_string(chat.unread_count_);
-      if (chat.notification_settings_)
-        result.text += chat.notification_settings_->mute_for_ > 0 ? "\nNotifications muted" : "\nNotifications enabled";
+      const bool muted = m_NotificationMutes.SetChat(chat);
+      RequestNotificationScopes();
+      result.text += !m_NotificationMutes.IsResolved(chat.id_) ? "\nNotification settings are still loading." :
+        muted ? "\nNotifications muted" : "\nNotifications enabled";
       if (chat.has_protected_content_) result.text += "\nSaving and forwarding are restricted by this chat.";
       if (chat.has_scheduled_messages_) result.text += "\nThere are scheduled messages.";
       auto mute = item("Mute or unmute", "tg.chat.mute", "0 unmutes; 3600 mutes for an hour", true);
