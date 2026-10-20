@@ -2686,10 +2686,18 @@ void UiModel::Impl::QueueTerminalNotification(const std::string& p_ProfileId, co
     LOG_DEBUG("notification queued: pending chats %zu", m_Notifications.PendingChats());
 }
 
+static std::string ContactDisplayName(const ContactInfo& p_ContactInfo)
+{
+  if (!p_ContactInfo.phone.empty() &&
+      (p_ContactInfo.name.empty() || p_ContactInfo.name.find("•") != std::string::npos))
+    return "+" + p_ContactInfo.phone;
+  return p_ContactInfo.name;
+}
+
 std::string UiModel::Impl::GetContactName(const std::string& p_ProfileId, const std::string& p_ChatId)
 {
   const ContactInfo& contactInfo = m_ContactInfos[p_ProfileId][p_ChatId];
-  const std::string& chatName = contactInfo.name;
+  const std::string chatName = ContactDisplayName(contactInfo);
   if (contactInfo.isSelf)
   {
     return "You";
@@ -2705,7 +2713,7 @@ std::string UiModel::Impl::GetContactName(const std::string& p_ProfileId, const 
 std::string UiModel::Impl::GetContactNameIncludingSelf(const std::string& p_ProfileId, const std::string& p_ChatId)
 {
   const ContactInfo& contactInfo = m_ContactInfos[p_ProfileId][p_ChatId];
-  const std::string& chatName = contactInfo.name;
+  const std::string chatName = ContactDisplayName(contactInfo);
   if (chatName.empty())
   {
     if (contactInfo.isSelf)
@@ -2725,7 +2733,7 @@ std::string UiModel::Impl::GetContactListName(const std::string& p_ProfileId, co
                                               bool p_AllowId, bool p_AllowAlias)
 {
   const ContactInfo& contactInfo = m_ContactInfos[p_ProfileId][p_ChatId];
-  const std::string& chatName = contactInfo.name;
+  const std::string chatName = ContactDisplayName(contactInfo);
   if (!p_AllowAlias && contactInfo.isAlias)
   {
     return "";

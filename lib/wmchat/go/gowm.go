@@ -274,6 +274,14 @@ func GetContactName(connId int, id string) string {
 	return name
 }
 
+func preferKnownName(connId int, id, name string) string {
+	known := GetContactName(connId, id)
+	if (name == "" || strings.HasPrefix(name, "+")) && known != id && known != "" && !strings.HasPrefix(known, "+") {
+		return known
+	}
+	return name
+}
+
 func HasSender(connId int, id string) bool {
 	var ok bool
 	mx.Lock()
@@ -1298,10 +1306,6 @@ func GetNameFromContactInfo(contactInfo types.ContactInfo) string {
 		return SanitizeName(contactInfo.BusinessName)
 	}
 
-	if len(contactInfo.RedactedPhone) > 0 {
-		return SanitizeName(contactInfo.RedactedPhone)
-	}
-
 	return ""
 }
 
@@ -1404,6 +1408,9 @@ func GetContacts(connId int) {
 	contacts, contErr := client.Store.Contacts.GetAllContacts(ctx)
 	if contErr != nil {
 		LOG_WARNING(fmt.Sprintf("get all contacts failed %#v", contErr))
+		// A failed lookup is not an empty address book. Keep the last known names.
+		CWmClearStatus(connId, FlagFetching)
+		return
 	} else {
 		LOG_TRACE(fmt.Sprintf("contacts %#v", contacts))
 		var userIdPhones map[string]string = make(map[string]string)      // phone
@@ -1416,12 +1423,18 @@ func GetContacts(connId int) {
 			if jid.Server != types.HiddenUserServer {
 				name := GetNameFromContactInfo(contactInfo)
 				userId := StrFromJid(jid)
+				phone := PhoneFromUserId(userId)
+				if name == "" && phone != "" {
+					name = "+" + phone
+				}
+				name = preferKnownName(connId, userId, name)
+				hasName := name != "" && name != "+"+phone
 				if len(name) > 0 {
 					userIdNames[userId] = name
-					userIdPhones[userId] = PhoneFromUserId(userId)
+					userIdPhones[userId] = phone
 
 					// add lid alias if available
-					if lid, _ := client.Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
+					if lid, _ := client.Store.LIDs.GetLIDForPN(ctx, jid); hasName && !lid.IsEmpty() {
 						userLid := StrFromJid(lid)
 						aliasUserIdNames[userLid] = name
 						userIdPhones[userLid] = userIdPhones[userId]
@@ -1437,25 +1450,29 @@ func GetContacts(connId int) {
 			if jid.Server == types.HiddenUserServer {
 				name := GetNameFromContactInfo(contactInfo)
 				userId := StrFromJid(jid)
-				if len(name) > 0 {
-					// check for phone-number based id
-					if pid, _ := client.Store.LIDs.GetPNForLID(ctx, jid); !pid.IsEmpty() {
-						// check that it's present in the regular userIdNames map
-						userPid := StrFromJid(pid)
-						if pname, ok := userIdNames[userPid]; ok {
-							// if found, treat this jid as an alias, using phone-number based name
-							aliasUserIdNames[userId] = pname
-							userIdPhones[userId] = userIdPhones[userPid]
-						} else {
-							// if not found, use only phone number, keep name from lid
-							userIdNames[userId] = name
-							userIdPhones[userId] = PhoneFromUserId(userPid)
+				name = preferKnownName(connId, userId, name)
+				// check for phone-number based id
+				if pid, _ := client.Store.LIDs.GetPNForLID(ctx, jid); !pid.IsEmpty() {
+					// Prefer a saved PN contact name, then this LID's name, then its number.
+					userPid := StrFromJid(pid)
+					phone := PhoneFromUserId(userPid)
+					if pname, ok := userIdNames[userPid]; ok && pname != "+"+phone {
+						aliasUserIdNames[userId] = pname
+						userIdPhones[userId] = phone
+					} else {
+						if name == "" && phone != "" {
+							name = "+" + phone
 						}
-
-						continue
+						if name != "" {
+							userIdNames[userId] = name
+							userIdPhones[userId] = phone
+						}
 					}
+					continue
+				}
 
-					// otherwise, treat it as non-alias, and use lid-based name
+				// otherwise, treat it as non-alias, and use lid-based name
+				if name != "" {
 					userIdNames[userId] = name
 					userIdPhones[userId] = ""
 				} else {
@@ -1467,7 +1484,10 @@ func GetContacts(connId int) {
 		// add alias names based on local cache
 		senders := GetAllSenders(connId)
 		for userId, name := range senders {
-			if _, ok := userIdNames[userId]; ok {
+			if existing, ok := userIdNames[userId]; ok {
+				if existing == "+"+userIdPhones[userId] && name != "" && !strings.Contains(name, "•") && !strings.HasPrefix(name, "+") {
+					userIdNames[userId] = name
+				}
 				RemoveSender(connId, userId)
 			} else if _, ok := aliasUserIdNames[userId]; ok {
 				RemoveSender(connId, userId)
@@ -1666,11 +1686,25 @@ func (handler *WmEventHandler) ProcessMessageInfo(messageInfo types.MessageInfo)
 		return
 	}
 	userId := GetUserId(client, &messageInfo.Chat, &messageInfo.Sender)
+	pushName := SanitizeName(messageInfo.PushName)
+	if strings.Contains(pushName, "•") {
+		pushName = ""
+	}
+	if pushName != "" &&
+		(!HasContact(connId, userId) || strings.HasPrefix(GetContactName(connId, userId), "+")) {
+		AddSender(connId, userId, pushName)
+		if GetNamesSynced(connId) {
+			CWmNewContactsNotify(connId, userId, pushName, "", BoolToInt(false), BoolToInt(true), NotifyDirect)
+			AddContactName(connId, userId, pushName)
+		}
+		return
+	}
 	if messageInfo.Sender.Server != types.HiddenUserServer {
 		return
 	}
 
-	if HasContact(connId, userId) || HasSender(connId, userId) {
+	if HasSender(connId, userId) ||
+		(HasContact(connId, userId) && !strings.HasPrefix(GetContactName(connId, userId), "+")) {
 		return
 	}
 
@@ -1678,7 +1712,16 @@ func (handler *WmEventHandler) ProcessMessageInfo(messageInfo types.MessageInfo)
 	ctx := context.TODO()
 	if pid, _ := client.Store.LIDs.GetPNForLID(ctx, messageInfo.Sender); !pid.IsEmpty() {
 		userPid := StrFromJid(pid)
-		name := PhoneFromUserId(userPid)
+		name := SanitizeName(messageInfo.PushName)
+		if strings.Contains(name, "•") {
+			name = ""
+		}
+		if name == "" {
+			if HasContact(connId, userId) {
+				return
+			}
+			name = "+" + PhoneFromUserId(userPid)
+		}
 		LOG_TRACE(fmt.Sprintf("add sender %s %s", userId, name))
 		AddSender(connId, userId, name)
 
@@ -3200,6 +3243,9 @@ func WmGetGroupMembers(connId int, chatId string) int {
 	for _, participant := range groupInfo.Participants {
 		memberId := StrFromJid(participant.JID)
 		memberName := GetContactName(connId, memberId)
+		if memberName == memberId && participant.DisplayName != "" {
+			memberName = SanitizeName(participant.DisplayName)
+		}
 		members = append(members, MemberInfo{Id: memberId, Name: memberName})
 	}
 	membersJsonBytes, jsonErr := json.Marshal(members)
