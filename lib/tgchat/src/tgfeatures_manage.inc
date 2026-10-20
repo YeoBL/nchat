@@ -237,7 +237,7 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
   }
 
 
-  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" || operation == "tg.send.voice" || operation == "tg.send.videoNote" || operation == "tg.poll.create")
+  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" || operation == "tg.send.voice" || operation == "tg.send.videoNote" || operation == "tg.poll.create" || operation == "tg.contact.send")
   {
     auto send = make_object<sendMessage>();
     send->chat_id_ = chatId;
@@ -352,6 +352,20 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
       }
       else poll->type_ = make_object<inputPollTypeRegular>(false);
       send->input_message_content_ = std::move(poll);
+    }
+    else if (operation == "tg.contact.send")
+    {
+      const std::string phone = TgManage::Trim(value("phone"));
+      if (TgManage::Trim(value("first")).empty() || phone.empty() ||
+          phone.find_first_not_of("+0123456789 ()-") != std::string::npos ||
+          std::count_if(phone.begin(), phone.end(), [](char c) { return c >= '0' && c <= '9'; }) < 3)
+      {
+        fail("Enter a contact's first name and valid phone number.");
+        return true;
+      }
+      auto contact = make_object<inputMessageContact>();
+      contact->contact_ = make_object<td::td_api::contact>(phone, value("first"), value("last"), "", 0);
+      send->input_message_content_ = std::move(contact);
     }
     SendQuery(std::move(send), [this, request, checked, finish, operation](Object object)
     {
