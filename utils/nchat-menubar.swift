@@ -399,7 +399,7 @@ final class ChatButton: NSButton {
     }
 }
 
-final class UnreadPopoverController: NSViewController {
+final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     let scroll = NSScrollView()
     let document = FlippedView()
     let backButton = NSButton(title: "", target: nil, action: nil)
@@ -408,6 +408,21 @@ final class UnreadPopoverController: NSViewController {
     let options = NSPopUpButton(frame: .zero, pullsDown: true)
     let closeButton = NSButton(title: "", target: nil, action: nil)
     let headerRule = NSBox()
+    let composer = FlippedView()
+    let replyTitle = NSTextField(labelWithString: "")
+    let replyField = NSTextView()
+    let replyScroll = NSScrollView()
+    let sendButton = NSButton(title: "Send", target: nil, action: nil)
+    let closeReplyButton = NSButton(title: "×", target: nil, action: nil)
+    let replyStatus = NSTextField(wrappingLabelWithString: "")
+    var replyChat: UnreadChat?
+    var replyReference = ""
+    var drafts: [String: String] = [:]
+    var draftChats: [String: UnreadChat] = [:]
+    var draftReferences: [String: String] = [:]
+    var sending: Set<String> = []
+    var sendStatuses: [String: String] = [:]
+    var unconfirmedTexts: [String: String] = [:]
     var state = Snapshot()
     var expanded: Set<String> = []
     var previews: [String: [PreviewMessage]] = [:]
@@ -416,6 +431,7 @@ final class UnreadPopoverController: NSViewController {
     var onClose: (() -> Void)?
     var onCollapse: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onSend: ((UnreadChat, String, String) -> Void)?
     var onResize: ((NSSize) -> Void)?
     var onOpenImage: (URL) -> Void = openFullImageInPreview
     var onImageOpenError: (String) -> Void = imageOpenError
@@ -466,6 +482,42 @@ final class UnreadPopoverController: NSViewController {
         backButton.setAccessibilityLabel("All chats — collapse message previews")
         backButton.isHidden = true
         header.addSubview(backButton)
+        composer.isHidden = true
+        view.addSubview(composer)
+        replyTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        replyTitle.lineBreakMode = .byTruncatingTail
+        composer.addSubview(replyTitle)
+        replyScroll.borderType = .bezelBorder
+        replyScroll.hasVerticalScroller = true
+        replyScroll.autohidesScrollers = true
+        replyField.isRichText = false
+        replyField.font = .systemFont(ofSize: 13)
+        replyField.textColor = .textColor
+        replyField.backgroundColor = .textBackgroundColor
+        replyField.textContainerInset = NSSize(width: 6, height: 6)
+        replyField.isHorizontallyResizable = false
+        replyField.isVerticallyResizable = true
+        replyField.autoresizingMask = [.width]
+        replyField.textContainer?.widthTracksTextView = true
+        replyField.delegate = self
+        replyField.setAccessibilityLabel("Reply text. Use the Send button to send.")
+        replyScroll.documentView = replyField
+        composer.addSubview(replyScroll)
+        sendButton.bezelStyle = .rounded
+        sendButton.target = self
+        sendButton.action = #selector(sendReply)
+        composer.addSubview(sendButton)
+        replyStatus.font = .systemFont(ofSize: 11)
+        replyStatus.textColor = .secondaryLabelColor
+        replyStatus.maximumNumberOfLines = 3
+        composer.addSubview(replyStatus)
+        let cancel = closeReplyButton
+        cancel.target = self
+        cancel.action = #selector(closeComposer)
+        cancel.isBordered = false
+        cancel.frame = NSRect(x: width - 36, y: 5, width: 24, height: 24)
+        cancel.setAccessibilityLabel("Close reply and keep draft")
+        composer.addSubview(cancel)
     }
 
     override func viewDidLayout() {
@@ -475,7 +527,7 @@ final class UnreadPopoverController: NSViewController {
 
     private func layoutScroll() {
         let top: CGFloat = 46
-        let bottom: CGFloat = 0
+        let bottom: CGFloat = replyChat == nil ? 0 : 158
         backButton.isHidden = expanded.isEmpty
         header.frame = NSRect(x: 0, y: 0, width: width, height: top)
         backButton.frame = NSRect(x: 10, y: 7, width: 88, height: 30)
@@ -485,6 +537,15 @@ final class UnreadPopoverController: NSViewController {
         closeButton.frame = NSRect(x: width - 40, y: 7, width: 30, height: 30)
         headerRule.frame = NSRect(x: 14, y: 45, width: width - 28, height: 1)
         scroll.frame = NSRect(x: 0, y: top, width: width, height: max(0, view.bounds.height - top - bottom))
+        composer.isHidden = replyChat == nil
+        composer.frame = NSRect(x: 0, y: view.bounds.height - bottom, width: width, height: bottom)
+        replyTitle.frame = NSRect(x: 16, y: 10, width: width - 58, height: 18)
+        closeReplyButton.frame = NSRect(x: width - 36, y: 5, width: 24, height: 24)
+        replyScroll.frame = NSRect(x: 16, y: 36, width: width - 32, height: 65)
+        replyField.setFrameSize(NSSize(width: replyScroll.contentSize.width, height: max(65, replyField.frame.height)))
+        replyField.textContainer?.containerSize = NSSize(width: replyScroll.contentSize.width, height: .greatestFiniteMagnitude)
+        replyStatus.frame = NSRect(x: 16, y: 109, width: width - 108, height: 45)
+        sendButton.frame = NSRect(x: width - 88, y: 109, width: 72, height: 30)
         // Short lists must never retain a scrolled origin after the popover resizes.
         if document.frame.height <= scroll.contentView.bounds.height {
             scroll.contentView.scroll(to: .zero)
@@ -492,7 +553,8 @@ final class UnreadPopoverController: NSViewController {
     }
 
     override func cancelOperation(_ sender: Any?) {
-        if expanded.isEmpty { onClose?() } else { onCollapse?() }
+        if replyChat != nil { closeComposer() }
+        else if expanded.isEmpty { onClose?() } else { onCollapse?() }
     }
 
     @objc func collapseAll() { onCollapse?() }
@@ -625,12 +687,38 @@ final class UnreadPopoverController: NSViewController {
                 } else {
                     y += label(errors[chat.key] ?? "Loading unread messages…", x: 60, y: y + 8, width: width - 85, secondary: true, lines: 2) + 24
                 }
+                if let reference = previews[chat.key]?.last, !reference.id.isEmpty {
+                    let reply = ChatButton(frame: NSRect(x: 54, y: y + 3, width: 82, height: 28))
+                    reply.title = "Reply…"
+                    reply.bezelStyle = .rounded
+                    reply.isBordered = true
+                    reply.alignment = .left
+                    reply.font = .systemFont(ofSize: 12)
+                    reply.chat = chat
+                    reply.target = self
+                    reply.action = #selector(beginReply(_:))
+                    reply.setAccessibilityLabel("Reply to \(clean(chat.name)) on \(chat.service)")
+                    document.addSubview(reply)
+                    y += 38
+                }
             }
             y += 6
         }
+        for chat in draftChats.values.sorted(by: { $0.name < $1.name }) where
+            !state.chats.contains(where: { $0.key == chat.key }) && !(drafts[chat.key] ?? "").isEmpty && replyChat?.key != chat.key {
+            let resume = ChatButton(frame: NSRect(x: 16, y: y + 4, width: width - 32, height: 30))
+            resume.title = "Resume reply to \(clean(chat.name)) · \(chat.service)"
+            resume.isBordered = false
+            resume.alignment = .left
+            resume.chat = chat
+            resume.target = self
+            resume.action = #selector(beginReply(_:))
+            document.addSubview(resume)
+            y += 38
+        }
         y += 8
         document.frame = NSRect(x: 0, y: 0, width: width, height: y)
-        let bottom: CGFloat = 0
+        let bottom: CGFloat = replyChat == nil ? 0 : 158
         let size = NSSize(width: 454, height: min(maxHeight, y + bottom + 46))
         // Do not publish the final size via preferredContentSize: AppKit can
         // apply that separately and bypass the intermediate animation frames.
@@ -643,6 +731,7 @@ final class UnreadPopoverController: NSViewController {
         layoutScroll()
         scroll.contentView.scroll(to: NSPoint(x: 0, y: min(offset, max(0, y - scroll.contentView.bounds.height))))
         scroll.reflectScrolledClipView(scroll.contentView)
+        updateComposer()
     }
 
     @objc func toggle(_ sender: ChatButton) {
@@ -659,6 +748,65 @@ final class UnreadPopoverController: NSViewController {
     }
     @objc func quitApp() { onQuit?() }
 
+    @objc func beginReply(_ sender: ChatButton) {
+        guard let chat = sender.chat, let reference = previews[chat.key]?.last?.id ?? draftReferences[chat.key], !reference.isEmpty else { return }
+        saveDraft()
+        replyChat = chat
+        replyReference = reference
+        replyField.string = drafts[chat.key] ?? ""
+        rebuild()
+        view.window?.makeFirstResponder(replyField)
+    }
+
+    func saveDraft() {
+        if let chat = replyChat {
+            drafts[chat.key] = replyField.string
+            draftChats[chat.key] = chat
+            draftReferences[chat.key] = replyReference
+        }
+    }
+
+    func textDidChange(_ notification: Notification) { saveDraft(); updateComposer() }
+
+    func updateComposer() {
+        guard let chat = replyChat else { return }
+        replyTitle.stringValue = "Reply to \(clean(chat.name)) · \(chat.service)"
+        replyTitle.toolTip = replyTitle.stringValue
+        let text = replyField.string
+        let busy = sending.contains(chat.key)
+        sendButton.title = busy ? "Sending…" : "Send"
+        sendButton.isEnabled = !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            text.utf16.count <= 4000 && unconfirmedTexts[chat.key] != text
+        replyStatus.stringValue = text.utf16.count > 4000 ? "Reply is too long (maximum 4,000 characters)." :
+            (sendStatuses[chat.key] ?? "Only Send transmits your reply.")
+    }
+
+    @objc func closeComposer() {
+        saveDraft()
+        replyChat = nil
+        rebuild()
+    }
+
+    @objc func sendReply() {
+        guard let chat = replyChat, sendButton.isEnabled else { return }
+        saveDraft()
+        onSend?(chat, replyReference, replyField.string)
+    }
+
+    func completeReply(_ chat: UnreadChat, text: String, outcome: ReplyOutcome) {
+        sending.remove(chat.key)
+        switch outcome {
+        case .accepted:
+            sendStatuses[chat.key] = "Submitted to \(chat.service)."
+            if drafts[chat.key] == text { drafts[chat.key] = "" }
+            if replyChat?.key == chat.key && replyField.string == text { replyField.string = "" }
+        case .failed(let detail): sendStatuses[chat.key] = detail
+        case .unknown:
+            sendStatuses[chat.key] = "Send unconfirmed. Check the chat before resending."
+            unconfirmedTexts[chat.key] = text
+        }
+        updateComposer()
+    }
 }
 
 final class PopoverSizer: NSObject {
@@ -766,6 +914,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         content.onClose = { [weak self] in self?.popover.performClose(nil) }
         content.onCollapse = { [weak self] in self?.collapseChats() }
         content.onQuit = { NSApplication.shared.terminate(nil) }
+        content.onSend = { [weak self] chat, reference, text in self?.sendReply(chat, reference: reference, text: text) }
         let source = DispatchSource.makeTimerSource(queue: cacheQueue)
         source.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(200))
         source.setEventHandler { [weak self] in
@@ -852,6 +1001,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func collapseChats() {
         imageRequests.removeAll()
+        if content.replyChat != nil { content.closeComposer() }
         previewRequests.removeAll()
         content.expanded.removeAll()
         content.previews.removeAll()
@@ -895,6 +1045,17 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    func sendReply(_ chat: UnreadChat, reference: String, text: String) {
+        guard !content.sending.contains(chat.key) else { return }
+        content.sending.insert(chat.key)
+        content.sendStatuses[chat.key] = "Submitting reply…"
+        content.updateComposer()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let outcome = WidgetReplyBridge.submit(cachePath: chat.cachePath, chatID: chat.id, referenceID: reference, text: text)
+            DispatchQueue.main.async { self?.content.completeReply(chat, text: text, outcome: outcome) }
+        }
+    }
+
     func popoverDidShow(_ notification: Notification) {
         stopDismissMonitors()
         // Mouse-only monitors exist solely while this popover is open. They do
@@ -915,7 +1076,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         stopDismissMonitors()
-        collapseChats() // Every dismissal reopens at the chat list.
+        collapseChats() // Every dismissal reopens at the chat list; closeComposer preserves drafts.
         recordUIState()
     }
 
