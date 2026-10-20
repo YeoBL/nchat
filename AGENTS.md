@@ -18,6 +18,10 @@ fork is `YeoBL/nchat`; `upstream` is the original `d99kris/nchat` repository.
 - Future nchat changes should also be committed, with the feature/access guide
   updated when behavior or shortcuts change. Publish only to the personal fork,
   never to the original upstream repository.
+- Keep the root `changes.md` table current. Each customization needs a
+  description, implementation commit link, access/shortcut, verification and
+  relevant service limitations. Compare against the recorded `vanilla-base`,
+  not whichever upstream release happens to be newest.
 
 The initial customization history is a reconstruction from an existing working
 copy, not a claim that each feature was originally authored on its commit date.

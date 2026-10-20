@@ -1,6 +1,13 @@
 nchat
 =====
 
+This is the personal [YeoBL/nchat](https://github.com/YeoBL/nchat) fork.
+See [changes.md](changes.md) for the complete customization table, implementation
+commits, shortcuts, verification and service limitations. The recorded vanilla
+baseline is the `vanilla-base` tag (nchat 5.17.26), not the latest upstream branch.
+Optional portable configuration examples are in
+[doc/custom-settings.md](doc/custom-settings.md).
+
 | **Linux** | **Mac** |
 |-----------|---------|
 | [![Linux](https://github.com/d99kris/nchat/workflows/Linux/badge.svg)](https://github.com/d99kris/nchat/actions?query=workflow%3ALinux) | [![macOS](https://github.com/d99kris/nchat/workflows/macOS/badge.svg)](https://github.com/d99kris/nchat/actions?query=workflow%3AmacOS) |
@@ -56,6 +63,11 @@ Command-line Options:
 
 Interactive Commands:
 
+    F2          account tools, topics, stories/status, recording and more
+    F3          search cached messages across chats with filters
+    F4          local chat folders
+    F5          local bookmarks
+    F6          select multiple messages and review bulk actions
     PageDn      history next page
     PageUp      history previous page
     Tab         next chat
@@ -1278,9 +1290,10 @@ Project Scope
 
 Limitations
 -----------
-There are no plans to support the following features:
-- Telegram secret chats
-- Voice / video calls
+Voice / video calls remain unsupported. Unlike upstream, this fork adds
+device-local Telegram Secret Chats through F2. Existing phone Secret Chats
+cannot be imported; timed/protected attachments are not externally opened.
+Read the local-cache and deletion-retention warning before using this feature.
 
 Additionally, WhatsApp and Signal are only supported on macOS and glibc-based
 Linux systems. Thus, it is not supported on musl-based operating systems, such
