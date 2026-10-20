@@ -26,6 +26,8 @@ public:
   virtual ~UiView();
 
   void TerminalBell();
+  static void ClearTerminalBadge();
+  static bool SyncTerminalBadge(bool p_Active);
   void SetEmojiEnabled(bool p_Enabled);
   bool GetEmojiEnabled();
   void SetTopEnabled(bool p_Enabled);

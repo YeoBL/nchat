@@ -59,10 +59,12 @@ UiModel::Impl::~Impl()
 void UiModel::Impl::Init()
 {
   m_View->Init();
+  m_NextBadgeSyncMs = 0;
 }
 
 void UiModel::Impl::Cleanup()
 {
+  m_View->ClearTerminalBadge();
 }
 
 void UiModel::Impl::AnyUserKeyInput()
@@ -1756,8 +1758,12 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           std::string& oldestMessageId = m_OldestMessageId[profileId][chatId];
           int64_t& oldestMessageTime = m_OldestMessageTime[profileId][chatId];
 
-          for (auto& chatMessage : chatMessages)
+          for (auto chatMessage : chatMessages)
           {
+            if (!chatMessage.isOutgoing && m_Notifications.IsRead({profileId, chatId}, chatMessage.id))
+              chatMessage.isRead = true;
+            if (!chatMessage.isOutgoing && chatMessage.isRead)
+              m_Notifications.Read({profileId, chatId}, chatMessage.id, "", chatMessage.timeSent);
             hasNewMessage = true;
             if (messages.insert({ chatMessage.id, chatMessage }).second)
             {
@@ -1767,6 +1773,8 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
             {
               messages[chatMessage.id] = chatMessage;
             }
+
+            QueueTerminalNotification(profileId, chatId, chatMessage);
 
             if (newMessagesNotify->sequence)
             {
@@ -1874,6 +1882,8 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         {
           std::string chatId = deleteMessageNotify->chatId;
           std::string msgId = deleteMessageNotify->msgId;
+
+          m_Notifications.Remove({profileId, chatId}, msgId);
 
           std::vector<std::string>& messageVec = m_MessageVec[profileId][chatId];
           messageVec.erase(std::remove(messageVec.begin(), messageVec.end(), msgId), messageVec.end());
@@ -2092,6 +2102,7 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         if (deleteChatNotify->success)
         {
           std::string chatId = deleteChatNotify->chatId;
+          m_Notifications.Read({profileId, chatId}, "");
           LOG_TRACE("chat deleted %s", chatId.c_str());
 
           for (auto it = m_ChatVec.begin(); it != m_ChatVec.end(); /* incremented in loop */)
@@ -2343,8 +2354,29 @@ bool UiModel::Impl::Process()
   if (m_TriggerTerminalBell)
   {
     m_TriggerTerminalBell = false;
-    m_View->TerminalBell();
+    // Search failures are not unread messages and must not set a Dock badge.
+    LOG_DEBUG("search returned no message");
   }
+
+#ifdef __APPLE__
+  const bool bell = m_Notifications.TakeBell();
+  const bool clear = m_Notifications.TakeClear();
+  const int64_t badgeNow = TimeUtil::GetCurrentTimeMSec();
+  if (bell || clear || (m_NextBadgeSyncMs >= 0 && badgeNow >= m_NextBadgeSyncMs))
+  {
+    const bool active = m_Notifications.PendingChats() > 0;
+    const bool applied = m_View->SyncTerminalBadge(active);
+    if (bell || clear)
+      LOG_DEBUG("notification badge desired=%d acknowledged=%d pending chats=%zu", active, applied,
+                m_Notifications.PendingChats());
+    // Kitty can clear its badge on focus without reading any chat. Reconcile
+    // while we own an unread badge, and retry failed writes (including clears).
+    m_NextBadgeSyncMs = (active || !applied) ? badgeNow + 2000 : -1;
+  }
+#else
+  if (m_Notifications.TakeBell()) m_View->TerminalBell();
+  if (m_Notifications.TakeClear()) m_View->ClearTerminalBadge();
+#endif
 
   ProcessTimers();
 
@@ -2519,15 +2551,9 @@ void UiModel::Impl::UpdateChatInfoIsUnread(const std::string& p_ProfileId, const
       {
         const bool receivedAfterConnect = (m_ConnectTime.count(p_ProfileId) > 0) &&
           (chatMessage.timeSent > m_ConnectTime[p_ProfileId]);
-        if (receivedAfterConnect)
+        if (receivedAfterConnect && !NotificationState::IsMembershipEvent(chatMessage.text))
         {
-          static const bool terminalBellActive = UiConfig::GetBool("terminal_bell_active");
-          static const bool terminalBellInactive = UiConfig::GetBool("terminal_bell_inactive");
-          bool terminalBell = m_TerminalActive ? terminalBellActive : terminalBellInactive;
-          if (terminalBell)
-          {
-            m_TriggerTerminalBell = true;
-          }
+          QueueTerminalNotification(p_ProfileId, p_ChatId, chatMessage);
 
           bool desktopNotify = false;
           if (m_TerminalActive)
@@ -2564,6 +2590,27 @@ void UiModel::Impl::UpdateChatInfoIsUnread(const std::string& p_ProfileId, const
 
     profileChatInfos[p_ChatId].isUnread = isUnread;
   }
+}
+
+void UiModel::Impl::QueueTerminalNotification(const std::string& p_ProfileId, const std::string& p_ChatId,
+                                            const ChatMessage& p_Message)
+{
+  if (m_LeftChats[p_ProfileId].count(p_ChatId)) return;
+  if (p_Message.isOutgoing || p_Message.isRead || p_Message.isDeleted ||
+      NotificationState::IsMembershipEvent(p_Message.text)) return;
+  const auto connected = m_ConnectTime.find(p_ProfileId);
+  if (connected == m_ConnectTime.end() || p_Message.timeSent <= connected->second) return;
+  const auto chat = m_ChatInfos[p_ProfileId].find(p_ChatId);
+  if (chat == m_ChatInfos[p_ProfileId].end() || chat->second.isArchived) return;
+  static const bool mutedNotify = UiConfig::GetBool("muted_notify_unread");
+  static const bool everyUnread = UiConfig::GetBool("notify_every_unread");
+  if ((!mutedNotify && chat->second.isMuted && !p_Message.hasMention) ||
+      (!everyUnread && chat->second.isUnread)) return;
+  static const bool active = UiConfig::GetBool("terminal_bell_active");
+  static const bool inactive = UiConfig::GetBool("terminal_bell_inactive");
+  if ((m_TerminalActive ? active : inactive) &&
+      m_Notifications.Add({p_ProfileId, p_ChatId}, p_Message.id, p_Message.timeSent))
+    LOG_DEBUG("notification queued: pending chats %zu", m_Notifications.PendingChats());
 }
 
 std::string UiModel::Impl::GetContactName(const std::string& p_ProfileId, const std::string& p_ChatId)

@@ -7,6 +7,8 @@
 
 #include "uiview.h"
 
+#include "terminalbadge.h"
+
 #include "log.h"
 #include "uiconfig.h"
 #include "uientryview.h"
@@ -127,7 +129,31 @@ void UiView::Draw()
 void UiView::TerminalBell()
 {
   LOG_DEBUG("bell");
+#ifdef __APPLE__
+  // Own both transitions. Kitty's BEL badge caches its label internally, so
+  // externally clearing it can prevent the next identical BEL from restoring it.
+  if (SetKittyBadge(true)) return;
+#endif
   beep();
+}
+
+void UiView::ClearTerminalBadge()
+{
+  SyncTerminalBadge(false);
+}
+
+bool UiView::SyncTerminalBadge(bool p_Active)
+{
+#ifdef __APPLE__
+  if (!SetKittyBadge(p_Active))
+  {
+    LOG_DEBUG("terminal badge awaiting Kitty acknowledgement; will retry");
+    return false;
+  }
+#else
+  (void)p_Active;
+#endif
+  return true;
 }
 
 void UiView::SetEmojiEnabled(bool p_Enabled)
