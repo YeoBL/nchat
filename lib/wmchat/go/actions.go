@@ -109,6 +109,9 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			r.Items = append(r.Items, action("Mute chat", "Mute indefinitely on your linked devices", "mute_chat", map[string]string{"muted": "true"}, nil, true))
 			r.Items = append(r.Items, action("Unmute chat", "Restore notifications", "mute_chat", map[string]string{"muted": "false"}, nil, true))
 			r.Items = append(r.Items, action("Mark unread on WhatsApp", "Set WhatsApp's chat marker; nchat keeps read messages read", "mark_unread", nil, nil, true))
+			if strings.HasSuffix(p["chatId"], "@g.us") {
+				r.Items = append(r.Items, action("Group information", "Members, settings and invitations", "group_info", nil, nil, false))
+			}
 		}
 		if p["msgId"] != "" {
 			r.Items = append(r.Items, action("Star message", "Save in WhatsApp starred messages", "star_message", map[string]string{"starred": "true"}, nil, true))
@@ -165,6 +168,8 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			return actionError("Star message", err)
 		}
 		return actionOK("Starred message", "WhatsApp starred-message setting updated.")
+	case "group_info", "group_invite", "group_name", "group_description", "group_announce", "group_locked", "group_member", "group_leave":
+		return wmGroupAction(ctx, connID, cli, op, p, chat)
 	}
 	return actionError("WhatsApp", fmt.Errorf("unknown action"))
 }
@@ -194,6 +199,18 @@ func validateNewPoll(question, rawOptions, rawLimit string) ([]string, int, erro
 	return options, limit, nil
 }
 
+func validPhoneNumber(phone string) bool {
+	digits := 0
+	for i, r := range phone {
+		if r >= '0' && r <= '9' {
+			digits++
+		} else if r != ' ' && r != '-' && r != '(' && r != ')' && !(r == '+' && i == 0) {
+			return false
+		}
+	}
+	return digits >= 7 && digits <= 15
+}
+
 func sendActionMessage(ctx context.Context, connID int, cli *whatsmeow.Client, chat types.JID, msg *waE2E.Message, title string) actionResult {
 	response, err := cli.SendMessage(ctx, chat, msg)
 	if err != nil {
@@ -205,4 +222,115 @@ func sendActionMessage(ctx context.Context, connID int, cli *whatsmeow.Client, c
 		}
 	}
 	return actionOK(title, "Sent to WhatsApp.")
+}
+
+func wmGroupAction(ctx context.Context, connID int, cli *whatsmeow.Client, op string, p map[string]string, chat types.JID) actionResult {
+	if chat.Server != types.GroupServer {
+		return actionError("Group", fmt.Errorf("choose a WhatsApp group"))
+	}
+	info, err := cli.GetGroupInfo(ctx, chat)
+	if err != nil {
+		return actionError("Group", err)
+	}
+	admin := false
+	for _, member := range info.Participants {
+		if (member.IsAdmin || member.IsSuperAdmin) && (IsSelfUser(cli, member.JID.String()) || IsSelfUser(cli, member.PhoneNumber.String()) || IsSelfUser(cli, member.LID.String())) {
+			admin = true
+		}
+	}
+	if op == "group_info" {
+		r := actionOK(info.Name, info.Topic)
+		for _, m := range info.Participants {
+			id := m.JID.String()
+			name := actionContactName(connID, id)
+			if name == id && m.DisplayName != "" {
+				name = SanitizeName(m.DisplayName)
+			}
+			role := "Member"
+			if m.IsAdmin || m.IsSuperAdmin {
+				role = "Admin"
+			}
+			r.Items = append(r.Items, action(name, role, "open_chat", map[string]string{"chatId": id}, nil, false))
+		}
+		r.Items = append(r.Items, action("Leave group", "Leave this group on WhatsApp", "group_leave", nil, nil, true))
+		if admin {
+			r.Items = append(r.Items,
+				action("Invite link", "Retrieve the current group invite link", "group_invite", nil, nil, false),
+				action("Change group name", "Set a new group name", "group_name", nil, []actionField{{"name", "Group name", info.Name}}, true),
+				action("Change description", "Set the group description", "group_description", nil, []actionField{{"description", "Description", info.Topic}}, true),
+				action("Set who can send", "true = admins only; false = all members", "group_announce", nil, []actionField{{"enabled", "Admins only (true/false)", strconv.FormatBool(info.IsAnnounce)}}, true),
+				action("Set who can edit group info", "true = admins only; false = all members", "group_locked", nil, []actionField{{"enabled", "Admins only (true/false)", strconv.FormatBool(info.IsLocked)}}, true),
+				action("Manage participant", "Add, remove, promote or demote", "group_member", nil, []actionField{{"member", "Member phone number or WhatsApp ID", ""}, {"change", "add / remove / promote / demote", "add"}}, true))
+		}
+		return r
+	}
+	if op == "group_leave" {
+		err = cli.LeaveGroup(ctx, chat)
+	} else {
+		if !admin {
+			return actionError("Group", fmt.Errorf("this action requires group administrator permission"))
+		}
+		switch op {
+		case "group_invite":
+			link, err := cli.GetGroupInviteLink(ctx, chat, false)
+			if err != nil {
+				return actionError("Group invite", err)
+			}
+			return actionOK("Group invite", link)
+		case "group_name":
+			name := strings.TrimSpace(p["name"])
+			if name == "" || len([]rune(name)) > 100 {
+				return actionError("Group name", fmt.Errorf("enter a name of 1–100 characters"))
+			}
+			err = cli.SetGroupName(ctx, chat, name)
+		case "group_description":
+			err = cli.SetGroupDescription(ctx, chat, p["description"])
+		case "group_announce", "group_locked":
+			if p["enabled"] != "true" && p["enabled"] != "false" {
+				return actionError("Group setting", fmt.Errorf("enter true or false"))
+			}
+			if op == "group_announce" {
+				err = cli.SetGroupAnnounce(ctx, chat, actionBool(p["enabled"]))
+			} else {
+				err = cli.SetGroupLocked(ctx, chat, actionBool(p["enabled"]))
+			}
+		case "group_member":
+			id := strings.TrimSpace(p["member"])
+			if !strings.Contains(id, "@") {
+				if !validPhoneNumber(id) {
+					return actionError("Participant", fmt.Errorf("enter a full phone number or WhatsApp ID"))
+				}
+				id = strings.Map(func(r rune) rune {
+					if r >= '0' && r <= '9' {
+						return r
+					}
+					return -1
+				}, id) + "@s.whatsapp.net"
+			}
+			member, parseErr := types.ParseJID(id)
+			if parseErr != nil || member.IsEmpty() || (member.Server != types.DefaultUserServer && member.Server != types.HiddenUserServer) {
+				return actionError("Participant", fmt.Errorf("invalid participant ID"))
+			}
+			change := whatsmeow.ParticipantChange(p["change"])
+			if change != whatsmeow.ParticipantChangeAdd && change != whatsmeow.ParticipantChangeRemove && change != whatsmeow.ParticipantChangePromote && change != whatsmeow.ParticipantChangeDemote {
+				return actionError("Participant", fmt.Errorf("choose add, remove, promote or demote"))
+			}
+			var changes []types.GroupParticipant
+			changes, err = cli.UpdateGroupParticipants(ctx, chat, []types.JID{member}, change)
+			if err == nil {
+				for _, result := range changes {
+					if result.Error != 0 {
+						return actionError("Participant", fmt.Errorf("WhatsApp rejected the change (code %d)", result.Error))
+					}
+				}
+			}
+		}
+	}
+	if err != nil {
+		return actionError("Group", err)
+	}
+	if op == "group_leave" {
+		CWmUpdateMuteNotify(connID, chat.String(), 1)
+	}
+	return actionOK("Group", "WhatsApp confirmed the change.")
 }
