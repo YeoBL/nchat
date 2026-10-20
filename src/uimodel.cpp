@@ -5874,6 +5874,23 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
            {"text", bookmark.text}, {"timeSent", std::to_string(bookmark.time)}, {"fileInfo", ""}}, bookmark.text);
       if (!page.success) page.text = local.GetError();
     }
+    else if (operation == "local.bulk.destinations" || operation == "local.forward")
+    {
+      if (operation == "local.forward" && !Value(context, "msgId").empty()) selected->insert(Value(context, "msgId"));
+      page.title = "Forward " + std::to_string(selected->size()) + " messages to…";
+      std::string ids;
+      // Oldest first preserves message order and native Telegram albums.
+      for (auto message = bulkMessages.rbegin(); message != bulkMessages.rend(); ++message)
+        if (selected->count(message->id)) ids += (ids.empty() ? "" : "\n") + message->id;
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      for (const auto& destination : GetImpl().GetChatVec())
+        if (destination.first == chat.first)
+          makeItem(page, GetImpl().GetContactListName(destination.first, destination.second, true, true), "forward_messages",
+            {{"sourceChatId", chat.second}, {"chatId", destination.second}, {"messageIds", ids}},
+            "Forward " + std::to_string(selected->size()) + " messages to " +
+            GetImpl().GetContactListName(destination.first, destination.second, true, true) + " · " +
+            GetImpl().GetProfileDisplayName(destination.first), {}, true);
+    }
     else { page.success = false; page.text = "This action is not available."; }
     done(std::move(page));
     return true;
@@ -6011,24 +6028,7 @@ void UiModel::OnKeyForwardMsg()
     if (!GetImpl().GetSelectMessageActive() || GetImpl().GetEditMessageActive()) return;
   }
 
-  // Open modal dialog without model mutex held
-  UiDialogParams params(this, "Forward to Chat", 0.75, 0.65);
-  UiChatListDialog dialog(params);
-
-  if (dialog.Run())
-  {
-    UiChatListItem selectedChatListItem = dialog.GetSelectedChatItem();
-    std::pair<std::string, std::string> selectedChat =
-      std::make_pair(selectedChatListItem.profileId, selectedChatListItem.chatId);
-
-    std::unique_lock<owned_mutex> lock(m_ModelMutex);
-    GetImpl().ForwardMessage(selectedChat);
-  }
-  else
-  {
-    std::unique_lock<owned_mutex> lock(m_ModelMutex);
-    GetImpl().ReinitView();
-  }
+  OnKeyClientActions("local.forward");
 }
 
 bool UiModel::MessageDialog(const std::string& p_Title, const std::string& p_Text, float p_WReq, float p_HReq)
