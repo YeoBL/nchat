@@ -460,6 +460,69 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
     return;
   }
 
+  if (operation == "tg.draft.get" || operation == "tg.draft.set")
+  {
+    if (!chat) { finish("Cloud draft", "Select a chat first.", false); return; }
+    int64_t topic = 0;
+    const bool isTopic = TgFeatureParseNumber(TgFeatureParam(params, "topicId"), topic) && topic > 0;
+    int64_t thread = 0;
+    const bool isThread = TgFeatureParseNumber(TgFeatureParam(params, "threadId"), thread) && thread > 0;
+    const auto chatType = m_ChatTypes.find(chat);
+    const bool secret = chatType != m_ChatTypes.end() && chatType->second == ChatSecret;
+    if (operation == "tg.draft.set")
+    {
+      auto query = make_object<setChatDraftMessage>();
+      query->chat_id_ = chat;
+      if (isTopic) query->topic_id_ = make_object<messageTopicForum>(static_cast<int32_t>(topic));
+      else if (isThread) query->topic_id_ = make_object<messageTopicThread>(thread);
+      const auto text = TgFeatureParam(params, "text");
+      if (!text.empty())
+      {
+        query->draft_message_ = make_object<draftMessage>();
+        auto content = make_object<draftMessageContentText>();
+        content->text_ = GetFormattedText(text);
+        query->draft_message_->content_ = std::move(content);
+      }
+      SendQuery(std::move(query), [request, finish, secret](Object object)
+        { if (!TgFeatureError(request, object)) finish(secret ? "Local Secret Chat draft" : "Cloud draft",
+            secret ? "Draft saved on this nchat device." : "Draft saved to Telegram."); });
+      return;
+    }
+    auto receive = [request, params, secret](const draftMessage* draft)
+    {
+      std::string text;
+      if (draft && draft->content_ && draft->content_->get_id() == draftMessageContentText::ID)
+      {
+        auto& content = static_cast<const draftMessageContentText&>(*draft->content_);
+        if (content.text_) text = content.text_->text_;
+      }
+      ClientActionResult result;
+      result.title = secret ? "Secret Chat draft on this device" : "Telegram cloud draft";
+      result.text = text.empty() ? "No text draft saved for this chat / topic." : text;
+      result.items.push_back(TgFeatureItem("Edit draft", "tg.draft.set", params, {{"text", "Draft text (blank clears)", text}}));
+      if (TgFeatureParam(params, "topicId").empty() && TgFeatureParam(params, "threadId").empty())
+      {
+        if (!text.empty())
+        {
+          auto context = params; context["text"] = text;
+          result.items.push_back(TgFeatureItem("Load draft into textbox", "local.compose", context));
+        }
+        result.items.push_back(TgFeatureItem("Save current textbox as Telegram draft", "tg.draft.set", params,
+          {{"text", "Draft text (blank clears)", TgFeatureParam(params, "draft")}}, true));
+      }
+      request->onResult(std::move(result));
+    };
+    if (isTopic)
+      SendQuery(make_object<getForumTopic>(chat, static_cast<int32_t>(topic)), [request, receive](Object object)
+        { if (!TgFeatureError(request, object)) receive(static_cast<forumTopic&>(*object).draft_message_.get()); });
+    else if (isThread)
+      SendQuery(make_object<getMessageThread>(chat, thread), [request, receive](Object object)
+        { if (!TgFeatureError(request, object)) receive(static_cast<messageThreadInfo&>(*object).draft_message_.get()); });
+    else
+      SendQuery(make_object<getChat>(chat), [request, receive](Object object)
+        { if (!TgFeatureError(request, object)) receive(static_cast<td::td_api::chat&>(*object).draft_message_.get()); });
+    return;
+  }
 
 
   finish("Telegram tools", "This action is not available in the current build.", false);
