@@ -643,8 +643,265 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
     return true;
   }
 
+  if (operation == "tg.chat.info")
+  {
+    SendQuery(make_object<getChat>(chatId), [checked, finish, item](Object object)
+    {
+      if (!checked(object)) return;
+      const auto& chat = static_cast<const td::td_api::chat&>(*object);
+      ClientActionResult result;
+      result.title = chat.title_;
+      result.text = "Unread messages: " + std::to_string(chat.unread_count_);
+      if (chat.notification_settings_)
+        result.text += chat.notification_settings_->mute_for_ > 0 ? "\nNotifications muted" : "\nNotifications enabled";
+      if (chat.has_protected_content_) result.text += "\nSaving and forwarding are restricted by this chat.";
+      if (chat.has_scheduled_messages_) result.text += "\nThere are scheduled messages.";
+      auto mute = item("Mute or unmute", "tg.chat.mute", "0 unmutes; 3600 mutes for an hour", true);
+      mute.fields = {{"seconds", "Mute duration in seconds (0 = unmute)", "3600"}};
+      result.items.push_back(std::move(mute));
+      result.items.push_back(item("Mark unread", "tg.chat.unread", "Updates Telegram on your other devices", true));
+      if (chat.type_ && (chat.type_->get_id() == chatTypeBasicGroup::ID || chat.type_->get_id() == chatTypeSupergroup::ID))
+      {
+        result.items.push_back(item("Members", "tg.chat.members"));
+        result.items.push_back(item("Administrators", "tg.chat.admins"));
+        result.items.push_back(item("Description and invite link", "tg.chat.invite"));
+        result.items.push_back(item("Add a contact", "tg.chat.add.pick"));
+        auto rename = item("Change group title", "tg.chat.title", "Requires group permission", true);
+        rename.fields = {{"title", "New title", chat.title_}};
+        result.items.push_back(std::move(rename));
+        auto description = item("Change description", "tg.chat.description", "Requires group permission", true);
+        description.fields = {{"description", "New description", ""}};
+        result.items.push_back(std::move(description));
+      }
+      finish(std::move(result));
+    });
+    return true;
+  }
 
+  if (operation == "tg.chat.title" || operation == "tg.chat.description")
+  {
+    if (operation == "tg.chat.title")
+    {
+      if (TgManage::Trim(value("title")).empty()) { fail("Enter a group title."); return true; }
+      SendQuery(make_object<setChatTitle>(chatId, value("title")), complete("Group title", "Title updated."));
+    }
+    else SendQuery(make_object<setChatDescription>(chatId, value("description")), complete("Group description", "Description updated."));
+    return true;
+  }
+  if (operation == "tg.chat.admins")
+  {
+    SendQuery(make_object<getChatAdministrators>(chatId), [this, checked, finish, item](Object object)
+    {
+      if (!checked(object)) return;
+      ClientActionResult result;
+      result.title = "Administrators";
+      const auto& admins = static_cast<const chatAdministrators&>(*object);
+      for (const auto& admin : admins.administrators_)
+      {
+        auto action = item(GetContactName(admin->user_id_), "tg.chat.member",
+                           admin->is_owner_ ? "Owner" : "Administrator");
+        action.params["userId"] = StrUtil::NumToHex(admin->user_id_);
+        result.items.push_back(std::move(action));
+      }
+      if (result.items.empty()) result.text = "No administrators were returned.";
+      finish(std::move(result));
+    });
+    return true;
+  }
+  if (operation == "tg.chat.members" || operation == "tg.chat.invite")
+  {
+    int64_t offset = 0;
+    if (!TgManage::Integer(value("offset", "0"), offset) || offset < 0 || offset > INT32_MAX)
+    { fail("Invalid member page; reopen the chat information."); return true; }
+    SendQuery(make_object<getChat>(chatId), [this, checked, finish, fail, item, operation, offset](Object object)
+    {
+      if (!checked(object)) return;
+      const auto& chat = static_cast<const td::td_api::chat&>(*object);
+      auto membersResult = [this, checked, finish, item, offset](Object membersObject)
+      {
+        if (!checked(membersObject)) return;
+        ClientActionResult result;
+        result.title = "Members";
+        auto& members = static_cast<chatMembers&>(*membersObject);
+        result.text = std::to_string(members.total_count_) + " members reported by Telegram.";
+        for (auto& member : members.members_)
+        {
+          if (!member->member_id_) continue;
+          const int64_t id = GetSenderId(std::move(member->member_id_));
+          auto action = item(GetContactName(id), "tg.chat.member", TgManage::Status(member->status_.get()));
+          action.params["userId"] = StrUtil::NumToHex(id);
+          result.items.push_back(std::move(action));
+        }
+        if (!members.members_.empty() && offset + static_cast<int64_t>(members.members_.size()) < members.total_count_)
+        {
+          auto next = item("Next members", "tg.chat.members");
+          next.params["offset"] = std::to_string(offset + members.members_.size());
+          result.items.push_back(std::move(next));
+        }
+        finish(std::move(result));
+      };
+      auto infoResult = [checked, finish, item](Object info)
+      {
+        if (!checked(info)) return;
+        ClientActionResult result;
+        result.title = "Group information";
+        const chatInviteLink* link = nullptr;
+        if (info->get_id() == basicGroupFullInfo::ID)
+        {
+          const auto& group = static_cast<const basicGroupFullInfo&>(*info);
+          result.text = group.description_;
+          link = group.invite_link_.get();
+        }
+        else
+        {
+          const auto& group = static_cast<const supergroupFullInfo&>(*info);
+          result.text = group.description_ + "\nMembers: " + std::to_string(group.member_count_);
+          link = group.invite_link_.get();
+        }
+        if (link)
+        {
+          result.text += "\nInvite link: " + link->invite_link_;
+          auto open = item("Open invite link", "openUrl", link->invite_link_);
+          open.params["url"] = link->invite_link_;
+          result.items.push_back(std::move(open));
+        }
+        else result.text += "\nNo invite link available to your account.";
+        auto create = item("Create invite link", "tg.chat.invite.create", "Requires group permission", true);
+        create.fields = {{"name", "Link label (optional)", "nchat"}, {"limit", "Maximum joins (0 = unlimited)", "0"},
+                         {"approval", "Require join approval (yes/no)", "no"}};
+        result.items.push_back(std::move(create));
+        finish(std::move(result));
+      };
+      if (chat.type_ && chat.type_->get_id() == chatTypeSupergroup::ID)
+      {
+        const auto id = static_cast<const chatTypeSupergroup&>(*chat.type_).supergroup_id_;
+        if (operation == "tg.chat.invite") SendQuery(make_object<getSupergroupFullInfo>(id), infoResult);
+        else SendQuery(make_object<getSupergroupMembers>(id, make_object<supergroupMembersFilterRecent>(),
+                                                        static_cast<int32_t>(offset), 200), membersResult);
+      }
+      else if (chat.type_ && chat.type_->get_id() == chatTypeBasicGroup::ID)
+      {
+        const auto id = static_cast<const chatTypeBasicGroup&>(*chat.type_).basic_group_id_;
+        if (operation == "tg.chat.invite") SendQuery(make_object<getBasicGroupFullInfo>(id), infoResult);
+        else SendQuery(make_object<getBasicGroupFullInfo>(id), [checked, membersResult](Object groupObject)
+        {
+          if (!checked(groupObject)) return;
+          auto group = move_object_as<basicGroupFullInfo>(groupObject);
+          auto members = make_object<chatMembers>();
+          members->total_count_ = static_cast<int32_t>(group->members_.size());
+          members->members_ = std::move(group->members_);
+          membersResult(std::move(members));
+        });
+      }
+      else fail("This chat is not a group or channel.");
+    });
+    return true;
+  }
+  if (operation == "tg.chat.invite.create")
+  {
+    int64_t limit = 0;
+    if (!TgManage::Integer(value("limit", "0"), limit) || limit < 0 || limit > 99999 || !TgManage::Boolean(value("approval")))
+    { fail("Enter a join limit from 0 to 99999 and yes/no for approval."); return true; }
+    if (limit && TgManage::Yes(value("approval")))
+    { fail("A join-approval link cannot also have a member limit."); return true; }
+    SendQuery(make_object<createChatInviteLink>(chatId, value("name"), 0, static_cast<int32_t>(limit),
+                                              TgManage::Yes(value("approval"))), [checked, finish, item](Object object)
+    {
+      if (!checked(object)) return;
+      const auto& link = static_cast<const chatInviteLink&>(*object);
+      ClientActionResult result;
+      result.title = "Invite link";
+      result.text = link.invite_link_;
+      auto open = item("Open invite link", "openUrl", link.invite_link_);
+      open.params["url"] = link.invite_link_;
+      result.items.push_back(std::move(open));
+      finish(std::move(result));
+    });
+    return true;
+  }
 
+  if (operation == "tg.chat.member" || operation == "tg.chat.add" || operation == "tg.chat.remove" ||
+      operation == "tg.chat.promote" || operation == "tg.chat.demote")
+  {
+    int64_t userId = 0;
+    if (!TgManage::HexId(value("userId"), userId) || userId <= 0)
+    { fail("Select a user from the member or contact list."); return true; }
+    if (operation == "tg.chat.member")
+    {
+      SendQuery(make_object<getChatMember>(chatId, make_object<messageSenderUser>(userId)),
+                [this, userId, checked, finish, item](Object object)
+      {
+        if (!checked(object)) return;
+        const auto& member = static_cast<const chatMember&>(*object);
+        ClientActionResult result;
+        result.title = GetContactName(userId);
+        result.text = TgManage::Status(member.status_.get());
+        if (userId == m_SelfUserId || (member.status_ && member.status_->get_id() == chatMemberStatusCreator::ID))
+        { finish(std::move(result)); return; }
+        result.items.push_back(item("Remove from group", "tg.chat.remove", "Requires administrator permission", true));
+        auto promote = item("Set administrator permissions", "tg.chat.promote", "Requires permission to promote members", true);
+        const chatAdministratorRights* rights = nullptr;
+        if (member.status_ && member.status_->get_id() == chatMemberStatusAdministrator::ID)
+          rights = static_cast<const chatMemberStatusAdministrator&>(*member.status_).rights_.get();
+        promote.fields = {{"delete", "May delete messages (yes/no)", rights && rights->can_delete_messages_ ? "yes" : "no"},
+                          {"invite", "May invite members (yes/no)", rights && rights->can_invite_users_ ? "yes" : "no"},
+                          {"pin", "May pin messages (yes/no)", rights && rights->can_pin_messages_ ? "yes" : "no"},
+                          {"topics", "May manage topics (yes/no)", rights && rights->can_manage_topics_ ? "yes" : "no"}};
+        result.items.push_back(std::move(promote));
+        result.items.push_back(item("Remove administrator role", "tg.chat.demote", "Requires administrator permission", true));
+        finish(std::move(result));
+      });
+    }
+    else if (operation == "tg.chat.add")
+    {
+      SendQuery(make_object<addChatMember>(chatId, userId, 0), [checked, finish, fail](Object object)
+      {
+        if (!checked(object)) return;
+        const auto& failed = static_cast<const failedToAddMembers&>(*object);
+        if (!failed.failed_to_add_members_.empty())
+        { fail("Telegram could not add this contact. Their privacy settings may require an invite link."); return; }
+        ClientActionResult result;
+        result.title = "Group member";
+        result.text = "Contact added.";
+        finish(std::move(result));
+      });
+    }
+    else
+    {
+      auto change = make_object<setChatMemberStatus>();
+      change->chat_id_ = chatId;
+      change->member_id_ = make_object<messageSenderUser>(userId);
+      if (operation == "tg.chat.remove") change->status_ = make_object<chatMemberStatusLeft>();
+      else if (operation == "tg.chat.demote") change->status_ = make_object<chatMemberStatusMember>(0);
+      else
+      {
+        if (!TgManage::Boolean(value("delete")) || !TgManage::Boolean(value("invite")) ||
+            !TgManage::Boolean(value("pin")) || !TgManage::Boolean(value("topics")))
+        { fail("Answer yes or no for each administrator permission."); return true; }
+        SendQuery(make_object<getChatMember>(chatId, make_object<messageSenderUser>(userId)),
+                  [this, chatId, userId, checked, complete, value](Object object)
+        {
+          if (!checked(object)) return;
+          auto member = move_object_as<chatMember>(object);
+          object_ptr<chatAdministratorRights> rights;
+          if (member->status_ && member->status_->get_id() == chatMemberStatusAdministrator::ID)
+            rights = std::move(static_cast<chatMemberStatusAdministrator&>(*member->status_).rights_);
+          if (!rights) rights = make_object<chatAdministratorRights>();
+          rights->can_manage_chat_ = true;
+          rights->can_delete_messages_ = TgManage::Yes(value("delete"));
+          rights->can_invite_users_ = TgManage::Yes(value("invite"));
+          rights->can_pin_messages_ = TgManage::Yes(value("pin"));
+          rights->can_manage_topics_ = TgManage::Yes(value("topics"));
+          SendQuery(make_object<setChatMemberStatus>(chatId, make_object<messageSenderUser>(userId),
+                    make_object<chatMemberStatusAdministrator>(true, std::move(rights))),
+                    complete("Group member", "Administrator permissions updated."));
+        });
+        return true;
+      }
+      SendQuery(std::move(change), complete("Group member", "Member permissions updated."));
+    }
+    return true;
+  }
   fail("This Telegram chat action is not available.");
   return true;
 }
