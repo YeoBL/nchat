@@ -178,12 +178,11 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		}
 		return sendActionMessage(ctx, connID, cli, chat, &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: &lat, DegreesLongitude: &lon, Name: proto.String(p["name"]), Address: proto.String(p["address"])}}, "Location sent")
 	case "history_request":
-		stamp, err := strconv.ParseInt(p["timeSent"], 10, 64)
-		if err != nil || stamp <= 0 || p["msgId"] == "" {
-			return actionError("Earlier history", fmt.Errorf("select a dated message as the history anchor"))
+		request, err := buildEarlierHistoryRequest(cli, chat, p)
+		if err != nil {
+			return actionError("Earlier history", err)
 		}
-		info := types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, IsFromMe: actionBool(p["isOutgoing"]) || actionBool(p["fromMe"])}, ID: p["msgId"], Timestamp: time.Unix(stamp, 0)}
-		if _, err = cli.SendPeerMessage(ctx, cli.BuildHistorySyncRequest(&info, 50)); err != nil {
+		if _, err = cli.SendPeerMessage(ctx, request); err != nil {
 			return actionError("Earlier history", err)
 		}
 		return actionOK("History requested", "Your phone was asked for up to 50 messages before the selected message. Supplied receipts and poll votes are merged automatically. WhatsApp does not provide an API to retrieve a guaranteed complete historical receipt or voter list.")
@@ -191,6 +190,18 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		return wmGroupAction(ctx, connID, cli, op, p, chat)
 	}
 	return actionError("WhatsApp", fmt.Errorf("unknown action"))
+}
+
+func buildEarlierHistoryRequest(cli *whatsmeow.Client, chat types.JID, p map[string]string) (*waE2E.Message, error) {
+	stamp, err := strconv.ParseInt(p["timeSent"], 10, 64)
+	if err != nil || stamp < 1000 || p["msgId"] == "" {
+		return nil, fmt.Errorf("select a dated message as the history anchor")
+	}
+	// ChatMessage.timeSent uses milliseconds; the phone history API requires seconds.
+	info := types.MessageInfo{MessageSource: types.MessageSource{Chat: chat,
+		IsFromMe: actionBool(p["isOutgoing"]) || actionBool(p["fromMe"])},
+		ID: p["msgId"], Timestamp: time.UnixMilli(stamp)}
+	return cli.BuildHistorySyncRequest(&info, 50), nil
 }
 
 func validateNewPoll(question, rawOptions, rawLimit string) ([]string, int, error) {
