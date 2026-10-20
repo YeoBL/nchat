@@ -535,14 +535,25 @@ macOS: `open '%1' &`
 Note: Omit the trailing `&` for commands taking over the terminal, for
 example `w3m -o confirm_qq=false '%1'` and `see '%1'`.
 
-### transcribe_command
+### transcribe_app / record_app
 
-Command for transcribing a selected audio attachment with Alt-Shift-t. `%1`
-is replaced by its local path. On macOS, run `sh utils/build-transcriber.sh`
-and set this to `'<build path>/nchat-transcribe.app/Contents/MacOS/nchat-transcribe' '%1'`.
+Paths to the optional native macOS helper **app bundles**, not shell commands.
+When empty, nchat uses `helpers/nchat-transcribe.app` and
+`helpers/nchat-record.app` inside its configuration directory. Build/install
+instructions and safe upgrade options are in [custom settings](doc/custom-settings.md).
+
+Alt-Shift-t starts transcription separately so you can close tools and continue
+chatting. **F2 → Transcription status** keeps completed results and errors;
+**F2 → Search saved audio transcripts** searches saved full transcripts.
 The helper requests Speech Recognition permission on first use and requires
-on-device recognition; it does not fall back to an online service. Audio is
-converted temporarily and the converted copy is removed after transcription.
+on-device recognition; it does not fall back to an online service. Temporary
+conversion audio is removed, but transcripts remain in the private local archive.
+F2's recording actions open a separate recorder with explicit Record, Stop,
+playback and Use controls, followed by a destination-confirmed Send in nchat.
+
+`transcribe_command` is an obsolete setting from the earlier terminal-blocking
+helper and is no longer read by Alt-Shift-t. Setting it does not override the
+current helper. Use `transcribe_app` to choose a different compatible app bundle.
 
 ### away_status_indication
 
