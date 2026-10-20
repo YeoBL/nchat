@@ -409,6 +409,7 @@ private:
   void OnKeyReact();
   void OnKeyViewReactions();
   void OnKeyPoll();
+  void OnKeyAttachments();
   void OnKeyMessageInfo();
   void OnKeyFind();
   void OnKeyFindNext();

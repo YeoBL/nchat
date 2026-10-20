@@ -26,6 +26,13 @@ namespace sqlite
 
 class MessageCache
 {
+public:
+  struct Attachment
+  {
+    std::string profileId, chatId, msgId, text, fileInfo;
+    int64_t timeSent = 0;
+  };
+
 private:
   enum RequestType
   {
@@ -284,6 +291,7 @@ public:
   static std::vector<std::string> GetUnreadMessageIds(const std::string& p_ProfileId,
                                                     const std::string& p_ChatId);
   static std::vector<std::string> GetUnreadChatIds(const std::string& p_ProfileId);
+  static std::vector<Attachment> GetAttachments();
   static void UpdateMembership(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsMember);
   static void FindMessage(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_FromMsgId,
                           const std::string& p_LastMsgId, const std::string& p_FindText,

@@ -29,6 +29,7 @@
 #include "sysutil.h"
 #include "timeutil.h"
 #include "uidialog.h"
+#include "uiattachmentlistdialog.h"
 #include "uichatlistdialog.h"
 #include "uiconfig.h"
 #include "uicontactlistdialog.h"
@@ -4642,6 +4643,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyViewReactions = UiKeyConfig::GetKey("view_reactions");
   static wint_t keyMessageInfo = UiKeyConfig::GetKey("message_info");
   static wint_t keyPoll = UiKeyConfig::GetKey("poll");
+  static wint_t keyAttachments = UiKeyConfig::GetKey("attachments");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4834,6 +4836,10 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyPoll)
   {
     OnKeyPoll();
+  }
+  else if (p_Key == keyAttachments)
+  {
+    OnKeyAttachments();
   }
   else if (p_Key == keyReact)
   {
@@ -5563,6 +5569,27 @@ void UiModel::OnKeyPoll()
   UiDialogParams params(this, "Poll", 0.75, 0.5);
   UiPollDialog dialog(params, protocol, request, profile, text);
   dialog.Run();
+}
+
+void UiModel::OnKeyAttachments()
+{
+  UiDialogParams params(this, "Cached attachments", 0.85, 0.75);
+  UiAttachmentListDialog dialog(params);
+  if (!dialog.Run()) return;
+  const auto attachment = dialog.Selected();
+  const auto file = ProtocolUtil::FileInfoFromHex(attachment.fileInfo);
+  if (IsAttachmentDownloaded(file))
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    GetImpl().OpenAttachment(file.filePath);
+  }
+  else if (IsAttachmentDownloadable(file))
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    GetImpl().DownloadAttachment(attachment.profileId, attachment.chatId, attachment.msgId,
+      file.fileId, DownloadFileActionOpen);
+  }
+  else MessageDialog("Attachment", "This file is no longer available to download.", 0.6, 5);
 }
 
 void UiModel::OnKeyReact()

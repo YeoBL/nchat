@@ -7,6 +7,7 @@
 
 #include "messagecache.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -745,6 +746,32 @@ std::vector<std::string> MessageCache::GetUnreadChatIds(const std::string& p_Pro
   }
   catch (const sqlite::sqlite_exception& ex) { HANDLE_SQLITE_EXCEPTION(ex); }
   return ids;
+}
+
+std::vector<MessageCache::Attachment> MessageCache::GetAttachments()
+{
+  std::vector<Attachment> attachments;
+  std::unique_lock<std::mutex> lock(m_DbMutex);
+  for (const auto& profile : m_Dbs)
+  {
+    if (!profile.second) continue;
+    try
+    {
+      *profile.second << "SELECT chatId, id, text, fileInfo, timeSent FROM messages "
+        "WHERE fileInfo != '' AND COALESCE(isDeleted,0)=0 ORDER BY timeSent DESC;" >>
+        [&](const std::string& chatId, const std::string& msgId, const std::string& text,
+            const std::string& fileInfo, const int64_t& timeSent)
+        {
+          attachments.push_back({profile.first, chatId, msgId, text, fileInfo, timeSent});
+        };
+    }
+    catch (const sqlite::sqlite_exception& ex) { HANDLE_SQLITE_EXCEPTION(ex); }
+  }
+  std::sort(attachments.begin(), attachments.end(), [](const Attachment& lhs, const Attachment& rhs)
+  {
+    return lhs.timeSent > rhs.timeSent;
+  });
+  return attachments;
 }
 
 std::vector<std::string> MessageCache::GetUnreadMessageIds(const std::string& p_ProfileId,

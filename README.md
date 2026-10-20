@@ -81,6 +81,7 @@ Interactive Commands:
     Alt-p       pin/unpin current chat
     Alt-t       external telephone call
     Alt-/       find in chat
+    Alt-Shift-f search cached attachments across chats
     Alt-?       find next in chat
     Alt-$       external spell check
     Alt-,       decrease contact list width
