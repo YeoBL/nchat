@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
-
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -106,8 +106,13 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		r.Items = append(r.Items, action("Communities", "Browse your communities and their groups", "community_list", nil, nil, false))
 		if p["chatId"] != "" {
 			r.Items = append(r.Items, action("Create poll", "Send a new poll to this chat", "create_poll", nil, []actionField{{"question", "Question", ""}, {"options", "Choices separated by |", ""}, {"maxChoices", "Maximum choices (0 = any)", "1"}}, true))
+			r.Items = append(r.Items, action("Mute chat", "Mute indefinitely on your linked devices", "mute_chat", map[string]string{"muted": "true"}, nil, true))
+			r.Items = append(r.Items, action("Unmute chat", "Restore notifications", "mute_chat", map[string]string{"muted": "false"}, nil, true))
+			r.Items = append(r.Items, action("Mark unread on WhatsApp", "Set WhatsApp's chat marker; nchat keeps read messages read", "mark_unread", nil, nil, true))
 		}
 		if p["msgId"] != "" {
+			r.Items = append(r.Items, action("Star message", "Save in WhatsApp starred messages", "star_message", map[string]string{"starred": "true"}, nil, true))
+			r.Items = append(r.Items, action("Unstar message", "Remove from starred messages", "star_message", map[string]string{"starred": "false"}, nil, true))
 		}
 		return r
 	}
@@ -139,6 +144,27 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			return actionError("Create poll", err)
 		}
 		return sendActionMessage(ctx, connID, cli, chat, cli.BuildPollCreation(strings.TrimSpace(p["question"]), options, limit), "Poll sent")
+	case "mute_chat":
+		muted := actionBool(p["muted"])
+		if err = cli.SendAppState(ctx, appstate.BuildMute(chat, muted, 0)); err != nil {
+			return actionError("Chat notifications", err)
+		}
+		CWmUpdateMuteNotify(connID, p["chatId"], BoolToInt(muted))
+		return actionOK("Chat notifications", "Notification setting updated.")
+	case "mark_unread":
+		if err = cli.SendAppState(ctx, appstate.BuildMarkChatAsRead(chat, false, time.Time{}, nil)); err != nil {
+			return actionError("Mark unread", err)
+		}
+		return actionOK("Marked unread on WhatsApp", "Marked unread on WhatsApp; this does not make previously read messages unread in nchat.")
+	case "star_message":
+		if p["msgId"] == "" {
+			return actionError("Star message", fmt.Errorf("select a message first"))
+		}
+		sender, _ := types.ParseJID(p["senderId"])
+		if err = cli.SendAppState(ctx, appstate.BuildStar(chat, sender, p["msgId"], actionBool(p["isOutgoing"]) || actionBool(p["fromMe"]), actionBool(p["starred"]))); err != nil {
+			return actionError("Star message", err)
+		}
+		return actionOK("Starred message", "WhatsApp starred-message setting updated.")
 	}
 	return actionError("WhatsApp", fmt.Errorf("unknown action"))
 }
