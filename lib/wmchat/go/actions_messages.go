@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"strings"
 	"sync"
 
 	"go.mau.fi/whatsmeow"
@@ -121,8 +122,34 @@ func forwardableMessage(msg *waE2E.Message) bool {
 	return msg.Conversation != nil || msg.ExtendedTextMessage != nil || msg.ImageMessage != nil || msg.VideoMessage != nil || msg.AudioMessage != nil || msg.PtvMessage != nil || msg.DocumentMessage != nil || msg.StickerMessage != nil || msg.ContactMessage != nil || msg.ContactsArrayMessage != nil || msg.LocationMessage != nil || msg.LiveLocationMessage != nil || msg.PollCreationMessage != nil || msg.PollCreationMessageV2 != nil || msg.PollCreationMessageV3 != nil || msg.ButtonsMessage != nil || msg.ListMessage != nil || msg.InteractiveMessage != nil
 }
 
+func contactCardText(contact *waE2E.ContactMessage) string {
+	if contact == nil {
+		return ""
+	}
+	lines := []string{"[Contact] " + contact.GetDisplayName()}
+	for _, line := range strings.Split(strings.ReplaceAll(contact.GetVcard(), "\r\n", "\n"), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToUpper(strings.SplitN(key, ";", 2)[0])
+		if key == "TEL" || key == "EMAIL" || key == "ORG" {
+			lines = append(lines, value)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func structuredMessageText(msg *waE2E.Message) string {
 	switch {
+	case msg.GetContactMessage() != nil:
+		return contactCardText(msg.GetContactMessage())
+	case msg.GetContactsArrayMessage() != nil:
+		parts := []string{}
+		for _, contact := range msg.GetContactsArrayMessage().GetContacts() {
+			parts = append(parts, contactCardText(contact))
+		}
+		return strings.Join(parts, "\n\n")
 	}
 	return ""
 }
@@ -131,5 +158,36 @@ func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op 
 	if op != "message_details" {
 		return actionResult{}, false
 	}
-	return actionResult{}, false
+	_, msg := messageActionEntry(connID, p["chatId"], p["msgId"])
+	if msg == nil {
+		return actionError("Message details", fmt.Errorf("structured details are not loaded for this message")), true
+	}
+	r := actionOK("Message details", structuredMessageText(msg))
+	if contact := msg.GetContactMessage(); contact != nil {
+		r.Items = append(r.Items, contactActions(contact)...)
+	}
+	if cards := msg.GetContactsArrayMessage(); cards != nil {
+		for _, contact := range cards.GetContacts() {
+			r.Items = append(r.Items, contactActions(contact)...)
+		}
+	}
+	return r, true
+}
+
+func contactActions(contact *waE2E.ContactMessage) []actionItem {
+	items := []actionItem{}
+	for _, line := range strings.Split(strings.ReplaceAll(contact.GetVcard(), "\r\n", "\n"), "\n") {
+		key, phone, ok := strings.Cut(line, ":")
+		if !ok || !strings.HasPrefix(strings.ToUpper(key), "TEL") || !validPhoneNumber(phone) {
+			continue
+		}
+		digits := strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, phone)
+		items = append(items, action("Chat with "+contact.GetDisplayName(), phone, "open_chat", map[string]string{"chatId": digits + "@s.whatsapp.net"}, nil, false))
+	}
+	return items
 }

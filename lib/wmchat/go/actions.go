@@ -13,6 +13,7 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 type actionField struct {
@@ -109,6 +110,7 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			r.Items = append(r.Items, action("Mute chat", "Mute indefinitely on your linked devices", "mute_chat", map[string]string{"muted": "true"}, nil, true))
 			r.Items = append(r.Items, action("Unmute chat", "Restore notifications", "mute_chat", map[string]string{"muted": "false"}, nil, true))
 			r.Items = append(r.Items, action("Mark unread on WhatsApp", "Set WhatsApp's chat marker; nchat keeps read messages read", "mark_unread", nil, nil, true))
+			r.Items = append(r.Items, action("Send contact", "Share a contact card", "send_contact", nil, []actionField{{"name", "Full name", ""}, {"phone", "Phone number with country code", ""}}, true))
 			if strings.HasSuffix(p["chatId"], "@g.us") {
 				r.Items = append(r.Items, action("Group information", "Members, settings and invitations", "group_info", nil, nil, false))
 			}
@@ -116,6 +118,7 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		if p["msgId"] != "" {
 			r.Items = append(r.Items, action("Star message", "Save in WhatsApp starred messages", "star_message", map[string]string{"starred": "true"}, nil, true))
 			r.Items = append(r.Items, action("Unstar message", "Remove from starred messages", "star_message", map[string]string{"starred": "false"}, nil, true))
+			r.Items = append(r.Items, action("Message details and buttons", "Locations, contact cards and business replies", "message_details", nil, nil, false))
 		}
 		return r
 	}
@@ -168,6 +171,13 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			return actionError("Star message", err)
 		}
 		return actionOK("Starred message", "WhatsApp starred-message setting updated.")
+	case "send_contact":
+		name, phone := strings.TrimSpace(p["name"]), strings.TrimSpace(p["phone"])
+		if name == "" || strings.ContainsAny(name+phone, "\r\n") || !validPhoneNumber(phone) {
+			return actionError("Send contact", fmt.Errorf("enter a name and full international phone number"))
+		}
+		vcard := "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:" + escapeVCard(name) + "\r\nTEL;TYPE=CELL:" + phone + "\r\nEND:VCARD"
+		return sendActionMessage(ctx, connID, cli, chat, &waE2E.Message{ContactMessage: &waE2E.ContactMessage{DisplayName: proto.String(name), Vcard: proto.String(vcard)}}, "Contact sent")
 	case "group_info", "group_invite", "group_name", "group_description", "group_announce", "group_locked", "group_member", "group_leave":
 		return wmGroupAction(ctx, connID, cli, op, p, chat)
 	}
@@ -209,6 +219,10 @@ func validPhoneNumber(phone string) bool {
 		}
 	}
 	return digits >= 7 && digits <= 15
+}
+
+func escapeVCard(s string) string {
+	return strings.NewReplacer("\\", "\\\\", ";", "\\;", ",", "\\,").Replace(s)
 }
 
 func sendActionMessage(ctx context.Context, connID int, cli *whatsmeow.Client, chat types.JID, msg *waE2E.Message, title string) actionResult {
