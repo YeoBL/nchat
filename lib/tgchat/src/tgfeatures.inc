@@ -222,6 +222,27 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
     return;
   }
 
+  if (operation == "tg.comments")
+  {
+    if (!chat || !message) { finish("Comments", "Select a channel post first.", false); return; }
+    SendQuery(make_object<getMessageThread>(chat, message), [this, request, params](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      auto thread = td::move_tl_object_as<messageThreadInfo>(object);
+      auto followup = std::make_shared<ClientActionRequest>(*request);
+      followup->operation = "tg.thread.history";
+      followup->params = params;
+      followup->params["sourceChatId"] = TgFeatureParam(params, "chatId");
+      followup->params["sourceMsgId"] = TgFeatureParam(params, "msgId");
+      followup->params["chatId"] = StrUtil::NumToHex(thread->chat_id_);
+      followup->params["threadId"] = std::to_string(thread->message_thread_id_);
+      followup->params["topicId"] = "";
+      followup->params["msgId"] = "";
+      followup->params["from"] = "";
+      PerformClientAction(followup);
+    });
+    return;
+  }
 
   if (operation == "tg.topic.history" || operation == "tg.thread.history")
   {
