@@ -42,6 +42,18 @@ inline std::map<std::string, std::string> MergeParams(std::map<std::string, std:
   return context;
 }
 
+inline std::vector<std::wstring> WrapText(const std::string& text, int width, int maxLines = 0)
+{
+  width = std::max(1, width);
+  auto lines = StrUtil::WordWrap(StrUtil::ToWString(DisplayText(text, true)), width, false, false, false, 2);
+  if (maxLines > 0 && lines.size() > static_cast<size_t>(maxLines))
+  {
+    lines.resize(maxLines);
+    lines.back() = StrUtil::TrimPadWString(lines.back(), width - 1) + L"…";
+  }
+  return lines;
+}
+
 struct FieldLayout
 {
   std::vector<std::wstring> lines = {L""};
@@ -97,7 +109,7 @@ inline int MoveFieldLine(const std::wstring& text, int width, int pos, bool down
 }
 
 // Field values can contain newlines (messages, descriptions and poll options).
-// Enter saves only this field; the controller still requires an explicit Submit.
+// Enter saves only this field; consequential actions still require confirmation.
 class FieldDialog : public UiDialog
 {
 public:
@@ -218,7 +230,7 @@ public:
     ClientActionResult result;
     std::map<std::string, std::string> context;
     std::wstring filter;
-    int index = 0;
+    int index = -1;
   };
 
   UiClientActionDialog(const UiDialogParams& params, const Page& page, bool canBack,
@@ -231,6 +243,7 @@ public:
     if (request && protocol)
     {
       request->params.erase("_replacePage");
+      request->params.erase("_quickForm");
       m_Page.context = request->params;
       std::weak_ptr<State> weak = m_State;
       request->onResult = [weak](ClientActionResult result)
@@ -246,10 +259,12 @@ public:
         protocol->SendRequest(request);
     }
     UpdateList();
+    if (!request && page.index < 0) SelectFirstAction();
   }
 
   Choice SelectedChoice() const { return m_Choice; }
   ClientActionItem SelectedItem() const { return m_Selected; }
+  int SelectedItemIndex() const { return m_SelectedIndex; }
   Page CurrentPage() const
   {
     Page page = m_Page;
@@ -274,12 +289,14 @@ public:
     {
       Choice choice;
       ClientActionItem item;
+      int itemIndex = -1;
       {
         UiDialogParams dialogParams(model, title, 0.85, 0.8);
         UiClientActionDialog dialog(dialogParams, page, !history.empty(), protocol, request, dispatch);
         dialog.Run();
         choice = dialog.SelectedChoice();
         item = dialog.SelectedItem();
+        itemIndex = dialog.SelectedItemIndex();
         page = dialog.CurrentPage();
       }
       request.reset();
@@ -301,6 +318,12 @@ public:
       item.params.erase("_replacePage");
       item.params = ClientActionUi::MergeParams(page.context, item.params);
       if (!PrepareAction(model, item)) continue;
+      if (itemIndex >= 0 && itemIndex < static_cast<int>(page.result.items.size()))
+      {
+        auto& stored = page.result.items[itemIndex];
+        stored.fields = item.fields;
+        for (const auto& param : item.params) stored.params[param.first] = param.second;
+      }
       if (openAction && openAction(item)) break;
       if (!replacePage) history.push_back(page);
       page = Page();
@@ -329,6 +352,7 @@ protected:
     {
       m_Choice = Item;
       m_Selected = m_Page.result.items[selected];
+      m_SelectedIndex = selected;
     }
     else return;
     m_Running = false;
@@ -356,6 +380,7 @@ protected:
       m_FilterStr.clear();
       m_Index = 0;
       UpdateList();
+      SelectFirstAction();
       UpdateFooter();
       return true;
     }
@@ -372,10 +397,9 @@ protected:
   {
     m_Items.clear();
     m_Visible.clear();
-    auto add = [&](const std::string& text, int item)
+    auto add = [&](const std::string& text, int item, int maxLines = 0)
     {
-      auto lines = StrUtil::WordWrap(StrUtil::ToWString(ClientActionUi::DisplayText(text, true)),
-        std::max(1, m_W), false, false, false, 2);
+      const auto lines = ClientActionUi::WrapText(text, m_W, maxLines);
       for (const auto& line : lines)
       {
         m_Items.push_back(StrUtil::TrimPadWString(line, m_W));
@@ -403,7 +427,7 @@ protected:
         if (!ClientActionUi::Matches(item, filter)) continue;
         ++matches;
         add("› " + item.title, static_cast<int>(i));
-        if (!item.detail.empty()) add("  " + item.detail, static_cast<int>(i));
+        if (!item.detail.empty()) add("  " + item.detail, static_cast<int>(i), 3);
       }
       if (!filter.empty() && matches == 0) add("No matching items. Backspace clears the search.", -1);
       else if (m_Page.result.items.empty() && m_Page.result.text.empty() && m_Page.result.filePath.empty())
@@ -413,42 +437,59 @@ protected:
   }
 
 private:
+  void SelectFirstAction()
+  {
+    const auto first = std::find_if(m_Visible.begin(), m_Visible.end(),
+      [](int item) { return item >= 0 || item == -2; });
+    if (first != m_Visible.end()) m_Index = static_cast<int>(std::distance(m_Visible.begin(), first));
+  }
+
   static bool PrepareAction(UiModel* model, ClientActionItem& item)
   {
+    // Only explicitly marked read-only forms submit on Enter. Mutations keep
+    // their review/confirmation even when they use the same field editor.
+    const auto quick = item.params.find("_quickForm");
+    const bool quickForm = quick != item.params.end() && quick->second == "1" && !item.confirm;
+    item.params.erase("_quickForm");
     if (item.fields.empty() && !item.confirm) return true;
-    bool edit = !item.fields.empty();
+    for (const auto& field : item.fields) item.params[field.key] = field.value;
+    const auto editField = [model, &item](size_t index)
+    {
+      auto& field = item.fields[index];
+      UiDialogParams params(model, ClientActionUi::DisplayText(item.title) + " · " +
+        ClientActionUi::DisplayText(field.label), 0.8, 0.55);
+      ClientActionUi::FieldDialog dialog(params, field);
+      if (!dialog.Run()) return false;
+      field.value = dialog.Value();
+      item.params[field.key] = field.value;
+      return true;
+    };
+    if (quickForm)
+    {
+      for (size_t i = 0; i < item.fields.size(); ++i)
+        if (!editField(i)) return false;
+      return true;
+    }
     while (true)
     {
-      if (edit)
-      {
-        for (size_t i = 0; i < item.fields.size(); ++i)
-        {
-          auto& field = item.fields[i];
-          UiDialogParams params(model, ClientActionUi::DisplayText(item.title) + " · " +
-            std::to_string(i + 1) + "/" + std::to_string(item.fields.size()), 0.8, 0.55);
-          ClientActionUi::FieldDialog dialog(params, field);
-          if (!dialog.Run()) return false;
-          field.value = dialog.Value();
-          item.params[field.key] = field.value;
-        }
-      }
       Page review;
       review.result.title = "Review: " + item.title;
       review.result.text = item.detail;
-      for (const auto& field : item.fields)
-        review.result.text += "\n\n" + field.label + "\n" + field.value;
       ClientActionItem cancel, submit;
       cancel.title = "Cancel";
       cancel.operation = "cancel";
       submit.title = "Confirm: " + item.title;
       submit.operation = "submit";
       review.result.items = {cancel, submit};
-      if (!item.fields.empty())
+      for (size_t i = 0; i < item.fields.size(); ++i)
       {
-        ClientActionItem change;
-        change.title = "Edit details";
-        change.operation = "edit";
-        review.result.items.push_back(change);
+        const auto& field = item.fields[i];
+        ClientActionItem edit;
+        edit.title = field.label + (field.value.empty() ? ": Not set" : "");
+        edit.detail = field.value;
+        edit.operation = "field";
+        edit.params["index"] = std::to_string(i);
+        review.result.items.push_back(edit);
       }
       ClientActionItem selected;
       Choice choice;
@@ -461,7 +502,12 @@ private:
       }
       if (choice != Item || selected.operation == "cancel") return false;
       if (selected.operation == "submit") return true;
-      edit = true;
+      const auto index = selected.params.find("index");
+      if (selected.operation == "field" && index != selected.params.end())
+      {
+        const auto i = static_cast<size_t>(std::strtoul(index->second.c_str(), nullptr, 10));
+        if (i < item.fields.size()) editField(i);
+      }
     }
   }
 
@@ -476,6 +522,7 @@ private:
   bool m_CanBack = false, m_Pending = false, m_TimedOut = false;
   Choice m_Choice = Close;
   ClientActionItem m_Selected;
+  int m_SelectedIndex = -1;
   std::vector<int> m_Visible;
   std::chrono::steady_clock::time_point m_Started = std::chrono::steady_clock::now();
 };

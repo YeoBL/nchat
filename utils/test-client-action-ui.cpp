@@ -1,4 +1,4 @@
-// c++ -std=c++14 -Isrc -Ilib/common/src -Ilib/ncutil/src -Ibuild/generated \
+// c++ -std=c++14 -D_XOPEN_SOURCE_EXTENDED=1 -Isrc -Ilib/common/src -Ilib/ncutil/src -Ibuild/generated \
 //   -I/opt/homebrew/opt/ncurses/include utils/test-client-action-ui.cpp \
 //   -Lbuild/lib -lncutil -Wl,-rpath,$PWD/build/lib -o /tmp/test-client-action-ui
 #include "../src/uiclientactiondialog.h"
@@ -32,5 +32,9 @@ int main()
   assert(params.at("chatId") == "selected" && params.at("msgId") == "message" && params.at("threadId") == "topic");
   assert(DisplayText("one\n\ttwo\x1b", true) == "one\n two ");
   assert(DisplayText("one\ntwo") == "one two");
+  const auto compact = WrapText("one\ntwo\nthree\nfour", 10, 3);
+  assert(compact.size() == 3 && compact.back().back() == L'…');
+  assert(WrapText("one\ntwo\nthree\nfour", 10).size() == 4);
+  assert(WrapText("abcdef", 1, 1) == std::vector<std::wstring>{L"…"});
   std::cout << "account-tools search, field layout and terminal-text checks passed\n";
 }

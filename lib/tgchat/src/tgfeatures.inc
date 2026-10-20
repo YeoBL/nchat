@@ -83,7 +83,17 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
       { result.items.push_back(TgFeatureItem(title, op, params, fields, confirm, detail)); };
     if (operation == "menu")
     {
-      add("Search Telegram history", "tg.search");
+      auto search = params;
+      search["_quickForm"] = "1";
+      search["query"] = ""; search["type"] = "all"; search["sender"] = "";
+      search["after"] = ""; search["before"] = ""; search["scope"] = "";
+      search["offset"] = ""; search["from"] = ""; search["senderResolved"] = "";
+      search["searchChatId"] = TgFeatureParam(params, "chatId");
+      search["searchTopicId"] = TgFeatureParam(params, "topicId");
+      search["searchThreadId"] = TgFeatureParam(params, "threadId");
+      search["topicId"] = ""; search["threadId"] = "";
+      result.items.push_back(TgFeatureItem("Search Telegram history", "tg.search.run", search,
+        {{"query", "Search text (filters are optional on the results page)", ""}}));
       add("Chats, topics and Secret Chats", "tg.menu.chats");
       add("Stories", "tg.stories.list");
       if (chat)
@@ -148,6 +158,29 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
   {
     ClientActionResult result;
     result.title = title;
+    const bool search = request->operation == "tg.search.run";
+    if (search)
+    {
+      result.text = "Search: " + TgFeatureParam(context, "query") + "\n" +
+        std::to_string(messages.size()) + " messages on this page. Filters are optional.";
+      const auto scope = TgFeatureParam(context, "scope");
+      result.text += "\nScope: " + std::string(scope == "chat" ? "this chat/topic" :
+        scope == "secret" ? "Secret Chats on this device" : "all Telegram chats");
+      for (const auto& filter : std::vector<std::pair<std::string, std::string>>{
+        {"type", "Type"}, {"sender", "Sender"}, {"after", "From"}, {"before", "Through"}})
+      {
+        const auto value = TgFeatureParam(context, filter.first);
+        if (!value.empty() && !(filter.first == "type" && value == "all"))
+          result.text += " · " + filter.second + ": " + value;
+      }
+      auto edit = context;
+      edit["offset"] = ""; edit["from"] = ""; edit["_quickForm"] = "1";
+      result.items.push_back(TgFeatureItem("Edit search text", "tg.search.run", edit,
+        {{"query", "Search text", TgFeatureParam(context, "query")}}));
+      result.items.push_back(TgFeatureItem("Search filters and scope", "tg.search", edit));
+    }
+    else result.text = std::to_string(messages.size()) +
+      " messages on this page. Select a message to read its full text and attachments.";
     for (auto& value : messages)
     {
       if (!value) continue;
@@ -164,10 +197,9 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
       TdMessageConvert(*value, converted);
       const auto heading = GetContactName(StrUtil::NumFromHex<int64_t>(converted.senderId)) +
         " · " + TgFeatureTimestamp(date);
-      result.text += heading + "\n" + converted.text + "\n\n";
       result.items.push_back(TgFeatureItem(heading, "tg.message", itemParams, {}, false, converted.text));
     }
-    if (messages.empty()) result.text = "No messages on this page.";
+    if (messages.empty()) result.text += search ? "\nNo matches on this page. Try changing a filter or loading more results." : "No messages on this page.";
     if (TgFeatureParam(context, "topicId") != "" || TgFeatureParam(context, "threadId") != "")
     {
       result.items.insert(result.items.begin(), TgFeatureItem("Reply here", "tg.thread.send", context,
@@ -302,33 +334,55 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
   if (operation == "tg.search")
   {
     ClientActionResult result;
-    result.title = "Search Telegram";
-    result.text = "Searches Telegram's available history. Secret Chats have a separate device-local search. Sender and date filters are applied to each page; use More results to continue.";
-    auto context = params; context["offset"] = ""; context["from"] = ""; context["scope"] = ""; context["senderResolved"] = "";
-    context["topicId"] = ""; context["threadId"] = "";
-    result.items.push_back(TgFeatureItem("Search all Telegram chats", "tg.search.run", context,
-      {{"query", "Search text (may be blank with a type filter)", ""},
-       {"type", "Type: all/photo/video/audio/file/voice/video note/link/poll", "all"},
-       {"sender", "Sender name, @username or Telegram numeric ID (optional)", ""},
-       {"after", "From date YYYY-MM-DD (optional)", ""}, {"before", "Through date YYYY-MM-DD (optional)", ""}}));
-    if (chat)
+    result.title = "Optional Telegram search filters";
+    result.text = "Change only the filters you need. Sender/date filtering can leave empty pages; More results continues searching. Secret Chats are searched on this device only.";
+    auto context = params;
+    context["offset"] = ""; context["from"] = ""; context["_quickForm"] = "1";
+    result.items.push_back(TgFeatureItem("Search text", "tg.search.run", context,
+      {{"query", "Search text (may be blank with a type filter)", TgFeatureParam(params, "query")}}));
+    result.items.push_back(TgFeatureItem("Message type: " + TgFeatureParam(params, "type"), "tg.search.types", context));
+    auto sender = context; sender["senderResolved"] = "";
+    result.items.push_back(TgFeatureItem("Sender (optional)", "tg.search.run", sender,
+      {{"sender", "Sender name, @username or Telegram numeric ID (blank clears)", TgFeatureParam(params, "sender")}}));
+    result.items.push_back(TgFeatureItem("From date (optional)", "tg.search.run", context,
+      {{"after", "From date YYYY-MM-DD (blank clears)", TgFeatureParam(params, "after")}}));
+    result.items.push_back(TgFeatureItem("Through date (optional)", "tg.search.run", context,
+      {{"before", "Through date YYYY-MM-DD (blank clears)", TgFeatureParam(params, "before")}}));
+    auto all = context; all["scope"] = ""; all["topicId"] = ""; all["threadId"] = "";
+    if (TgFeatureParam(all, "type") == "pinned") all["type"] = "all";
+    result.items.push_back(TgFeatureItem("Scope: all Telegram chats", "tg.search.run", all));
+    const auto searchChat = TgFeatureParam(params, "searchChatId").empty() ?
+      TgFeatureParam(params, "chatId") : TgFeatureParam(params, "searchChatId");
+    if (!searchChat.empty())
     {
-      context = params;
-      context["offset"] = ""; context["from"] = ""; context["senderResolved"] = "";
-      context["scope"] = "chat";
-      result.items.push_back(TgFeatureItem("Search this chat or topic", "tg.search.run", context,
-        {{"query", "Search text", ""}, {"type", "Type: all/photo/video/audio/file/voice/video note/link/poll/pinned", "all"},
-         {"sender", "Sender name, @username or numeric ID (optional)", ""},
-         {"after", "From date YYYY-MM-DD (optional)", ""}, {"before", "Through date YYYY-MM-DD (optional)", ""}}));
+      auto current = context; current["scope"] = "chat";
+      current["chatId"] = searchChat;
+      if (params.count("searchTopicId")) current["topicId"] = TgFeatureParam(params, "searchTopicId");
+      if (params.count("searchThreadId")) current["threadId"] = TgFeatureParam(params, "searchThreadId");
+      result.items.push_back(TgFeatureItem("Scope: this chat or topic", "tg.search.run", current));
     }
-    context = params;
-    context["scope"] = "secret";
-    context["offset"] = ""; context["from"] = ""; context["senderResolved"] = "";
-    context["topicId"] = ""; context["threadId"] = "";
-    result.items.push_back(TgFeatureItem("Search Secret Chats on this device", "tg.search.run", context,
-      {{"query", "Search text", ""}, {"type", "Type: all/photo/video/audio/file/voice/video note/link/poll", "all"},
-       {"sender", "Sender name or ID (optional)", ""},
-       {"after", "From date YYYY-MM-DD (optional)", ""}, {"before", "Through date YYYY-MM-DD (optional)", ""}}));
+    auto secret = all; secret["scope"] = "secret";
+    result.items.push_back(TgFeatureItem("Scope: Secret Chats on this device", "tg.search.run", secret));
+    auto clear = context;
+    clear["sender"] = ""; clear["senderResolved"] = ""; clear["after"] = ""; clear["before"] = ""; clear["type"] = "all";
+    result.items.push_back(TgFeatureItem("Clear sender, date and type filters", "tg.search.run", clear));
+    result.items.push_back(TgFeatureItem("Show results", "tg.search.run", context));
+    request->onResult(std::move(result));
+    return;
+  }
+
+  if (operation == "tg.search.types")
+  {
+    ClientActionResult result;
+    result.title = "Search message type";
+    const bool inChat = TgFeatureParam(params, "scope") == "chat";
+    for (const std::string type : {"all", "photo", "video", "audio", "file", "voice", "video note", "link", "poll", "pinned"})
+    {
+      if (type == "pinned" && !inChat) continue;
+      auto context = params; context["type"] = type;
+      context["offset"] = ""; context["from"] = "";
+      result.items.push_back(TgFeatureItem(type, "tg.search.run", context));
+    }
     request->onResult(std::move(result));
     return;
   }

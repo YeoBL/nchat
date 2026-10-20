@@ -5855,10 +5855,11 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     if (operation == "local.menu")
     {
       page.title = "Tools · " + GetProfileDisplayName(chat.first);
-      makeItem(page, "Search messages across chats", "local.search", {}, "Search cached history without marking it read");
+      makeItem(page, "Search messages across chats", "local.search.run", {{"_quickForm", "1"}},
+        "Search cached history without marking it read", {{"query", "Message contains (blank shows recent messages)", ""}});
       makeItem(page, "Chat folders", "local.folders", {}, "Local lists, shared across your nchat accounts");
       makeItem(page, "Saved messages / bookmarks", "local.bookmarks", {}, "Local bookmarks; nothing is sent to the service");
-      makeItem(page, "Search saved audio transcripts", "local.transcripts", {}, "Search on-device transcripts without uploading audio",
+      makeItem(page, "Search saved audio transcripts", "local.transcripts", {{"_quickForm", "1"}}, "Search on-device transcripts without uploading audio",
         {{"query", "Transcript contains (blank shows recent transcripts)", ""}});
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
       if (!chat.second.empty())
@@ -5882,18 +5883,31 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
     }
     else if (operation == "local.transcripts") page = FeatureMedia::SearchTranscripts(Value(values, "query"));
-    else if (operation == "local.search")
+    else if (operation == "local.search.filters")
     {
-      page.title = "Search cached messages";
-      page.text = "This searches history already stored by nchat. Use Account tools for Telegram's server search.";
-      makeItem(page, "Search all chats", "local.search.run", {}, "Blank fields mean no restriction.",
-        {{"query", "Message contains", ""}, {"sender", "Sender name, number or ID (optional)", ""},
-         {"type", "Type: all, text, image, video, audio, file, poll, link, deleted", "all"},
-         {"from", "From date YYYY-MM-DD (optional)", ""}, {"to", "Through date YYYY-MM-DD (optional)", ""}});
-      makeItem(page, "Search this chat", "local.search.run", {{"scope", "chat"}}, "Blank query shows recent cached messages.",
-        {{"query", "Message contains", ""}, {"sender", "Sender (optional)", ""},
-         {"type", "Message type (all, image, audio, file, poll, link, deleted)", "all"},
-         {"from", "From date YYYY-MM-DD (optional)", ""}, {"to", "Through date YYYY-MM-DD (optional)", ""}});
+      page.title = "Search filters";
+      page.text = "Search: " + Value(values, "query") + "\nChoose only the filters you need, then Apply filters.";
+      Params filters = values;
+      filters["_replacePage"] = "1";
+      filters["_quickForm"] = "1";
+      for (const auto& field : std::vector<ClientActionField>{
+        {"sender", "Sender name, number or ID", Value(values, "sender")},
+        {"type", "Type: all, text, image, video, audio, file, poll, link, deleted", Value(values, "type")},
+        {"from", "From date YYYY-MM-DD", Value(values, "from")},
+        {"to", "Through date YYYY-MM-DD", Value(values, "to")}})
+      {
+        const std::string label = field.key == "sender" ? "Sender" : field.key == "type" ? "Message type" :
+          field.key == "from" ? "From date" : "Through date";
+        makeItem(page, label + ": " + (field.value.empty() ? "Any" : field.value),
+          "local.search.filters", filters, "Blank removes this filter.", {field});
+      }
+      filters["scope"] = Value(values, "scope") == "chat" ? "" : "chat";
+      makeItem(page, "Search in: " + std::string(Value(values, "scope") == "chat" ? "This chat" : "All chats"),
+        "local.search.filters", filters, "Select to switch between this chat and all chats.");
+      makeItem(page, "Apply filters", "local.search.run", values);
+      filters = values;
+      for (const auto& key : {"scope", "sender", "type", "from", "to"}) filters[key] = "";
+      makeItem(page, "Clear filters and search", "local.search.run", filters);
     }
     else if (operation == "local.search.run")
     {
@@ -5901,6 +5915,18 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       query.text = Value(values, "query"); query.sender = Value(values, "sender");
       query.type = Value(values, "type").empty() ? "all" : StrUtil::ToLower(Value(values, "type"));
       if (Value(values, "scope") == "chat") { query.profileId = chat.first; query.chatId = chat.second; }
+      // Keep controls visible above long result lists, including empty/invalid
+      // searches, so adding a filter never requires paging through matches.
+      makeItem(page, "Filters (optional)", "local.search.filters", values);
+      Params edit = values;
+      edit["_quickForm"] = "1";
+      edit["_replacePage"] = "1";
+      makeItem(page, "Edit search", "local.search.run", edit, "Keep the current filters.",
+        {{"query", "Message contains (blank shows recent messages)", Value(values, "query")}});
+      Params clear = values;
+      for (const auto& key : {"scope", "sender", "type", "from", "to"}) clear[key] = "";
+      clear["_replacePage"] = "1";
+      makeItem(page, "Clear filters", "local.search.run", clear, "Keep the search text and search all chats.");
       const std::set<std::string> types = {"all", "text", "attachment", "image", "video", "audio", "file", "poll", "link", "deleted"};
       if (!types.count(query.type) || !FeatureUtil::DateBound(Value(values, "from"), false, query.fromTime) ||
           !FeatureUtil::DateBound(Value(values, "to"), true, query.toTime) ||
@@ -6124,7 +6150,17 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     }
     return false;
   };
-  UiClientActionDialog::RunActions(this, protocol, "nchat tools", p_Operation, p_Params, openFile, dispatch, openAction);
+  std::string operation = p_Operation;
+  if (operation == "local.search")
+  {
+    UiDialogParams params(this, "Search messages", 0.8, 0.55);
+    ClientActionUi::FieldDialog dialog(params,
+      {"query", "Message contains (blank shows recent messages)", Value(p_Params, "query")});
+    if (!dialog.Run()) { ReinitView(); return; }
+    p_Params["query"] = dialog.Value();
+    operation = "local.search.run";
+  }
+  UiClientActionDialog::RunActions(this, protocol, "nchat tools", operation, p_Params, openFile, dispatch, openAction);
 }
 
 void UiModel::OnKeyReact()

@@ -277,22 +277,55 @@ int main()
     Key("Search messages across chats", "cancel");
     Run(model, "client_actions");
 
-    Choose("Search cached messages", "Search all chats");
     input.push_back({"Message contains", 0});
     Text("unique-preview-text");
     Key("", "ok");
-    Key("Sender name", "ok");
-    Key("Type: all", "ok");
-    Key("From date", "ok");
-    Key("Through date", "ok");
-    Choose("Review: Search all chats", "Confirm: Search all chats");
-    Key("Search results", "end");
-    Key("", "ok");
+    // One text submission must go straight to results: any old scope menu,
+    // sender/type/date wizard or review page fails this screen assertion.
+    Choose("Search results", "unique-preview-text");
     Key("Preview must not read this message.", "cancel");
     Run(model, "global_search");
     assert(Chat(model) == "alpha" && Entry(model) == L"Draft alpha ");
 
+    // Filters are optional, independently editable and survive Back/cancel.
+    Key("Message contains", "ok"); // blank query: show recent messages
+    Choose("Search results", "Filters (optional)");
+    Choose("Search filters", "Sender: Any");
+    Text("not-a-matching-sender");
+    Key("", "ok"); // no other field prompts and no review
+    Choose("Sender: not-a-matching-sender", "From date: Any");
+    Text("2000-01-01");
+    Key("", "cancel");
+    Choose("From date: Any", "Apply filters");
+    Choose("Search results", "Edit search");
+    Text("changed but canceled");
+    Key("", "cancel");
+    Choose("Search results", "Filters (optional)");
+    Key("Sender: not-a-matching-sender", "left");
+    Choose("Search results", "Clear filters");
+    Choose("Search results", "unique-preview-text");
+    Key("Preview must not read this message.", "left");
+    Choose("Search results", "Edit search");
+    Text("no-matches-text");
+    Key("", "ok");
+    Choose("Search results", "Edit search");
+    Key("Message contains", "delete_line_before_cursor");
+    Text("unique-preview-text");
+    Key("", "ok");
+    Choose("Search results", "unique-preview-text");
+    Key("Preview must not read this message.", "cancel");
+    Run(model, "global_search");
+
+    // The F2 entry shares the query-only UX, rather than restoring the wizard.
+    Choose("Search messages across chats", "Search messages across chats");
+    Text("unique-preview-text");
+    Key("", "ok");
+    Choose("Search results", "unique-preview-text");
+    Key("Preview must not read this message.", "cancel");
+    Run(model, "client_actions");
+
     Choose("Chat folders", "Create folder");
+    Choose("Review: Create folder", "Folder name");
     input.push_back({"Folder name", 0});
     Text("Offline friends");
     Key("", "ok");
