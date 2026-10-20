@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 
+	"encoding/json"
 	"fmt"
 
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -156,19 +158,89 @@ func structuredMessageText(msg *waE2E.Message) string {
 	case msg.GetLiveLocationMessage() != nil:
 		loc := msg.GetLiveLocationMessage()
 		return fmt.Sprintf("[Live location snapshot] %s\nhttps://maps.apple.com/?ll=%g,%g", loc.GetCaption(), loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+	case msg.GetButtonsMessage() != nil:
+		buttons := msg.GetButtonsMessage()
+		lines := []string{buttons.GetContentText()}
+		for _, button := range buttons.GetButtons() {
+			lines = append(lines, "• "+button.GetButtonText().GetDisplayText())
+		}
+		lines = append(lines, "[Open Account tools → Message details to respond]")
+		return strings.Join(lines, "\n")
+	case msg.GetListMessage() != nil:
+		list := msg.GetListMessage()
+		lines := []string{list.GetTitle(), list.GetDescription()}
+		for _, section := range list.GetSections() {
+			for _, row := range section.GetRows() {
+				lines = append(lines, "• "+row.GetTitle()+" — "+row.GetDescription())
+			}
+		}
+		lines = append(lines, "[Open Account tools → Message details to choose]")
+		return strings.Join(lines, "\n")
+	case msg.GetButtonsResponseMessage() != nil:
+		return "[Button response] " + msg.GetButtonsResponseMessage().GetSelectedDisplayText()
+	case msg.GetListResponseMessage() != nil:
+		return "[List response] " + msg.GetListResponseMessage().GetTitle()
+	case msg.GetInteractiveMessage() != nil:
+		interactive := msg.GetInteractiveMessage()
+		text := strings.TrimSpace("[Interactive message]\n" + interactive.GetHeader().GetTitle() + "\n" + interactive.GetBody().GetText() + "\n" + interactive.GetFooter().GetText())
+		for _, button := range nativeActionButtons(msg) {
+			text += "\n• " + button.Text
+		}
+		return text
+	case msg.GetInteractiveResponseMessage() != nil:
+		return "[Interactive response] " + msg.GetInteractiveResponseMessage().GetBody().GetText()
 	}
 	return ""
 }
 
 func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op string, p map[string]string) (actionResult, bool) {
-	if op != "message_details" {
+	if op != "message_details" && op != "business_reply" {
 		return actionResult{}, false
 	}
-	_, msg := messageActionEntry(connID, p["chatId"], p["msgId"])
+	entry, msg := messageActionEntry(connID, p["chatId"], p["msgId"])
 	if msg == nil {
-		return actionError("Message details", fmt.Errorf("structured details are not loaded for this message")), true
+		return actionError("Message details", fmt.Errorf("structured details are not loaded for this message; load earlier phone history or wait for it to sync")), true
+	}
+	if op == "business_reply" {
+		chat, err := actionChat(p)
+		if err != nil {
+			return actionError("Reply", err), true
+		}
+		ci := &waE2E.ContextInfo{StanzaID: proto.String(entry.ID), Participant: proto.String(entry.SenderID), QuotedMessage: msg}
+		var reply *waE2E.Message
+		if buttons := msg.GetButtonsMessage(); buttons != nil {
+			for _, button := range buttons.GetButtons() {
+				if button.GetButtonID() == p["buttonId"] && button.GetButtonText() != nil {
+					reply = &waE2E.Message{ButtonsResponseMessage: &waE2E.ButtonsResponseMessage{SelectedButtonID: proto.String(button.GetButtonID()), Response: &waE2E.ButtonsResponseMessage_SelectedDisplayText{SelectedDisplayText: button.GetButtonText().GetDisplayText()}, Type: waE2E.ButtonsResponseMessage_DISPLAY_TEXT.Enum(), ContextInfo: ci}}
+					break
+				}
+			}
+		} else if list := msg.GetListMessage(); list != nil {
+			for _, section := range list.GetSections() {
+				for _, row := range section.GetRows() {
+					if row.GetRowID() == p["rowId"] {
+						reply = &waE2E.Message{ListResponseMessage: &waE2E.ListResponseMessage{Title: proto.String(row.GetTitle()), Description: proto.String(row.GetDescription()), ListType: waE2E.ListResponseMessage_SINGLE_SELECT.Enum(), SingleSelectReply: &waE2E.ListResponseMessage_SingleSelectReply{SelectedRowID: proto.String(row.GetRowID())}, ContextInfo: ci}}
+					}
+				}
+			}
+		}
+		if reply == nil {
+			for _, button := range nativeActionButtons(msg) {
+				if button.Name == "quick_reply" && button.ID == p["nativeButtonId"] {
+					reply = nativeQuickReply(button, ci)
+					break
+				}
+			}
+		}
+		if reply == nil {
+			return actionError("Business reply", fmt.Errorf("this button is unavailable or requires the official app")), true
+		}
+		return sendActionMessage(ctx, connID, cli, chat, reply, "Reply sent"), true
 	}
 	r := actionOK("Message details", structuredMessageText(msg))
+	if r.Text == "" {
+		r.Text = "This message has no additional structured controls."
+	}
 	if loc := msg.GetLocationMessage(); loc != nil {
 		r.Items = append(r.Items, action("Open map", loc.GetName(), "openUrl", map[string]string{"url": fmt.Sprintf("https://maps.apple.com/?ll=%g,%g", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())}, nil, false))
 	}
@@ -183,7 +255,64 @@ func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op 
 			r.Items = append(r.Items, contactActions(contact)...)
 		}
 	}
+	if buttons := msg.GetButtonsMessage(); buttons != nil {
+		for _, button := range buttons.GetButtons() {
+			if button.GetButtonText() != nil {
+				r.Items = append(r.Items, action(button.GetButtonText().GetDisplayText(), "Send this button reply", "business_reply", map[string]string{"buttonId": button.GetButtonID()}, nil, true))
+			}
+		}
+	}
+	if list := msg.GetListMessage(); list != nil {
+		for _, section := range list.GetSections() {
+			for _, row := range section.GetRows() {
+				r.Items = append(r.Items, action(row.GetTitle(), row.GetDescription(), "business_reply", map[string]string{"rowId": row.GetRowID()}, nil, true))
+			}
+		}
+	}
+	if msg.GetInteractiveMessage() != nil {
+		buttons := nativeActionButtons(msg)
+		for _, button := range buttons {
+			if button.Name == "quick_reply" {
+				r.Items = append(r.Items, action(button.Text, "Send this button reply", "business_reply", map[string]string{"nativeButtonId": button.ID}, nil, true))
+			} else if button.Name == "cta_url" {
+				r.Items = append(r.Items, action(button.Text, button.URL, "openUrl", map[string]string{"url": button.URL}, nil, false))
+			}
+		}
+		if len(buttons) == 0 {
+			r.Text += "\nThis interactive form requires the official app."
+		}
+	}
 	return r, true
+}
+
+type nativeActionButton struct{ Name, ID, Text, URL string }
+
+func nativeActionButtons(msg *waE2E.Message) []nativeActionButton {
+	buttons := []nativeActionButton{}
+	for _, button := range msg.GetInteractiveMessage().GetNativeFlowMessage().GetButtons() {
+		var values map[string]string
+		if json.Unmarshal([]byte(button.GetButtonParamsJSON()), &values) != nil {
+			continue
+		}
+		item := nativeActionButton{Name: button.GetName(), ID: values["id"], Text: values["display_text"], URL: values["url"]}
+		if item.Text == "" {
+			continue
+		}
+		if item.Name == "quick_reply" && item.ID != "" {
+			buttons = append(buttons, item)
+		} else if item.Name == "cta_url" {
+			parsed, err := url.Parse(item.URL)
+			if err == nil && parsed.Host != "" && (parsed.Scheme == "https" || parsed.Scheme == "http") {
+				buttons = append(buttons, item)
+			}
+		}
+	}
+	return buttons
+}
+
+func nativeQuickReply(button nativeActionButton, ci *waE2E.ContextInfo) *waE2E.Message {
+	params, _ := json.Marshal(map[string]string{"id": button.ID, "display_text": button.Text})
+	return &waE2E.Message{InteractiveResponseMessage: &waE2E.InteractiveResponseMessage{Body: &waE2E.InteractiveResponseMessage_Body{Text: proto.String(button.Text), Format: waE2E.InteractiveResponseMessage_Body_DEFAULT.Enum()}, ContextInfo: ci, InteractiveResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage_{NativeFlowResponseMessage: &waE2E.InteractiveResponseMessage_NativeFlowResponseMessage{Name: proto.String("quick_reply"), ParamsJSON: proto.String(string(params)), Version: proto.Int32(3)}}}}
 }
 
 func contactActions(contact *waE2E.ContactMessage) []actionItem {
