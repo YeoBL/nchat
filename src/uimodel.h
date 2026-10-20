@@ -301,6 +301,7 @@ private:
     int64_t m_NextBadgeSyncMs = -1;
     bool m_HomeFetchAll = false;
     bool m_TerminalActive = true;
+    bool m_DeferInitialChat = false;
     bool m_HistoryInteraction = false;
 
     int m_HelpOffset = 0;

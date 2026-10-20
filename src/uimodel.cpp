@@ -8,6 +8,7 @@
 #include "uimodel.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 #include <ncurses.h>
 #include <sys/ioctl.h>
@@ -49,6 +50,7 @@ const std::pair<std::string, std::string> UiModel::Impl::s_ChatNone;
 
 UiModel::Impl::Impl(UiModel* p_UiModel)
 {
+  m_DeferInitialChat = std::getenv("NCHAT_NO_AUTO_SELECT") != nullptr;
   m_View = std::make_shared<UiView>(p_UiModel);
 }
 
@@ -69,6 +71,7 @@ void UiModel::Impl::Cleanup()
 
 void UiModel::Impl::AnyUserKeyInput()
 {
+  m_DeferInitialChat = false;
   // set current chat upon any user interaction
   if (SetCurrentChatIndexIfNotSet())
   {
@@ -3291,6 +3294,8 @@ bool UiModel::Impl::IsCurrentChatSet()
 
 bool UiModel::Impl::SetCurrentChatIndexIfNotSet()
 {
+  // Detached sync startup waits for a real user key before opening any chat.
+  if (m_DeferInitialChat) return false;
   if ((m_CurrentChatIndex >= 0) || (m_ChatVec.empty())) return false;
 
   m_CurrentChatIndex = 0;
