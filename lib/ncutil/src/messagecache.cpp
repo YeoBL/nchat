@@ -1235,6 +1235,24 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
         for (const auto& msg : addMessagesRequest->chatMessages)
         {
+          // Telegram omits permanently deleted messages from history. Keep a
+          // cached deletion marker if stale history ever supplies that ID.
+          int wasDeleted = 0;
+          try
+          {
+            *m_Dbs[profileId] << "SELECT COALESCE(isDeleted, 0) FROM " + s_TableMessages +
+              " WHERE chatId = ? AND id = ?;" << chatId << msg.id >>
+              [&](const int& isDeleted)
+              {
+                wasDeleted = isDeleted;
+              };
+          }
+          catch (const sqlite::sqlite_exception& ex)
+          {
+            HANDLE_SQLITE_EXCEPTION(ex);
+          }
+          if (wasDeleted && !msg.isDeleted) continue;
+
           // Fetch already cached message reactions
           Reactions oldReactions;
           try

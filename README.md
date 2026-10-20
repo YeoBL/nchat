@@ -385,7 +385,8 @@ Specifies whether to use bracket quoting for display-name mentions with spaces.
 
 ### message_delete
 
-Specifies handling of message deletion by other users (WhatsApp and Signal):
+Specifies handling of message deletion by other users (WhatsApp, Signal, and
+Telegram; Telegram applies this to messages currently present in the local cache):
 
     1 = erase message <- default
     2 = replace message text with `[This message was deleted]`

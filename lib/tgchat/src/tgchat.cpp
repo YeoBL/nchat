@@ -43,12 +43,6 @@
 #include "strutil.h"
 #include "timeutil.h"
 
-// TDLib's history view (consulted on startup) has the message erased, so the
-// modified copy becomes an orphan that's either invisible after restart or
-// resurfaces inconsistently during scrollback. Only MessageDeleteErase is
-// supported for Telegram for now.
-// #define CUSTOM_MESSAGE_DELETE_SUPPORT
-
 // For development testing of sponsored messages only
 // #define SIMULATED_SPONSORED_MESSAGES
 
@@ -2090,11 +2084,7 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
     std::vector<std::int64_t> msgIds = delete_messages.message_ids_;
     for (const auto& msgId : msgIds)
     {
-#ifdef CUSTOM_MESSAGE_DELETE_SUPPORT
       static const int messageDelete = AppConfig::GetNum("message_delete");
-#else
-      static const int messageDelete = MessageDeleteErase;
-#endif
 
       if ((messageDelete == MessageDeleteReplace) || (messageDelete == MessageDeletePrefix))
       {
