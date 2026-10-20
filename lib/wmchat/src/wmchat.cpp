@@ -416,6 +416,7 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
         sendMessageNotify->success = (rv == 0);
         sendMessageNotify->chatId = sendMessageRequest->chatId;
         sendMessageNotify->chatMessage = sendMessageRequest->chatMessage;
+        if (sendMessageRequest->onResult) sendMessageRequest->onResult(rv == 0);
         CallMessageHandler(sendMessageNotify);
       }
       break;
@@ -473,6 +474,7 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
         markMessageReadNotify->chatId = markMessageReadRequest->chatId;
         markMessageReadNotify->msgId = markMessageReadRequest->msgId;
         CallMessageHandler(markMessageReadNotify);
+        if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(rv == 0);
       }
       break;
 

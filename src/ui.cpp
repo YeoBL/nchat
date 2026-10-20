@@ -16,6 +16,7 @@
 #include "log.h"
 #include "messagecache.h"
 #include "peekdownloads.h"
+#include "widgetreplies.h"
 #include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
@@ -88,6 +89,7 @@ void Ui::Run()
 {
   std::unordered_map<std::string, std::shared_ptr<Protocol>> protocols = m_Model->GetProtocols();
   PeekDownloads peekDownloads(protocols);
+  WidgetReplies widgetReplies(protocols);
 
   // retrieve cached contacts for use until receiving latest from chat service
   for (auto& protocol : protocols)

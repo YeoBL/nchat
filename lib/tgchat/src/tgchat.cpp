@@ -1273,7 +1273,12 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         {
           Status::Clear(m_ProfileId, Status::FlagSending);
 
-          if (object->get_id() == td::td_api::error::ID) return;
+          if (object->get_id() == td::td_api::error::ID)
+          {
+            if (sendMessageRequest->onResult) sendMessageRequest->onResult(false);
+            return;
+          }
+          if (sendMessageRequest->onResult) sendMessageRequest->onResult(true);
 
           std::shared_ptr<SendMessageNotify> sendMessageNotify =
             std::make_shared<SendMessageNotify>(m_ProfileId);
@@ -1389,7 +1394,11 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           SendQuery(std::move(view_messages),
                     [this, markMessageReadRequest](Object object)
           {
-            if (object->get_id() == td::td_api::error::ID) return;
+            if (object->get_id() == td::td_api::error::ID)
+            {
+              if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(false);
+              return;
+            }
 
             std::shared_ptr<MarkMessageReadNotify> markMessageReadNotify =
               std::make_shared<MarkMessageReadNotify>(m_ProfileId);
@@ -1397,6 +1406,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             markMessageReadNotify->chatId = markMessageReadRequest->chatId;
             markMessageReadNotify->msgId = markMessageReadRequest->msgId;
             CallMessageHandler(markMessageReadNotify);
+            if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(true);
           });
         }
 
