@@ -858,7 +858,11 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 
 	case *events.Message:
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
-		handler.HandleMessage(evt.Info, evt.Message, false /*isSyncRead*/)
+		message := evt.Message
+		if evt.IsViewOnce {
+			message = markDeliveredViewOnce(message)
+		}
+		handler.HandleMessage(evt.Info, message, false /*isSyncRead*/)
 
 	case *events.UndecryptableMessage:
 		LOG_TRACE(fmt.Sprintf("%#v", evt))

@@ -63,11 +63,21 @@ func closeActionMessages(path string) {
 }
 
 func unwrapActionMessage(msg *waE2E.Message) *waE2E.Message {
+	viewOnce := false
 	for depth := 0; msg != nil && depth < 12; depth++ {
 		var inner *waE2E.Message
 		switch {
 		case msg.GetEphemeralMessage() != nil:
 			inner = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage() != nil:
+			inner = msg.GetViewOnceMessage().GetMessage()
+			viewOnce = true
+		case msg.GetViewOnceMessageV2() != nil:
+			inner = msg.GetViewOnceMessageV2().GetMessage()
+			viewOnce = true
+		case msg.GetViewOnceMessageV2Extension() != nil:
+			inner = msg.GetViewOnceMessageV2Extension().GetMessage()
+			viewOnce = true
 		case msg.GetDocumentWithCaptionMessage() != nil:
 			inner = msg.GetDocumentWithCaptionMessage().GetMessage()
 		case msg.GetDeviceSentMessage() != nil:
@@ -81,7 +91,36 @@ func unwrapActionMessage(msg *waE2E.Message) *waE2E.Message {
 	if msg == nil {
 		return nil
 	}
+	if viewOnce || msg.GetImageMessage().GetViewOnce() || msg.GetVideoMessage().GetViewOnce() {
+		msg = markDeliveredViewOnce(msg)
+	}
 	return msg
+}
+
+func markDeliveredViewOnce(msg *waE2E.Message) *waE2E.Message {
+	if msg == nil {
+		return nil
+	}
+	copy := proto.Clone(msg).(*waE2E.Message)
+	if image := copy.GetImageMessage(); image != nil {
+		image.ViewOnce = proto.Bool(true)
+		if !strings.HasPrefix(image.GetCaption(), "[View once]") {
+			image.Caption = proto.String(strings.TrimSpace("[View once] " + image.GetCaption()))
+		}
+	}
+	if video := copy.GetVideoMessage(); video != nil {
+		video.ViewOnce = proto.Bool(true)
+		if !strings.HasPrefix(video.GetCaption(), "[View once]") {
+			video.Caption = proto.String(strings.TrimSpace("[View once] " + video.GetCaption()))
+		}
+	}
+	if audio := copy.GetAudioMessage(); audio != nil {
+		audio.ViewOnce = proto.Bool(true)
+	}
+	if videoNote := copy.GetPtvMessage(); videoNote != nil {
+		videoNote.ViewOnce = proto.Bool(true)
+	}
+	return copy
 }
 
 func recordActionMessage(connID int, info types.MessageInfo, msg *waE2E.Message) {
