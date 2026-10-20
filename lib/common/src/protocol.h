@@ -126,6 +126,11 @@ enum MessageType
   UpdatePinNotifyType,
   NewGroupMembersNotifyType,
   UpdateArchivedNotifyType,
+  GetMessageReceiptsRequestType,
+  GetMessageReactionsRequestType,
+  VotePollRequestType,
+  GetPollVotesRequestType,
+  UpdateMembershipNotifyType,
 };
 
 struct ContactInfo
@@ -216,6 +221,7 @@ enum DownloadFileAction
   DownloadFileActionNone = 0,
   DownloadFileActionOpen = 1,
   DownloadFileActionSave = 2,
+  DownloadFileActionCacheOnly = 3, // Local cache client: never open or redraw a chat.
 };
 
 // Request messages
@@ -264,12 +270,91 @@ public:
   int32_t limit;
 };
 
+struct MessageReceipt
+{
+  std::string userId;
+  int64_t deliveredTime = 0; // Unix seconds; zero means not supplied, not undelivered.
+  int64_t readTime = 0; // -1: confirmed viewer, timestamp unavailable.
+};
+
+struct MessageReceiptInfo
+{
+  std::vector<MessageReceipt> receipts;
+  std::string note;
+};
+
+class GetMessageReceiptsRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return GetMessageReceiptsRequestType; }
+  std::string chatId;
+  std::string msgId;
+  std::function<void(MessageReceiptInfo)> onResult;
+};
+
+struct MessageReactor
+{
+  std::string userId;
+  std::string emoji;
+};
+
+struct MessageReactorInfo
+{
+  std::vector<MessageReactor> reactors;
+  std::string note;
+};
+
+class GetMessageReactionsRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return GetMessageReactionsRequestType; }
+  std::string chatId;
+  std::string msgId;
+  std::function<void(MessageReactorInfo)> onResult;
+};
+
+class VotePollRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return VotePollRequestType; }
+  std::string chatId;
+  std::string msgId;
+  std::string senderId;
+  std::vector<int> optionIndexes;
+  bool isOutgoing = false;
+  std::function<void(bool, std::string)> onResult;
+};
+
+struct PollVote
+{
+  int optionIndex = -1;
+  std::string userId;
+};
+
+struct PollVoteInfo
+{
+  std::vector<PollVote> votes;
+  std::string note;
+};
+
+class GetPollVotesRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return GetPollVotesRequestType; }
+  std::string chatId;
+  std::string msgId;
+  std::function<void(PollVoteInfo)> onResult;
+};
+
 class SendMessageRequest : public RequestMessage
 {
 public:
   virtual MessageType GetMessageType() const { return SendMessageRequestType; }
   std::string chatId;
   ChatMessage chatMessage;
+  // Optional completion for explicitly submitted local-widget replies.
+  // Success means accepted by the protocol, not delivered/read by the recipient.
+  std::function<void(bool)> onResult;
 };
 
 class EditMessageRequest : public RequestMessage
@@ -289,6 +374,7 @@ public:
   std::string senderId; // only required for wmchat
   std::string msgId;
   bool readAllReactions = false;
+  std::function<void(bool)> onResult;
 };
 
 class DeleteMessageRequest : public RequestMessage
@@ -619,7 +705,8 @@ public:
     : ServiceMessage(p_ProfileId) { }
   virtual MessageType GetMessageType() const { return NewMessageStatusNotifyType; }
   std::string chatId;
-  std::string msgId;
+  std::string msgId; // empty with no readThroughId means the whole incoming chat
+  std::string readThroughId; // Telegram inbox marker; never covers newer messages
   bool isRead = false;
 };
 
@@ -737,6 +824,15 @@ public:
   virtual MessageType GetMessageType() const { return NewGroupMembersNotifyType; }
   std::string chatId;
   std::vector<ContactInfo> contactInfos;
+};
+
+class UpdateMembershipNotify : public ServiceMessage
+{
+public:
+  explicit UpdateMembershipNotify(const std::string& p_ProfileId) : ServiceMessage(p_ProfileId) { }
+  virtual MessageType GetMessageType() const { return UpdateMembershipNotifyType; }
+  std::string chatId;
+  bool isMember = true;
 };
 
 class UpdateArchivedNotify : public ServiceMessage
