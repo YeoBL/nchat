@@ -231,6 +231,7 @@ void UiKeyConfig::Init(bool p_MapKeys)
     { "client_actions", "KEY_F2" },
     { "global_search", "KEY_F3" },
     { "folders", "KEY_F4" },
+    { "bookmarks", "KEY_F5" },
     { "transcribe", "\\33\\124" }, // alt/opt-shift-t
     { "spell", "\\33\\44" }, // alt/opt-$
     { "jump_quoted", "\\33\\161" }, // alt/opt-q

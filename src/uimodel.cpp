@@ -4709,6 +4709,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyClientActions = UiKeyConfig::GetKey("client_actions");
   static wint_t keyGlobalSearch = UiKeyConfig::GetKey("global_search");
   static wint_t keyFolders = UiKeyConfig::GetKey("folders");
+  static wint_t keyBookmarks = UiKeyConfig::GetKey("bookmarks");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4912,6 +4913,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   }
   else if (p_Key == keyGlobalSearch) OnKeyClientActions("local.search");
   else if (p_Key == keyFolders) OnKeyClientActions("local.folders");
+  else if (p_Key == keyBookmarks) OnKeyClientActions("local.bookmarks");
   else if (p_Key == keyReact)
   {
     OnKeyReact();
@@ -5756,7 +5758,12 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       page.title = "Tools · " + GetProfileDisplayName(chat.first);
       makeItem(page, "Search messages across chats", "local.search", {}, "Search cached history without marking it read");
       makeItem(page, "Chat folders", "local.folders", {}, "Local lists, shared across your nchat accounts");
+      makeItem(page, "Saved messages / bookmarks", "local.bookmarks", {}, "Local bookmarks; nothing is sent to the service");
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
+      if (!Value(context, "msgId").empty())
+      {
+        makeItem(page, "Bookmark / unbookmark selected message", "local.bookmark.toggle");
+      }
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
       if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
     }
@@ -5805,6 +5812,8 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       if (!Value(values, "profile").empty() && !Value(values, "chatId").empty())
         makeItem(page, "Open chat", "navigate", values, "Opening the chat uses your normal mark-as-read setting.");
       makeItem(page, "Copy message", "local.copy", values);
+      if (!Value(values, "msgId").empty() && !Value(values, "chatId").empty())
+        makeItem(page, "Bookmark / unbookmark", "local.bookmark.toggle", values);
       if (!Value(values, "path").empty() && FileUtil::Exists(Value(values, "path"))) page.filePath = Value(values, "path");
       if (!Value(values, "fileInfo").empty())
       {
@@ -5841,6 +5850,28 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
         makeItem(page, GetImpl().GetContactListName(member.first, member.second, true, true), "navigate",
           {{"profile", member.first}, {"chatId", member.second}});
       makeItem(page, "Delete folder", "local.folder.delete", {{"folder", folder}}, "This removes only the folder, not any chat or message.", {}, true);
+      if (!page.success) page.text = local.GetError();
+    }
+    else if (operation == "local.bookmarks" || operation == "local.bookmark.toggle")
+    {
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      auto& local = GetImpl().GetLocalFeatures();
+      const LocalFeatures::Chat source{Value(values, "profile"), Value(values, "chatId")};
+      if (operation == "local.bookmark.toggle")
+      {
+        const auto id = Value(values, "msgId");
+        const auto timeText = Value(values, "timeSent");
+        const int64_t time = StrUtil::IsInteger(timeText) ? std::strtoll(timeText.c_str(), nullptr, 10) : 0;
+        page.success = local.IsBookmarked(source, id) ? local.RemoveBookmark(source, id) : local.SetBookmark(source, id, Value(values, "text"), time);
+      }
+      page.title = "Saved messages / bookmarks";
+      page.text = "Local bookmarks remain on this computer only.";
+      auto bookmarks = local.GetBookmarks();
+      std::sort(bookmarks.begin(), bookmarks.end(), [](const LocalFeatures::Bookmark& a, const LocalFeatures::Bookmark& b) { return a.time > b.time; });
+      for (const auto& bookmark : bookmarks)
+        makeItem(page, GetImpl().GetContactListName(bookmark.chat.first, bookmark.chat.second, true, true), "local.message",
+          {{"profile", bookmark.chat.first}, {"chatId", bookmark.chat.second}, {"msgId", bookmark.msgId},
+           {"text", bookmark.text}, {"timeSent", std::to_string(bookmark.time)}, {"fileInfo", ""}}, bookmark.text);
       if (!page.success) page.text = local.GetError();
     }
     else { page.success = false; page.text = "This action is not available."; }
