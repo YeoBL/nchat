@@ -1,0 +1,11 @@
+#!/bin/sh
+# Clear stale Kitty graphics from the terminal hosting this screen session.
+set -eu
+[ -n "${STY:-}" ] || exit 0
+screen_pid=${STY%%.*}
+case "$screen_pid" in ''|*[!0-9]*) exit 0;; esac
+render_tty=$(lsof -a -p "$screen_pid" -Fn 2>/dev/null |
+  sed -n 's|^n\(/dev/tty[^ ]*\)$|\1|p' | head -n 1) || exit 0
+[ -n "$render_tty" ] && [ -w "$render_tty" ] || exit 0
+# Delete all image ids, including virtual Unicode-placeholder images.
+printf '\033_Ga=d,d=R,x=1,y=4294967295,q=2\033\\\033[39;49m' > "$render_tty"

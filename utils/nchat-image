@@ -1,0 +1,40 @@
+#!/bin/zsh
+
+image=${1:?missing image path}
+[[ -f $image ]] || { print -u2 -- "File not found: $image"; exit 1; }
+
+# Use native Quick Look for files and when the optional terminal renderer is absent.
+if [[ $(/usr/bin/file -b --mime-type -- "$image") != image/* ]] || ! command -v chafa >/dev/null; then
+  exec /usr/bin/qlmanage -p "$image"
+fi
+
+# GNU Screen cannot preserve Kitty's image-placement cells. Write graphics to
+# Screen's attached terminal instead, keeping nchat's terminal input untouched.
+render_tty=/dev/tty
+if [[ -n ${STY:-} ]]; then
+  screen_pid=${STY%%.*}
+  attached_tty=$(/usr/sbin/lsof -a -p "$screen_pid" -Fn 2>/dev/null |
+    /usr/bin/sed -n 's|^n\(/dev/tty[^ ]*\)$|\1|p' |
+    /usr/bin/head -n 1)
+  [[ -w $attached_tty ]] && render_tty=$attached_tty
+fi
+
+clear_image() {
+  printf '\033_Ga=d,d=A,q=2\033\\\033[2J\033[H' > "$render_tty"
+  [[ -n ${STY:-} ]] && command screen -S "$STY" -X redisplay 2>/dev/null
+}
+trap clear_image EXIT INT TERM
+
+# Cmd-Option-V queues "p" after nchat's Ctrl-V.
+if IFS= read -rs -t 0.15 -k 1 choice && [[ $choice == [pP] ]]; then
+  open -a Preview "$image"
+  exit
+fi
+
+chafa --probe off --format kitty --passthrough none --work 9 --scale max \
+  --clear --align mid,mid --margin-bottom 3 --animate off "$image" > "$render_tty"
+
+printf '\n[p] Preview  [q/any key] Return to nchat: ' > "$render_tty"
+IFS= read -rs -k 1 choice
+[[ $choice == [pP] ]] && open -a Preview "$image"
+exit 0
