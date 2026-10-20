@@ -1623,7 +1623,7 @@ func (handler *WmEventHandler) HandleMessage(messageInfo types.MessageInfo, msg 
 	case msg.ImageMessage != nil:
 		handler.HandleImageMessage(messageInfo, msg, isSyncRead)
 
-	case msg.VideoMessage != nil:
+	case msg.VideoMessage != nil || msg.PtvMessage != nil:
 		handler.HandleVideoMessage(messageInfo, msg, isSyncRead)
 
 	case msg.AudioMessage != nil:
@@ -1876,6 +1876,9 @@ func (handler *WmEventHandler) HandleVideoMessage(messageInfo types.MessageInfo,
 	// get video part
 	vid := msg.GetVideoMessage()
 	if vid == nil {
+		vid = msg.GetPtvMessage()
+	}
+	if vid == nil {
 		LOG_WARNING(fmt.Sprintf("get video message failed"))
 		return
 	}
@@ -1885,6 +1888,13 @@ func (handler *WmEventHandler) HandleVideoMessage(messageInfo types.MessageInfo,
 
 	// text
 	text := vid.GetCaption()
+	if text == "" {
+		if msg.GetPtvMessage() != nil {
+			text = "[Video note]"
+		} else {
+			text = "[Video]"
+		}
+	}
 	isEdited := (messageInfo.Edit == "1")
 
 	// context
@@ -1940,7 +1950,10 @@ func (handler *WmEventHandler) HandleAudioMessage(messageInfo types.MessageInfo,
 	ext := ExtensionByType(aud.GetMimetype(), ".ogg")
 
 	// text
-	text := ""
+	text := "[Audio]"
+	if aud.GetPTT() {
+		text = "[Voice note]"
+	}
 
 	// context
 	quotedId := ""
@@ -1990,6 +2003,12 @@ func (handler *WmEventHandler) HandleDocumentMessage(messageInfo types.MessageIn
 
 	// text
 	text := doc.GetCaption()
+	if text == "" {
+		text = "[File]"
+		if doc.GetFileName() != "" {
+			text += " " + doc.GetFileName()
+		}
+	}
 	isEdited := (messageInfo.Edit == "1")
 
 	// context

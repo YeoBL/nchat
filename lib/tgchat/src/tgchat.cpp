@@ -3446,6 +3446,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     std::string path = messageAudio.audio_->audio_->local_->path_;
     std::string fileName = messageAudio.audio_->file_name_;
     p_Text = GetText(std::move(messageAudio.caption_));
+    if (p_Text.empty()) p_Text = fileName.empty() ? "[Audio]" : "[Audio] " + fileName;
     FileInfo fileInfo;
     fileInfo.fileId = id;
     if (!path.empty())
@@ -3493,6 +3494,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     std::string path = messageDocument.document_->document_->local_->path_;
     std::string fileName = messageDocument.document_->file_name_;
     p_Text = GetText(std::move(messageDocument.caption_));
+    if (p_Text.empty()) p_Text = fileName.empty() ? "[File]" : "[File] " + fileName;
     FileInfo fileInfo;
     fileInfo.fileId = id;
     if (!path.empty())
@@ -3594,6 +3596,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
   else if (p_TdMessageContent.get_id() == td::td_api::messageVideoNote::ID)
   {
     auto& messageVideoNote = static_cast<td::td_api::messageVideoNote&>(p_TdMessageContent);
+    p_Text = "[Video note]";
     auto& videoNote = messageVideoNote.video_note_;
     auto& videoFile = videoNote->video_;
 
@@ -3622,6 +3625,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     std::string id = messageVoiceNote.voice_note_->voice_->remote_->id_;
     std::string path = messageVoiceNote.voice_note_->voice_->local_->path_;
     p_Text = GetText(std::move(messageVoiceNote.caption_));
+    if (p_Text.empty()) p_Text = "[Voice note]";
     FileInfo fileInfo;
     fileInfo.fileId = id;
     if (!path.empty())
