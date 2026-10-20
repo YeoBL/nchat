@@ -237,7 +237,9 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
   }
 
 
-  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" || operation == "tg.send.voice" || operation == "tg.send.videoNote" || operation == "tg.poll.create" || operation == "tg.contact.send")
+  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" ||
+      operation == "tg.send.voice" || operation == "tg.send.videoNote" || operation == "tg.poll.create" ||
+      operation == "tg.contact.send" || operation == "tg.location.send")
   {
     auto send = make_object<sendMessage>();
     send->chat_id_ = chatId;
@@ -366,6 +368,17 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
       auto contact = make_object<inputMessageContact>();
       contact->contact_ = make_object<td::td_api::contact>(phone, value("first"), value("last"), "", 0);
       send->input_message_content_ = std::move(contact);
+    }
+    else
+    {
+      double latitude = 0, longitude = 0;
+      if (!TgManage::Decimal(value("latitude"), latitude) || !TgManage::Decimal(value("longitude"), longitude) ||
+          latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180)
+      {
+        fail("Enter a latitude between -90 and 90 and longitude between -180 and 180.");
+        return true;
+      }
+      send->input_message_content_ = make_object<inputMessageLocation>(make_object<location>(latitude, longitude, 0));
     }
     SendQuery(std::move(send), [this, request, checked, finish, operation](Object object)
     {
