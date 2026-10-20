@@ -30,6 +30,8 @@ struct PreviewMessage {
     var attachmentStatus: String? = nil
 }
 
+let messageLinkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
 func clean(_ value: String) -> String {
     value.components(separatedBy: .controlCharacters).joined(separator: " ")
 }
@@ -604,7 +606,20 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         let field = NSTextField(wrappingLabelWithString: text)
         field.font = .systemFont(ofSize: size, weight: bold ? .semibold : .regular)
         field.textColor = secondary ? .secondaryLabelColor : .labelColor
-        field.isSelectable = false
+        field.isSelectable = selectable
+        if selectable, let detector = messageLinkDetector {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            let linked = NSMutableAttributedString(string: text, attributes: [.font: field.font!,
+                .foregroundColor: field.textColor!, .paragraphStyle: paragraph])
+            for match in detector.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let url = match.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { continue }
+                linked.addAttributes([.link: url, .foregroundColor: NSColor.linkColor,
+                                      .underlineStyle: NSUnderlineStyle.single.rawValue], range: match.range)
+            }
+            field.allowsEditingTextAttributes = true
+            field.attributedStringValue = linked
+        }
         field.maximumNumberOfLines = lines
         field.lineBreakMode = lines == 1 ? .byTruncatingTail : .byWordWrapping
         field.cell?.truncatesLastVisibleLine = lines > 0
@@ -698,7 +713,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
                         y += 22
                         if !message.text.isEmpty {
                             y += label(message.text, x: 60, y: y, width: width - 86,
-                                       lines: 3) + 5
+                                       lines: 0, selectable: true) + 5
                         }
                         if let image = message.image {
                             let scale = min((width - 86) / image.size.width, 200 / image.size.height, 1)
@@ -1195,6 +1210,16 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 }
 
+func installCopyMenu() {
+    let mainMenu = NSMenu()
+    let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+    let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    mainMenu.addItem(editItem)
+    mainMenu.setSubmenu(editMenu, for: editItem)
+    NSApplication.shared.mainMenu = mainMenu
+}
+
 @main
 struct UnreadApp {
     static func main() throws {
@@ -1210,7 +1235,7 @@ struct UnreadApp {
         } else {
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
-
+            installCopyMenu()
             let delegate = MenuBar(root: root, diagnosticPath: home + "/.config/nchat/menubar-state.json")
             app.delegate = delegate
             app.run()
