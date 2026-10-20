@@ -33,6 +33,7 @@ private:
 
     void Init();
     void Cleanup();
+    void EnsureDraft();
     LocalFeatures& GetLocalFeatures() { return m_LocalFeatures; }
 
     void AnyUserKeyInput();
@@ -79,6 +80,7 @@ private:
     void TransferFile(const std::vector<std::string>& p_FilePaths);
     void InsertEmoji(const std::wstring& p_Emoji);
     void InsertText(const std::wstring& p_Text);
+    void ReplaceDraft(const std::string& p_Text);
     void RequestGroupMembers(const std::string& p_ProfileId, const std::string& p_ChatId);
     std::vector<std::string> GetGroupMembers(const std::string& p_ProfileId, const std::string& p_ChatId);
     bool GetChatInfoIsGroup(const std::string& p_ProfileId, const std::string& p_ChatId);
@@ -278,6 +280,8 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStr;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPos;
     LocalFeatures m_LocalFeatures;
+    std::set<LocalFeatures::Chat> m_LoadedDrafts;
+    int64_t m_DraftChangedMs = 0;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStrCleared;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPosCleared;

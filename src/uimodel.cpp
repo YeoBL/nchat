@@ -76,7 +76,22 @@ void UiModel::Impl::Init()
 
 void UiModel::Impl::Cleanup()
 {
+  for (const auto& profile : m_EntryStr)
+    for (const auto& chat : profile.second)
+    {
+      if (m_EditMessageActive && std::make_pair(profile.first, chat.first) == m_CurrentChat) continue;
+      m_LocalFeatures.SetDraft({profile.first, chat.first}, StrUtil::ToString(chat.second), false);
+    }
+  if (!m_LocalFeatures.Flush()) LOG_WARNING("draft save failed: %s", m_LocalFeatures.GetError().c_str());
   m_View->ClearTerminalBadge();
+}
+
+void UiModel::Impl::EnsureDraft()
+{
+  if (m_CurrentChat == s_ChatNone || !m_LoadedDrafts.insert(m_CurrentChat).second) return;
+  std::wstring& entry = m_EntryStr[m_CurrentChat.first][m_CurrentChat.second];
+  if (entry.empty()) entry = StrUtil::ToWString(m_LocalFeatures.GetDraft(m_CurrentChat));
+  m_EntryPos[m_CurrentChat.first][m_CurrentChat.second] = static_cast<int>(entry.size());
 }
 
 void UiModel::Impl::AnyUserKeyInput()
@@ -1445,6 +1460,15 @@ void UiModel::Impl::InsertText(const std::wstring& p_Text)
   ReinitView();
 }
 
+void UiModel::Impl::ReplaceDraft(const std::string& p_Text)
+{
+  std::string text = p_Text;
+  SanitizeEntryStr(text);
+  GetEntryStr() = StrUtil::ToWString(text);
+  GetEntryPos() = static_cast<int>(GetEntryStr().size());
+  UpdateEntry();
+}
+
 void UiModel::Impl::RequestGroupMembers(const std::string& p_ProfileId, const std::string& p_ChatId)
 {
   auto it = m_GroupMembers.find(p_ProfileId);
@@ -2462,6 +2486,15 @@ void UiModel::Impl::ProcessTimers()
   static int64_t lastTimeMs = TimeUtil::GetCurrentTimeMSec();
   int64_t nowTimeMs = TimeUtil::GetCurrentTimeMSec();
   int64_t elapsedMs = nowTimeMs - lastTimeMs;
+  if (m_DraftChangedMs && nowTimeMs - m_DraftChangedMs >= 1000)
+  {
+    if (!m_LocalFeatures.Flush())
+    {
+      LOG_WARNING("draft save failed: %s", m_LocalFeatures.GetError().c_str());
+      m_DraftChangedMs = nowTimeMs + 9000;
+    }
+    else m_DraftChangedMs = 0;
+  }
 
   if (elapsedMs > 200)
   {
@@ -2894,6 +2927,7 @@ std::string UiModel::Impl::GetChatStatus(const std::string& p_ProfileId, const s
 
 void UiModel::Impl::OnCurrentChatChanged()
 {
+  EnsureDraft();
   LOG_TRACE("current chat %s %s", m_CurrentChat.first.c_str(), m_CurrentChat.second.c_str());
   SetHistoryInteraction(false);
   UpdateList();
@@ -3144,11 +3178,22 @@ void UiModel::Impl::UpdateHelp()
 
 void UiModel::Impl::UpdateEntry()
 {
+  EnsureDraft();
+  if (!m_EditMessageActive && m_CurrentChat != s_ChatNone)
+  {
+    const auto text = StrUtil::ToString(m_EntryStr[m_CurrentChat.first][m_CurrentChat.second]);
+    if (m_LocalFeatures.GetDraft(m_CurrentChat) != text)
+    {
+      m_LocalFeatures.SetDraft(m_CurrentChat, text, false);
+      m_DraftChangedMs = TimeUtil::GetCurrentTimeMSec();
+    }
+  }
   m_View->SetEntryDirty(true);
 }
 
 std::wstring& UiModel::Impl::GetEntryStr()
 {
+  EnsureDraft();
   return m_EntryStr[m_CurrentChat.first][m_CurrentChat.second];
 }
 
@@ -3322,6 +3367,7 @@ bool UiModel::Impl::SetCurrentChatIndexIfNotSet()
 
   m_CurrentChatIndex = 0;
   m_CurrentChat = m_ChatVec.at(m_CurrentChatIndex);
+  EnsureDraft();
 
   UpdateHistory();
   return true;
@@ -5746,6 +5792,18 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       { MessageDialog("Chat", "This account is not loaded. The cached preview is still available.", 0.75, 5); return true; }
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
       GetImpl().GotoChat({destinationProfile, id}, true);
+      return true;
+    }
+    if (item.operation == "local.compose")
+    {
+      const auto profile = FeatureUtil::Value(item.params, "profile");
+      const auto id = FeatureUtil::Value(item.params, "chatId");
+      const auto destinationProfile = profile.empty() ? chat.first : profile;
+      if (!GetProtocols().count(destinationProfile))
+      { MessageDialog("Draft", "This account is not loaded.", 0.65, 5); return true; }
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      GetImpl().GotoChat({destinationProfile, id.empty() ? chat.second : id}, true);
+      GetImpl().ReplaceDraft(FeatureUtil::Value(item.params, "text"));
       return true;
     }
     if (item.operation == "openUrl" || item.operation == "open_url")
