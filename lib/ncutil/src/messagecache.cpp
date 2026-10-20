@@ -957,6 +957,48 @@ std::vector<MessageCache::SearchResult> MessageCache::SearchMessages(const Searc
   return results;
 }
 
+std::map<std::string, ChatMessage> MessageCache::GetDeletedMessageOverlays(const std::string& p_ProfileId,
+  const std::string& p_ChatId, const std::set<std::string>& p_Ids)
+{
+  std::map<std::string, ChatMessage> messages;
+  if (!m_CacheEnabled || p_Ids.empty()) return messages;
+
+  std::unique_lock<std::mutex> lock(m_DbMutex);
+  auto db = m_Dbs.find(p_ProfileId);
+  if (db == m_Dbs.end() || !db->second) return messages;
+  try
+  {
+    for (auto next = p_Ids.begin(); next != p_Ids.end(); )
+    {
+      std::vector<std::string> ids;
+      std::string sql = "SELECT id,text,fileInfo,isRead FROM messages WHERE chatId=? AND isDeleted=1 AND id IN (";
+      while (next != p_Ids.end() && ids.size() < 512)
+      {
+        if (!ids.empty()) sql += ',';
+        sql += '?';
+        ids.push_back(*next++);
+      }
+      sql += ");";
+      auto statement = *db->second << sql;
+      statement << p_ChatId;
+      for (const auto& id : ids) statement << id;
+      statement >> [&](const std::string& id, const std::string& text, const std::string& fileInfo,
+                       const int& isRead)
+      {
+        ChatMessage message;
+        message.id = id;
+        message.text = text;
+        message.fileInfo = fileInfo;
+        message.isRead = isRead;
+        message.isDeleted = true;
+        messages.emplace(id, std::move(message));
+      };
+    }
+  }
+  catch (const sqlite::sqlite_exception& ex) { HANDLE_SQLITE_EXCEPTION(ex); }
+  return messages;
+}
+
 std::vector<std::string> MessageCache::GetUnreadMessageIds(const std::string& p_ProfileId,
                                                          const std::string& p_ChatId)
 {

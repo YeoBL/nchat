@@ -25,6 +25,7 @@ for object in build/CMakeFiles/nchat.dir/src/*.cpp.o; do
   objects+=("$object")
 done
 clang++ -std=c++14 -Ilib/common/src -Ilib/ncutil/src -Ibuild/generated \
+  -Ilib/ncutil/ext/sqlite_modern_cpp/hdr -I/opt/homebrew/opt/sqlite/include \
   -I/opt/homebrew/opt/ncurses/include utils/test-notification-handlers.cpp "${objects[@]}" \
   -Lbuild/lib -lncutil -lpthread /opt/homebrew/opt/ncurses/lib/libncursesw.dylib \
   /opt/homebrew/opt/ncurses/lib/libformw.dylib -framework CoreFoundation \

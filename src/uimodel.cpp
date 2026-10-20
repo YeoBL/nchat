@@ -1838,11 +1838,29 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           std::string& oldestMessageId = m_OldestMessageId[profileId][chatId];
           int64_t& oldestMessageTime = m_OldestMessageTime[profileId][chatId];
 
+          std::set<std::string> deletionCandidates;
+          for (const auto& incoming : chatMessages)
+          {
+            const auto previous = messages.find(incoming.id);
+            if (!incoming.isDeleted && (previous == messages.end() || !previous->second.isDeleted))
+              deletionCandidates.insert(incoming.id);
+          }
+          // One cache lookup per batch also covers history evicted from the UI.
+          const auto deleted = MessageCache::GetDeletedMessageOverlays(profileId, chatId, deletionCandidates);
           for (auto chatMessage : chatMessages)
           {
             const auto previous = messages.find(chatMessage.id);
             if (previous != messages.end() && previous->second.isDeleted && !chatMessage.isDeleted)
               continue; // Stale provider/cache history must not revive a retained deletion.
+
+            const auto overlay = deleted.find(chatMessage.id);
+            if (!chatMessage.isDeleted && overlay != deleted.end())
+            {
+              chatMessage.isDeleted = true;
+              chatMessage.isRead = overlay->second.isRead;
+              chatMessage.text = overlay->second.text;
+              chatMessage.fileInfo = overlay->second.fileInfo;
+            }
 
             if (!chatMessage.isOutgoing && m_Notifications.IsRead({profileId, chatId}, chatMessage.id))
               chatMessage.isRead = true;

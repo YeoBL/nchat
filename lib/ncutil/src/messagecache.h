@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -307,6 +308,8 @@ public:
   static std::vector<std::string> GetUnreadMessageIds(const std::string& p_ProfileId,
                                                     const std::string& p_ChatId);
   static std::vector<std::string> GetUnreadChatIds(const std::string& p_ProfileId);
+  static std::map<std::string, ChatMessage> GetDeletedMessageOverlays(const std::string& p_ProfileId,
+    const std::string& p_ChatId, const std::set<std::string>& p_Ids);
   static std::vector<Attachment> GetAttachments();
   static std::vector<SearchResult> SearchMessages(const SearchQuery& p_Query);
   static void UpdateMembership(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsMember);

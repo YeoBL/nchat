@@ -54,8 +54,9 @@ int main() try
   {
     auto& files = MessageCache::m_Dbs[profile];
     files = std::make_unique<sqlite::database>(":memory:");
-    *files << "CREATE TABLE messages(chatId TEXT, id TEXT, isDeleted INT, fileInfo TEXT);";
-    *files << "INSERT INTO messages VALUES ('chat','redacted',1,''),('chat','redacted-null',1,NULL),"
+    *files << "CREATE TABLE messages(chatId TEXT, id TEXT, isDeleted INT, fileInfo TEXT, "
+              "text TEXT DEFAULT 'cached text', isRead INT DEFAULT 1);";
+    *files << "INSERT INTO messages(chatId,id,isDeleted,fileInfo) VALUES ('chat','redacted',1,''),('chat','redacted-null',1,NULL),"
               "('chat','retained',1,'original-file'),('chat','normal',0,''),"
               "('chat','normal-null',NULL,NULL),('other','retained',1,'other-chat-file');";
   }
@@ -84,8 +85,38 @@ int main() try
   assert(count == 1); // Same message ids in another chat/account are unaffected.
   files << "SELECT count(*) FROM messages;" >> count;
   assert(count == 6); // An unknown message callback must not insert a record.
+  const auto overlays = MessageCache::GetDeletedMessageOverlays("files", "chat",
+    {"retained", "redacted", "redacted-null", "normal", "missing"});
+  assert(overlays.size() == 3);
+  assert(overlays.at("retained").id == "retained" && overlays.at("retained").isDeleted);
+  assert(overlays.at("retained").text == "cached text" && overlays.at("retained").isRead);
+  assert(overlays.at("retained").fileInfo == "downloaded-file");
+  assert(overlays.at("redacted").fileInfo.empty() && overlays.at("redacted-null").fileInfo.empty());
+  assert(MessageCache::GetDeletedMessageOverlays("files", "other", {"retained"}).at("retained").fileInfo == "other-chat-file");
+  assert(MessageCache::GetDeletedMessageOverlays("other-files", "chat", {"retained"}).at("retained").fileInfo == "original-file");
+  assert(MessageCache::GetDeletedMessageOverlays("files", "other' OR 1=1 --", {"retained"}).empty());
+  assert(MessageCache::GetDeletedMessageOverlays("files", "chat", {"retained' OR 1=1 --"}).empty());
+  files << "INSERT INTO messages VALUES('chat','000-first',1,'','first chunk',1),"
+    "('chat','zz-last',1,'','last chunk',1);";
+  for (int i = 0; i < 700; ++i)
+    files << "INSERT INTO messages(chatId,id,isDeleted,fileInfo,text,isRead) VALUES('chat',?,1,'',?,1);"
+      << ("unrelated-deleted-" + std::to_string(i)) << std::string(4096, 'x');
+  std::set<std::string> manyIds{"000-first", "retained", "redacted", "redacted-null", "zz-last"};
+  for (int i = 0; i < 1200; ++i) manyIds.insert("not-cached-" + std::to_string(i));
+  const auto manyOverlays = MessageCache::GetDeletedMessageOverlays("files", "chat", manyIds);
+  assert(manyOverlays.size() == 5 && manyOverlays.at("retained").text == "cached text" &&
+    manyOverlays.at("000-first").text == "first chunk" && manyOverlays.at("zz-last").text == "last chunk");
+  const auto profileCount = MessageCache::m_Dbs.size();
+  assert(MessageCache::GetDeletedMessageOverlays("missing", "chat", {"retained"}).empty());
+  assert(MessageCache::GetDeletedMessageOverlays("files", "chat", {}).empty());
+  assert(MessageCache::m_Dbs.size() == profileCount);
+  const bool cacheEnabled = MessageCache::m_CacheEnabled;
+  MessageCache::m_CacheEnabled = false;
+  assert(MessageCache::GetDeletedMessageOverlays("files", "chat", {"retained"}).empty());
+  MessageCache::m_CacheEnabled = cacheEnabled;
   MessageCache::m_Dbs.clear();
   std::cout << "production cache: late downloads preserve deletion redaction, retained media, and chat/account isolation\n";
+  std::cout << "production cache: batch deleted overlays preserve redaction, restrict ids, and isolate chat/account queries\n";
 
   // Real on-disk production initialization and COMMIT vs. external reader.
   char temporary[] = "/tmp/nchat-cache-lock-test.XXXXXX";

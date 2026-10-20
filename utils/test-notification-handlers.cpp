@@ -9,12 +9,17 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <sstream>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <cassert>
 #include <iostream>
+#include <sqlite_modern_cpp.h>
 #include "protocol.h"
 #include "apputil.h"
 #include "owned_mutex.h"
 #define private public
+#include "messagecache.h"
 #include "../src/uimodel.h"
 #undef private
 #include "../src/uiview.h"
@@ -443,6 +448,46 @@ int main(int argc, char** argv)
         assert(!model.m_Messages["wa"]["other"].at("retained").isDeleted);
       }
     std::cout << "PASS: retained deletion state, text and attachments survive stale live/cache replay without cross-chat/account interference\n";
+  }
+  {
+    const bool cacheEnabled = MessageCache::m_CacheEnabled;
+    MessageCache::m_CacheEnabled = true;
+    for (const std::string profile : {"Telegram_deletedcache", "WhatsApp_deletedcache"})
+    {
+      auto& db = MessageCache::m_Dbs[profile];
+      db.reset(new sqlite::database(":memory:"));
+      *db << "CREATE TABLE messages(chatId TEXT,id TEXT,text TEXT,fileInfo TEXT,isRead INT,isDeleted INT);";
+      *db << "INSERT INTO messages VALUES('chat','redacted','[This message was deleted]','',1,1),"
+        "('chat','retained','[This message was deleted] retained text','original-file',1,1);";
+      for (const bool cached : {false, true})
+        for (const bool staleLoaded : {false, true})
+        {
+          UiModel::Impl model(nullptr);
+          if (staleLoaded)
+          {
+            ChatMessage stale; stale.id = "retained"; stale.text = "stale undeleted text";
+            model.m_Messages[profile]["chat"][stale.id] = stale;
+            model.m_MessageVec[profile]["chat"].push_back(stale.id);
+          }
+          incoming(model, "retained", "stale undeleted text", cached, profile);
+          incoming(model, "redacted", "stale undeleted text", cached, profile);
+          model.Process();
+          const auto& retained = model.m_Messages[profile]["chat"].at("retained");
+          const auto& redacted = model.m_Messages[profile]["chat"].at("redacted");
+          assert(retained.isDeleted && retained.isRead && retained.text == "[This message was deleted] retained text" &&
+            retained.fileInfo == "original-file");
+          assert(redacted.isDeleted && redacted.isRead && redacted.text == "[This message was deleted]" && redacted.fileInfo.empty());
+          assert(model.m_Notifications.PendingChats() == 0);
+          model.m_Messages.clear(); model.m_MessageVec.clear(); // Evict both restored overlays and replay again.
+          incoming(model, "retained", "late provider replay", cached, profile);
+          assert(model.m_Messages[profile]["chat"].at("retained").isDeleted);
+          incoming(model, "retained", "ordinary other chat", cached, profile, "other");
+          assert(!model.m_Messages[profile]["other"].at("retained").isDeleted);
+        }
+      MessageCache::m_Dbs.erase(profile);
+    }
+    MessageCache::m_CacheEnabled = cacheEnabled;
+    std::cout << "PASS: production cache deletion overlays protect evicted/stale-loaded history from live/cache replay without marking other chats read\n";
   }
   if (argc == 3)
   {
