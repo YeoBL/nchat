@@ -38,6 +38,7 @@
 #include "forumreadstate.h"
 #include "tgfeatures_util.h"
 #include "tgmembership.h"
+#include "tgpoll_util.h"
 #include "tgnotificationstate.h"
 #include "log.h"
 #include "messagecache.h"
@@ -685,11 +686,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             return;
           }
           auto& content = static_cast<td::td_api::messagePoll&>(*message->content_);
-          if (!content.poll_ || content.poll_->is_closed_ || request->optionIndexes.empty() ||
-              (!content.poll_->allows_multiple_answers_ && request->optionIndexes.size() != 1) ||
-              std::any_of(request->optionIndexes.begin(), request->optionIndexes.end(),
-                [&content](int index) { return index < 0 ||
-                  index >= static_cast<int>(content.poll_->options_.size()); }))
+          if (!content.poll_ || !TgPollAnswerAllowed(*content.poll_, request->optionIndexes))
           {
             if (request->onResult) request->onResult(false, "This poll is closed or the option is unavailable.");
             return;
@@ -729,14 +726,28 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             return;
           }
           const auto& poll = static_cast<td::td_api::messagePoll&>(*message->content_).poll_;
-          if (!poll || !poll->can_get_voters_)
+          if (!poll)
+          {
+            info.note = "Could not load this poll.";
+            request->onResult(std::move(info));
+            return;
+          }
+          info = TgPollInfo(*poll);
+          if (!poll->can_get_voters_)
           {
             info.note = "Telegram does not disclose voter names for this poll.";
             request->onResult(std::move(info));
             return;
           }
           const int optionCount = static_cast<int>(poll->options_.size());
-          auto result = std::make_shared<PollVoteInfo>();
+          // Options and your own vote must not wait behind a potentially large
+          // paginated voter list. The dialog accepts the later completed list.
+          info.note = "Loading voter names...";
+          info.votersLoading = true;
+          request->onResult(info);
+          info.note.clear();
+          info.votersLoading = false;
+          auto result = std::make_shared<PollVoteInfo>(std::move(info));
           auto fetch = std::make_shared<std::function<void(int, int)>>();
           *fetch = [this, request, result, fetch, chatId, msgId, optionCount](int option, int offset)
           {
@@ -3744,17 +3755,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     p_Text = "[Poll]";
     if (messagePoll.poll_)
     {
-      auto& poll = *messagePoll.poll_;
-      const std::string question = GetText(std::move(poll.question_));
-      if (!question.empty()) p_Text += " " + question;
-      for (auto& option : poll.options_)
-      {
-        if (!option) continue;
-        p_Text += "\n• " + GetText(std::move(option->text_));
-        if (poll.can_see_results_) p_Text += " (" + std::to_string(option->vote_percentage_) + "%)";
-      }
-      if (poll.allows_multiple_answers_) p_Text += "\n[Choose multiple]";
-      if (poll.is_closed_) p_Text += "\n[Closed]";
+      p_Text = TgPollText(*messagePoll.poll_);
     }
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageSticker::ID)

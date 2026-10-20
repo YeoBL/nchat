@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
@@ -62,7 +63,7 @@ func TestHiddenPollVoters(t *testing.T) {
 		},
 	}
 	t.Cleanup(func() { delete(pollStates, connID) })
-	if got := WmGetPollVotes(connID, "chat", "poll"); got != "hidden\n" {
+	if got := WmGetPollVotes(connID, "chat", "poll"); !strings.Contains(got, `"status":"hidden"`) || strings.Contains(got, "voter@") {
 		t.Fatalf("hidden poll disclosed voter data: %q", got)
 	}
 }

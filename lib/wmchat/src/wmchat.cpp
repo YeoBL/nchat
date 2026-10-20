@@ -777,25 +777,39 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
         PollVoteInfo info;
         char* raw = CWmGetPollVotes(m_ConnId,
           const_cast<char*>(request->chatId.c_str()), const_cast<char*>(request->msgId.c_str()));
-        const std::string data = raw ? raw : "missing\n";
+        const std::string data = raw ? raw : "{}";
         free(raw);
-        if (data.rfind("hidden\n", 0) == 0)
-          info.note = "This WhatsApp poll hides participant names.";
-        else if (data.rfind("available\n", 0) != 0)
+        rapidjson::Document poll;
+        if (poll.Parse(data.c_str()).HasParseError() || !poll.IsObject() ||
+            !poll.HasMember("status") || !poll["status"].IsString() ||
+            std::string(poll["status"].GetString()) == "missing")
+        {
+          info.canVote = false;
           info.note = "Poll votes are not in nchat's local cache yet.";
+        }
         else
         {
-          size_t start = std::string("available\n").size();
-          while (start < data.size())
-          {
-            const auto end = data.find('\n', start);
-            const auto tab = data.find('\t', start);
-            if (end == std::string::npos || tab == std::string::npos || tab >= end) break;
-            try { info.votes.push_back({std::stoi(data.substr(start, tab - start)),
-              data.substr(tab + 1, end - tab - 1)}); } catch (...) { }
-            start = end + 1;
-          }
-          info.note = "Voters from live updates and phone history supplied to nchat. History may be incomplete.";
+          info.selectionKnown = true;
+          info.canVote = true;
+          info.canRetract = true;
+          if (poll.HasMember("max_choices") && poll["max_choices"].IsInt())
+            info.maxChoices = poll["max_choices"].GetInt();
+          if (poll.HasMember("options") && poll["options"].IsArray())
+            for (const auto& option : poll["options"].GetArray())
+              if (option.IsString()) info.optionTexts.push_back(option.GetString());
+          if (poll.HasMember("selected") && poll["selected"].IsArray())
+            for (const auto& option : poll["selected"].GetArray())
+              if (option.IsInt()) info.selectedOptionIndexes.push_back(option.GetInt());
+          if (poll.HasMember("summary") && poll["summary"].IsString())
+            info.summary = poll["summary"].GetString();
+          if (poll.HasMember("votes") && poll["votes"].IsArray())
+            for (const auto& vote : poll["votes"].GetArray())
+              if (vote.IsObject() && vote.HasMember("option") && vote["option"].IsInt() &&
+                  vote.HasMember("user_id") && vote["user_id"].IsString())
+                info.votes.push_back({vote["option"].GetInt(), vote["user_id"].GetString()});
+          info.note = std::string(poll["status"].GetString()) == "hidden" ?
+            "This WhatsApp poll hides participant names." :
+            "Voters from live updates and phone history supplied to nchat. History may be incomplete.";
         }
         request->onResult(std::move(info));
       }

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestFormatPollState(t *testing.T) {
@@ -41,7 +44,7 @@ func TestPollVotesAndPersistence(t *testing.T) {
 		},
 	}
 	t.Cleanup(func() { delete(pollStates, connID) })
-	if got := WmGetPollVotes(connID, chatID, msgID); !strings.Contains(got, "0\tsam@s.whatsapp.net\n") {
+	if got := WmGetPollVotes(connID, chatID, msgID); !strings.Contains(got, `"option":0,"user_id":"sam@s.whatsapp.net"`) {
 		t.Fatalf("vote missing: %q", got)
 	}
 	path := t.TempDir() + "/polls.dat"
@@ -57,7 +60,10 @@ func TestSelectedPollOptions(t *testing.T) {
 	if err != nil || len(options) != 2 || options[0] != "Tea" || options[1] != "Water" {
 		t.Fatalf("multi-choice poll selection = %v, %v", options, err)
 	}
-	for _, invalid := range []string{"", "0,1,2", "0,0", "3", "a"} {
+	if withdrawn, err := selectedPollOptions(state, ""); err != nil || len(withdrawn) != 0 {
+		t.Fatalf("empty withdrawal selection rejected: %v, %v", withdrawn, err)
+	}
+	for _, invalid := range []string{"0,1,2", "0,0", "3", "a"} {
 		if _, err := selectedPollOptions(state, invalid); err == nil {
 			t.Fatalf("accepted invalid selection %q", invalid)
 		}
@@ -69,5 +75,33 @@ func TestSelectedPollOptions(t *testing.T) {
 	state.KnownLimit = false
 	if _, err := selectedPollOptions(state, "0,1"); err == nil {
 		t.Fatal("old cached poll accepted unverified multi-choice vote")
+	}
+}
+
+func TestPollMetadataBridge(t *testing.T) {
+	const connID = -24
+	key := pollStateKey("chat", "poll")
+	self := types.NewJID("447700900123", types.DefaultUserServer)
+	clients[connID] = &whatsmeow.Client{Store: &store.Device{ID: &self}}
+	pollStates[connID] = map[string]*PollState{key: {
+		Name: "Drink?", Options: []string{"Tea\nwith milk", "Coffee"}, KnownLimit: true, MaxChoices: 2,
+		HiddenVoters: true, Votes: map[string][]string{self.String(): {fmt.Sprintf("%x", whatsmeow.HashPollOptions([]string{"Coffee"})[0])}},
+	}}
+	t.Cleanup(func() { delete(pollStates, connID); delete(clients, connID) })
+	var data struct {
+		Status   string        `json:"status"`
+		Max      int           `json:"max_choices"`
+		Options  []string      `json:"options"`
+		Votes    []interface{} `json:"votes"`
+		Summary  string        `json:"summary"`
+		Selected []int         `json:"selected"`
+	}
+	if err := json.Unmarshal([]byte(WmGetPollVotes(connID, "chat", "poll")), &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Status != "hidden" || data.Max != 2 || len(data.Options) != 2 ||
+		!strings.Contains(data.Options[1], "1 recorded votes") || len(data.Votes) != 0 ||
+		!strings.Contains(data.Summary, "1 recorded voters") || len(data.Selected) != 1 || data.Selected[0] != 1 {
+		t.Fatalf("incomplete/private poll metadata = %+v", data)
 	}
 }

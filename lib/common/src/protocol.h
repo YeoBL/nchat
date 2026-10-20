@@ -367,6 +367,15 @@ struct PollVote
 struct PollVoteInfo
 {
   std::vector<PollVote> votes;
+  // Fresh poll metadata accompanies voters, including when voter names are private.
+  std::vector<std::string> optionTexts;
+  std::vector<int> selectedOptionIndexes;
+  std::string summary;
+  int maxChoices = -1;
+  bool selectionKnown = false;
+  bool canVote = false;
+  bool canRetract = false;
+  bool votersLoading = false;
   std::string note;
 };
 
@@ -376,6 +385,7 @@ public:
   virtual MessageType GetMessageType() const { return GetPollVotesRequestType; }
   std::string chatId;
   std::string msgId;
+  // May receive fresh metadata first, then the completed paginated voter list.
   std::function<void(PollVoteInfo)> onResult;
 };
 
