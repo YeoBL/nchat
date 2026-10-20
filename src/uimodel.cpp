@@ -4710,6 +4710,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyGlobalSearch = UiKeyConfig::GetKey("global_search");
   static wint_t keyFolders = UiKeyConfig::GetKey("folders");
   static wint_t keyBookmarks = UiKeyConfig::GetKey("bookmarks");
+  static wint_t keyBulkSelect = UiKeyConfig::GetKey("bulk_select");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4914,6 +4915,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyGlobalSearch) OnKeyClientActions("local.search");
   else if (p_Key == keyFolders) OnKeyClientActions("local.folders");
   else if (p_Key == keyBookmarks) OnKeyClientActions("local.bookmarks");
+  else if (p_Key == keyBulkSelect) OnKeyClientActions("local.bulk");
   else if (p_Key == keyReact)
   {
     OnKeyReact();
@@ -5760,6 +5762,10 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       makeItem(page, "Chat folders", "local.folders", {}, "Local lists, shared across your nchat accounts");
       makeItem(page, "Saved messages / bookmarks", "local.bookmarks", {}, "Local bookmarks; nothing is sent to the service");
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
+      if (!chat.second.empty())
+      {
+        makeItem(page, "Select multiple messages", "local.bulk", {}, "Copy, bookmark, forward or delete loaded messages");
+      }
       if (!Value(context, "msgId").empty())
       {
         makeItem(page, "Bookmark / unbookmark selected message", "local.bookmark.toggle");
@@ -5874,6 +5880,32 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
            {"text", bookmark.text}, {"timeSent", std::to_string(bookmark.time)}, {"fileInfo", ""}}, bookmark.text);
       if (!page.success) page.text = local.GetError();
     }
+    else if (operation == "local.bulk" || operation == "local.bulk.toggle" || operation == "local.bulk.all" || operation == "local.bulk.none")
+    {
+      if (operation == "local.bulk.toggle")
+      {
+        const auto id = Value(values, "msgId");
+        if (!selected->erase(id)) selected->insert(id);
+      }
+      if (operation == "local.bulk.all") for (const auto& message : bulkMessages) selected->insert(message.id);
+      if (operation == "local.bulk.none") selected->clear();
+      page.title = "Selected messages · " + std::to_string(selected->size());
+      page.text = "Choose a message to toggle its selection. Only loaded messages appear here.";
+      makeItem(page, "Select all loaded messages", "local.bulk.all");
+      makeItem(page, "Clear selection", "local.bulk.none");
+      if (!selected->empty())
+      {
+        makeItem(page, "Copy selected messages", "local.bulk.copy");
+        makeItem(page, "Bookmark selected messages", "local.bulk.bookmark");
+        makeItem(page, "Forward selected messages…", "local.bulk.destinations");
+        makeItem(page, "Delete selected messages…", "local.bulk.delete", {},
+          "Delete " + std::to_string(selected->size()) + " messages in " + Value(context, "chatName") +
+          " using nchat's normal deletion action. This cannot be undone.", {}, true);
+      }
+      for (const auto& message : bulkMessages)
+        makeItem(page, std::string(selected->count(message.id) ? "[✓] " : "[ ] ") + TimeUtil::GetTimeString(message.timeSent, true),
+          "local.bulk.toggle", {{"msgId", message.id}}, message.text);
+    }
     else if (operation == "local.bulk.destinations" || operation == "local.forward")
     {
       if (operation == "local.forward" && !Value(context, "msgId").empty()) selected->insert(Value(context, "msgId"));
@@ -5890,6 +5922,41 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
             "Forward " + std::to_string(selected->size()) + " messages to " +
             GetImpl().GetContactListName(destination.first, destination.second, true, true) + " · " +
             GetImpl().GetProfileDisplayName(destination.first), {}, true);
+    }
+    else if (operation == "local.bulk.copy" || operation == "local.bulk.bookmark" || operation == "local.bulk.delete")
+    {
+      std::string text;
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      bool success = true;
+      for (auto message = bulkMessages.rbegin(); message != bulkMessages.rend(); ++message)
+      {
+        if (!selected->count(message->id)) continue;
+        if (operation == "local.bulk.copy") text += TimeUtil::GetTimeString(message->timeSent, true) + "\n" + message->text + "\n\n";
+        if (operation == "local.bulk.bookmark") success = GetImpl().GetLocalFeatures().SetBookmark(chat, message->id, message->text, message->timeSent) && success;
+        if (operation == "local.bulk.delete")
+        {
+          if (message->isDeleted)
+          {
+            MessageCache::DeleteOneMessage(chat.first, chat.second, message->id);
+            auto notification = std::make_shared<DeleteMessageNotify>(chat.first);
+            notification->success = true; notification->chatId = chat.second;
+            notification->msgId = message->id; notification->isOutgoing = true;
+            GetImpl().MessageHandler(notification);
+          }
+          else
+          {
+            auto request = std::make_shared<DeleteMessageRequest>();
+            request->chatId = chat.second; request->msgId = message->id; request->senderId = message->senderId;
+            protocol->SendRequest(request);
+          }
+        }
+      }
+      page.success = success;
+      if (operation == "local.bulk.copy") { Clipboard::SetText(text); page.text = "Selected messages copied."; }
+      if (operation == "local.bulk.bookmark") page.text = success ? "Selected messages bookmarked locally." : GetImpl().GetLocalFeatures().GetError();
+      if (operation == "local.bulk.delete") page.text = "Deletion requests submitted. Failed requests will be reported by the service; unavailable or protected messages may remain.";
+      if (operation == "local.bulk.delete") selected->clear();
+      page.title = "Selected messages";
     }
     else { page.success = false; page.text = "This action is not available."; }
     done(std::move(page));

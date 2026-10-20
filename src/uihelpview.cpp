@@ -97,6 +97,7 @@ void UiHelpView::Draw()
     AppendHelpItem("global_search", "SearchAll", helpItems);
     AppendHelpItem("folders", "Folders", helpItems);
     AppendHelpItem("bookmarks", "Saved", helpItems);
+    AppendHelpItem("bulk_select", "SelectMany", helpItems);
     AppendHelpItem("select_contact", "AddrBook", helpItems);
     AppendHelpItem("select_mention", "Mention", helpItems);
     AppendHelpItem("spell", "ExtSpell", helpItems);
