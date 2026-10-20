@@ -8,6 +8,7 @@ class ReceiptTestProtocol : public Protocol
 {
 public:
   std::shared_ptr<GetMessageReceiptsRequest> request;
+  int requestCount = 0;
   std::string GetProfileId() const override { return "receipt-test"; }
   std::string GetProfileDisplayName() const override { return "Test"; }
   bool HasFeature(ProtocolFeature) const override { return false; }
@@ -23,6 +24,7 @@ public:
   {
     assert(value->GetMessageType() == GetMessageReceiptsRequestType); // No sends/mark-read.
     request = std::static_pointer_cast<GetMessageReceiptsRequest>(value);
+    ++requestCount;
   }
 };
 
@@ -32,6 +34,7 @@ public:
   using UiMessageInfoDialog::UiMessageInfoDialog;
   using UiMessageInfoDialog::OnTimer;
   using UiMessageInfoDialog::OnBack;
+  using UiMessageInfoDialog::OnSelect;
   using UiMessageInfoDialog::UpdateList;
   using UiListDialog::m_Items;
   using UiListDialog::m_FilterStr;
@@ -70,7 +73,7 @@ static void TestMessageInfoDialog()
     info.receipts.push_back({"UnknownTime", 0, -1});
     info.receipts.push_back({"ReadOnly", 0, 200});
     info.note = "Privacy restricted: older history may be incomplete.";
-    request->onResult(info);
+    protocol->request->onResult(info);
     assert(dialog.OnTimer());
     assert(dialog.contains(L"Read by - 102") == telegram);
     assert(dialog.contains(L"Read by - 101") == !telegram);
@@ -80,37 +83,45 @@ static void TestMessageInfoDialog()
     assert(!dialog.contains(L"Privacy restricted") && !dialog.contains(L"timezone"));
     assert(dialog.contains(L"Unavailable due to privacy settings.") == telegram);
     assert(dialog.contains(L"Recorded receipts; history may be incomplete.") == !telegram);
-    assert(dialog.m_Items.size() == (telegram ? 104 : 205));
+    assert(dialog.m_Items.size() == (telegram ? 105 : 206));
     dialog.m_Index = 80;
     dialog.resize();
     assert(dialog.m_Index == 80);
     dialog.m_FilterStr = L"Person99";
     dialog.UpdateList();
-    assert(dialog.m_Items.size() == (telegram ? 1 : 2) && dialog.m_Index == (telegram ? 0 : 1));
+    assert(dialog.m_Items.size() == (telegram ? 2 : 3) && dialog.m_Index == (telegram ? 1 : 2));
     dialog.m_FilterStr.clear();
-    request->onResult({{}, "Privacy restricted: older history may be incomplete."});
+    auto staleRequest = protocol->request;
+    dialog.m_Index = static_cast<int>(dialog.m_Items.size()) - 1;
+    const int beforeRefresh = protocol->requestCount;
+    dialog.OnSelect();
+    assert(protocol->requestCount == beforeRefresh + 1 && dialog.m_Running);
+    assert(dialog.contains(L"Loading receipt") && dialog.contains(L"Refresh receipts"));
+    staleRequest->onResult(info); // An older response cannot overwrite a refresh.
+    assert(!dialog.OnTimer() && dialog.contains(L"Loading receipt"));
+    protocol->request->onResult({{}, "Privacy restricted: older history may be incomplete."});
     dialog.UpdateList();
-    assert(dialog.m_Items.size() == (telegram ? 2 : 5) && dialog.contains(L"Unavailable due to privacy settings."));
+    assert(dialog.m_Items.size() == (telegram ? 3 : 6) && dialog.contains(L"Unavailable due to privacy settings."));
     assert(dialog.contains(L"Read by - unavailable") == telegram);
-    request->onResult({{}, "Receipt request timed out. Close and retry when connected."});
+    protocol->request->onResult({{}, "Receipt request timed out. Retry when connected."});
     dialog.UpdateList();
-    assert(dialog.m_Items.size() == (telegram ? 2 : 5) && dialog.contains(L"Request timed out. Retry."));
+    assert(dialog.m_Items.size() == (telegram ? 3 : 6) && dialog.contains(L"Request timed out. Retry."));
     if (telegram)
     {
-      request->onResult({{}, "Telegram does not provide per-person delivery receipts. Message is too old for a read timestamp."});
+      protocol->request->onResult({{}, "Telegram does not provide per-person delivery receipts. Message is too old for a read timestamp."});
       dialog.UpdateList();
       assert(dialog.contains(L"Read details have expired.") && !dialog.contains(L"Read by - 0"));
-      request->onResult({{}, "Telegram does not provide per-person delivery receipts. Read-by details unavailable for this message (chat type, message age or privacy restrictions)."});
+      protocol->request->onResult({{}, "Telegram does not provide per-person delivery receipts. Read-by details unavailable for this message (chat type, message age or privacy restrictions)."});
       dialog.UpdateList();
       assert(dialog.contains(L"Unavailable: message age, chat type or privacy limits."));
-      request->onResult({{}, "Telegram reports this message has not been read yet."});
+      protocol->request->onResult({{}, "Telegram reports this message has not been read yet."});
       dialog.UpdateList();
       assert(dialog.contains(L"Read by - 0") && dialog.contains(L"Not read yet."));
     }
     dialog.OnBack();
     assert(!dialog.m_Running);
   }
-  request->onResult({{}, "Late response after close"}); // Must not access destroyed UI.
+  protocol->request->onResult({{}, "Late response after close"}); // Must not access destroyed UI.
   endwin(); delscreen(screen); fclose(output); fclose(input);
   UiColorConfig::Cleanup();
   AppConfig::Cleanup();

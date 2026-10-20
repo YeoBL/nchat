@@ -14,11 +14,17 @@ class UiMessageInfoDialog : public UiListDialog
   {
     std::mutex mutex;
     bool ready = false;
+    uint64_t generation = 0;
+    uint64_t revision = 0;
     MessageReceiptInfo info;
   };
   std::shared_ptr<State> m_State = std::make_shared<State>();
   std::string m_Profile;
+  std::shared_ptr<Protocol> m_Protocol;
+  std::shared_ptr<GetMessageReceiptsRequest> m_Request;
   bool m_Displayed = false;
+  uint64_t m_DisplayedRevision = 0;
+  int m_RefreshIndex = -1;
   std::chrono::steady_clock::time_point m_Started = std::chrono::steady_clock::now();
 
   static std::string UnavailableReason(const std::string& note)
@@ -41,38 +47,62 @@ class UiMessageInfoDialog : public UiListDialog
 public:
   UiMessageInfoDialog(const UiDialogParams& params, const std::string& profile,
     const std::shared_ptr<Protocol>& protocol, const std::shared_ptr<GetMessageReceiptsRequest>& request)
-    : UiListDialog(params, false), m_Profile(profile)
+    : UiListDialog(params, false), m_Profile(profile), m_Protocol(protocol),
+      m_Request(std::make_shared<GetMessageReceiptsRequest>(*request))
   {
+    RequestDetails();
+  }
+
+protected:
+  void RequestDetails()
+  {
+    uint64_t generation;
+    {
+      std::lock_guard<std::mutex> lock(m_State->mutex);
+      generation = ++m_State->generation;
+      ++m_State->revision;
+      m_State->ready = false;
+      m_State->info = {};
+    }
+    m_Started = std::chrono::steady_clock::now();
+    auto request = std::make_shared<GetMessageReceiptsRequest>(*m_Request);
     std::weak_ptr<State> weak = m_State;
-    request->onResult = [weak](MessageReceiptInfo info)
+    request->onResult = [weak, generation](MessageReceiptInfo info)
     {
       if (auto state = weak.lock())
       {
         std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->generation != generation) return;
         state->info = std::move(info);
         state->ready = true;
+        ++state->revision;
       }
     };
     UpdateList();
-    protocol->SendRequest(request);
+    m_Protocol->SendRequest(request);
   }
 
-protected:
-  void OnSelect() override { m_Running = false; }
+  void OnSelect() override
+  {
+    if (m_Index == m_RefreshIndex) RequestDetails();
+    else m_Running = false;
+  }
   void OnBack() override { m_Running = false; }
   bool OnTimer() override
   {
-    bool ready;
+    bool changed;
     {
       std::lock_guard<std::mutex> lock(m_State->mutex);
       if (!m_State->ready && std::chrono::steady_clock::now() - m_Started > std::chrono::seconds(15))
       {
-        m_State->info.note = "Receipt request timed out. Close and retry when connected.";
+        m_State->info.note = "Receipt request timed out. Retry when connected.";
         m_State->ready = true;
+        ++m_State->generation; // A late response must not replace this retryable error.
+        ++m_State->revision;
       }
-      ready = m_State->ready;
+      changed = m_State->revision != m_DisplayedRevision;
     }
-    if (ready && !m_Displayed) { UpdateList(); return true; }
+    if (changed) { UpdateList(); return true; }
     return false;
   }
   void UpdateList() override
@@ -81,6 +111,7 @@ protected:
     {
       std::lock_guard<std::mutex> lock(m_State->mutex);
       m_Displayed = m_State->ready;
+      m_DisplayedRevision = m_State->revision;
       info = m_State->info;
     }
     std::vector<std::string> lines;
@@ -128,6 +159,10 @@ protected:
       for (auto wrapped : StrUtil::WordWrap(StrUtil::ToWString(line), std::max(1, m_W), false, false, false, 2))
         m_Items.push_back(StrUtil::TrimPadWString(wrapped, m_W));
     }
+    // This only re-queries the service/cache; it never opens a chat, marks it
+    // read, or claims to retrieve a complete historical WhatsApp receipt list.
+    m_RefreshIndex = static_cast<int>(m_Items.size());
+    m_Items.push_back(StrUtil::TrimPadWString(L"[ Refresh receipts ]", m_W));
     m_Index = std::min(m_Index, std::max(0, (int)m_Items.size() - 1));
   }
 };
