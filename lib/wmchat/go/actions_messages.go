@@ -150,6 +150,12 @@ func structuredMessageText(msg *waE2E.Message) string {
 			parts = append(parts, contactCardText(contact))
 		}
 		return strings.Join(parts, "\n\n")
+	case msg.GetLocationMessage() != nil:
+		loc := msg.GetLocationMessage()
+		return fmt.Sprintf("[Location] %s\n%s\nhttps://maps.apple.com/?ll=%g,%g", loc.GetName(), loc.GetAddress(), loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+	case msg.GetLiveLocationMessage() != nil:
+		loc := msg.GetLiveLocationMessage()
+		return fmt.Sprintf("[Live location snapshot] %s\nhttps://maps.apple.com/?ll=%g,%g", loc.GetCaption(), loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
 	}
 	return ""
 }
@@ -163,6 +169,12 @@ func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op 
 		return actionError("Message details", fmt.Errorf("structured details are not loaded for this message")), true
 	}
 	r := actionOK("Message details", structuredMessageText(msg))
+	if loc := msg.GetLocationMessage(); loc != nil {
+		r.Items = append(r.Items, action("Open map", loc.GetName(), "openUrl", map[string]string{"url": fmt.Sprintf("https://maps.apple.com/?ll=%g,%g", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())}, nil, false))
+	}
+	if loc := msg.GetLiveLocationMessage(); loc != nil {
+		r.Items = append(r.Items, action("Open location snapshot", "Live updates are not tracked here", "openUrl", map[string]string{"url": fmt.Sprintf("https://maps.apple.com/?ll=%g,%g", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())}, nil, false))
+	}
 	if contact := msg.GetContactMessage(); contact != nil {
 		r.Items = append(r.Items, contactActions(contact)...)
 	}

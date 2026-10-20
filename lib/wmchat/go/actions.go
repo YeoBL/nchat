@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -111,6 +111,7 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			r.Items = append(r.Items, action("Unmute chat", "Restore notifications", "mute_chat", map[string]string{"muted": "false"}, nil, true))
 			r.Items = append(r.Items, action("Mark unread on WhatsApp", "Set WhatsApp's chat marker; nchat keeps read messages read", "mark_unread", nil, nil, true))
 			r.Items = append(r.Items, action("Send contact", "Share a contact card", "send_contact", nil, []actionField{{"name", "Full name", ""}, {"phone", "Phone number with country code", ""}}, true))
+			r.Items = append(r.Items, action("Send location", "Share a fixed location", "send_location", nil, []actionField{{"latitude", "Latitude", ""}, {"longitude", "Longitude", ""}, {"name", "Place name", ""}, {"address", "Address", ""}}, true))
 			if strings.HasSuffix(p["chatId"], "@g.us") {
 				r.Items = append(r.Items, action("Group information", "Members, settings and invitations", "group_info", nil, nil, false))
 			}
@@ -178,6 +179,12 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		}
 		vcard := "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:" + escapeVCard(name) + "\r\nTEL;TYPE=CELL:" + phone + "\r\nEND:VCARD"
 		return sendActionMessage(ctx, connID, cli, chat, &waE2E.Message{ContactMessage: &waE2E.ContactMessage{DisplayName: proto.String(name), Vcard: proto.String(vcard)}}, "Contact sent")
+	case "send_location":
+		lat, lon, err := validateLocation(p["latitude"], p["longitude"])
+		if err != nil {
+			return actionError("Send location", err)
+		}
+		return sendActionMessage(ctx, connID, cli, chat, &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: &lat, DegreesLongitude: &lon, Name: proto.String(p["name"]), Address: proto.String(p["address"])}}, "Location sent")
 	case "group_info", "group_invite", "group_name", "group_description", "group_announce", "group_locked", "group_member", "group_leave":
 		return wmGroupAction(ctx, connID, cli, op, p, chat)
 	}
@@ -223,6 +230,15 @@ func validPhoneNumber(phone string) bool {
 
 func escapeVCard(s string) string {
 	return strings.NewReplacer("\\", "\\\\", ";", "\\;", ",", "\\,").Replace(s)
+}
+
+func validateLocation(rawLat, rawLon string) (float64, float64, error) {
+	lat, e1 := strconv.ParseFloat(rawLat, 64)
+	lon, e2 := strconv.ParseFloat(rawLon, 64)
+	if e1 != nil || e2 != nil || math.IsNaN(lat) || math.IsNaN(lon) || math.IsInf(lat, 0) || math.IsInf(lon, 0) || lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return 0, 0, fmt.Errorf("enter valid latitude (-90–90) and longitude (-180–180)")
+	}
+	return lat, lon, nil
 }
 
 func sendActionMessage(ctx context.Context, connID int, cli *whatsmeow.Client, chat types.JID, msg *waE2E.Message, title string) actionResult {
