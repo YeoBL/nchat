@@ -3601,11 +3601,38 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageLocation::ID)
   {
+    const auto& content = static_cast<const td::td_api::messageLocation&>(p_TdMessageContent);
     p_Text = "[Location]";
+    if (content.location_)
+      p_Text += " https://maps.apple.com/?ll=" + std::to_string(content.location_->latitude_) +
+        "," + std::to_string(content.location_->longitude_);
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageLiveLocation::ID)
   {
-    p_Text = "[LiveLocation]";
+    const auto& content = static_cast<const td::td_api::messageLiveLocation&>(p_TdMessageContent);
+    p_Text = "[Live location]";
+    if (content.location_ && content.location_->location_)
+      p_Text += " https://maps.apple.com/?ll=" + std::to_string(content.location_->location_->latitude_) +
+        "," + std::to_string(content.location_->location_->longitude_);
+  }
+  else if (p_TdMessageContent.get_id() == td::td_api::messageVenue::ID)
+  {
+    const auto& content = static_cast<const td::td_api::messageVenue&>(p_TdMessageContent);
+    p_Text = "[Place]";
+    if (content.venue_)
+    {
+      p_Text += " " + content.venue_->title_;
+      if (!content.venue_->address_.empty()) p_Text += "\n" + content.venue_->address_;
+      if (content.venue_->location_)
+        p_Text += "\nhttps://maps.apple.com/?ll=" + std::to_string(content.venue_->location_->latitude_) +
+          "," + std::to_string(content.venue_->location_->longitude_);
+    }
+  }
+  else if (p_TdMessageContent.get_id() == td::td_api::messageStory::ID)
+  {
+    const auto& content = static_cast<const td::td_api::messageStory&>(p_TdMessageContent);
+    p_Text = "[Story] " + GetContactName(content.story_poster_chat_id_) +
+      " · " + std::to_string(content.story_id_);
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageContactRegistered::ID)
   {
