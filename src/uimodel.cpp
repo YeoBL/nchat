@@ -4708,6 +4708,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyAttachments = UiKeyConfig::GetKey("attachments");
   static wint_t keyClientActions = UiKeyConfig::GetKey("client_actions");
   static wint_t keyGlobalSearch = UiKeyConfig::GetKey("global_search");
+  static wint_t keyFolders = UiKeyConfig::GetKey("folders");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4910,6 +4911,7 @@ void UiModel::KeyHandler(wint_t p_Key)
     OnKeyClientActions();
   }
   else if (p_Key == keyGlobalSearch) OnKeyClientActions("local.search");
+  else if (p_Key == keyFolders) OnKeyClientActions("local.folders");
   else if (p_Key == keyReact)
   {
     OnKeyReact();
@@ -5753,6 +5755,7 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     {
       page.title = "Tools · " + GetProfileDisplayName(chat.first);
       makeItem(page, "Search messages across chats", "local.search", {}, "Search cached history without marking it read");
+      makeItem(page, "Chat folders", "local.folders", {}, "Local lists, shared across your nchat accounts");
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
       if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
@@ -5812,6 +5815,33 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     else if (operation == "local.copy")
     {
       Clipboard::SetText(Value(values, "text")); page.title = "Copied"; page.text = "Text copied to the clipboard.";
+    }
+    else if (operation == "local.folders" || operation == "local.folder.create" || operation == "local.folder.delete")
+    {
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      auto& local = GetImpl().GetLocalFeatures();
+      if (operation == "local.folder.create") page.success = local.CreateFolder(Value(values, "folder"));
+      if (operation == "local.folder.delete") page.success = local.DeleteFolder(Value(values, "folder"));
+      page.title = "Chat folders";
+      makeItem(page, "Create folder", "local.folder.create", {}, "Folders are local to nchat.", {{"folder", "Folder name", ""}});
+      for (const auto& folder : local.GetFolders())
+        makeItem(page, folder, "local.folder", {{"folder", folder}}, std::to_string(local.GetFolderChats(folder).size()) + " chats");
+      if (!page.success) page.text = local.GetError().empty() ? "Choose a non-empty, unique folder name." : local.GetError();
+    }
+    else if (operation == "local.folder" || operation == "local.folder.toggle")
+    {
+      const auto folder = Value(values, "folder");
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      auto& local = GetImpl().GetLocalFeatures();
+      if (operation == "local.folder.toggle") page.success = local.SetFolder(chat, folder, !local.InFolder(chat, folder));
+      page.title = folder;
+      if (!chat.second.empty()) makeItem(page, local.InFolder(chat, folder) ? "Remove current chat from folder" : "Add current chat to folder",
+        "local.folder.toggle", {{"folder", folder}}, Value(context, "chatName"));
+      for (const auto& member : local.GetFolderChats(folder))
+        makeItem(page, GetImpl().GetContactListName(member.first, member.second, true, true), "navigate",
+          {{"profile", member.first}, {"chatId", member.second}});
+      makeItem(page, "Delete folder", "local.folder.delete", {{"folder", folder}}, "This removes only the folder, not any chat or message.", {}, true);
+      if (!page.success) page.text = local.GetError();
     }
     else { page.success = false; page.text = "This action is not available."; }
     done(std::move(page));
