@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
-
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-
+	"math"
+	"mime"
 	"net/url"
 	"os"
 	"path/filepath"
-
+	"strconv"
 	"strings"
 	"sync"
 
@@ -198,6 +199,9 @@ func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op 
 	if op == "forward_messages" {
 		return forwardMessagesAction(ctx, connID, cli, p), true
 	}
+	if op == "send_recording" {
+		return sendRecordingAction(ctx, connID, cli, p), true
+	}
 	if op != "message_details" && op != "business_reply" {
 		return actionResult{}, false
 	}
@@ -335,6 +339,72 @@ func contactActions(contact *waE2E.ContactMessage) []actionItem {
 		items = append(items, action("Chat with "+contact.GetDisplayName(), phone, "open_chat", map[string]string{"chatId": digits + "@s.whatsapp.net"}, nil, false))
 	}
 	return items
+}
+
+func sendRecordingAction(ctx context.Context, connID int, cli *whatsmeow.Client, p map[string]string) actionResult {
+	chat, err := actionChat(p)
+	if err != nil {
+		return actionError("Send recording", err)
+	}
+	path := p["path"]
+	if !filepath.IsAbs(path) {
+		return actionError("Send recording", fmt.Errorf("recording path must be absolute"))
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		return actionError("Send recording", err)
+	}
+	if !stat.Mode().IsRegular() || stat.Size() == 0 || stat.Size() > 100*1024*1024 {
+		return actionError("Send recording", fmt.Errorf("recording must be a regular file smaller than 100 MB"))
+	}
+	seconds, err := recordingSeconds(p["durationSec"])
+	if err != nil {
+		return actionError("Send recording", fmt.Errorf("recording duration is unavailable"))
+	}
+	mimeType, _, err := mime.ParseMediaType(p["mimeType"])
+	if err != nil {
+		return actionError("Send recording", err)
+	}
+	kind := p["mediaKind"]
+	mediaType := whatsmeow.MediaAudio
+	if kind == "voice" && mimeType != "audio/ogg" {
+		return actionError("Send recording", fmt.Errorf("voice notes must be Ogg Opus audio"))
+	}
+	if kind == "video" {
+		if mimeType != "video/mp4" {
+			return actionError("Send recording", fmt.Errorf("video notes must be MP4"))
+		}
+		mediaType = whatsmeow.MediaVideo
+	} else if kind != "voice" {
+		return actionError("Send recording", fmt.Errorf("choose a voice or video note"))
+	}
+	waveform, decodeErr := base64.StdEncoding.DecodeString(p["waveform"])
+	if kind == "voice" && (decodeErr != nil || len(waveform) > 256) {
+		return actionError("Voice note", fmt.Errorf("invalid waveform"))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return actionError("Send recording", err)
+	}
+	upload, err := cli.Upload(ctx, data, mediaType)
+	if err != nil {
+		return actionError("Send recording", err)
+	}
+	var msg *waE2E.Message
+	if kind == "voice" {
+		msg = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{URL: proto.String(upload.URL), DirectPath: proto.String(upload.DirectPath), MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: proto.Uint64(uint64(len(data))), Mimetype: proto.String("audio/ogg; codecs=opus"), PTT: proto.Bool(true), Seconds: proto.Uint32(uint32(seconds)), Waveform: waveform}}
+	} else {
+		msg = &waE2E.Message{PtvMessage: &waE2E.VideoMessage{URL: proto.String(upload.URL), DirectPath: proto.String(upload.DirectPath), MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: proto.Uint64(uint64(len(data))), Mimetype: proto.String("video/mp4"), Seconds: proto.Uint32(uint32(seconds))}}
+	}
+	return sendActionMessage(ctx, connID, cli, chat, msg, "Recording sent")
+}
+
+func recordingSeconds(raw string) (uint32, error) {
+	duration, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(duration) || math.IsInf(duration, 0) || duration <= 0 || duration > 86400 {
+		return 0, fmt.Errorf("invalid recording duration")
+	}
+	return uint32(math.Ceil(duration)), nil
 }
 
 func forwardedMessage(original *waE2E.Message) (*waE2E.Message, error) {
