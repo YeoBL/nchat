@@ -592,8 +592,23 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           std::static_pointer_cast<GetChatsRequest>(p_RequestMessage);
         int32_t limit = std::numeric_limits<int32_t>::max(); // no limit
 
-        SendQuery(td::td_api::make_object<td::td_api::getChats>(nullptr, limit),
-                  [this, getChatsRequest](Object object)
+        // Targeted lookups must also work for archived chats, which are not
+        // returned by getChats(Main).
+        if (!getChatsRequest->chatIds.empty())
+        {
+          auto details = std::make_shared<DeferGetChatDetailsRequest>();
+          details->chatIds.assign(getChatsRequest->chatIds.begin(), getChatsRequest->chatIds.end());
+          SendRequest(details);
+          Status::Clear(m_ProfileId, Status::FlagFetching);
+          break;
+        }
+
+        // Left channels can remain only in our cache, outside Main and Archive.
+        auto cachedDetails = std::make_shared<DeferGetChatDetailsRequest>();
+        cachedDetails->chatIds = MessageCache::GetUnreadChatIds(m_ProfileId);
+        if (!cachedDetails->chatIds.empty()) SendRequest(cachedDetails);
+
+        auto receiveChats = [this, getChatsRequest](Object object)
         {
           Status::Clear(m_ProfileId, Status::FlagFetching);
 
@@ -618,7 +633,10 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             std::make_shared<DeferGetChatDetailsRequest>();
           deferGetChatDetailsRequest->chatIds = chatIds;
           SendRequest(deferGetChatDetailsRequest);
-        });
+        };
+        SendQuery(td::td_api::make_object<td::td_api::getChats>(nullptr, limit), receiveChats);
+        SendQuery(td::td_api::make_object<td::td_api::getChats>(
+                    td::td_api::make_object<td::td_api::chatListArchive>(), limit), receiveChats);
       }
       break;
 
@@ -731,6 +749,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             int64_t lastMessageTime = (lastMessageTimeSec * 1000) + lastMessageHash;
             for (auto& position : tchat->positions_)
             {
+              if (position->order_ == 0) continue;
               auto chatList = td::move_tl_object_as<td::td_api::ChatList>(position->list_);
               if (chatList && (chatList->get_id() == td::td_api::chatListMain::ID))
               {
@@ -1895,6 +1914,11 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
       std::make_shared<NewContactsNotify>(m_ProfileId);
     newContactsNotify->contactInfos = std::vector<ContactInfo>({ contactInfo });
     CallMessageHandler(newContactsNotify);
+    // updateNewChat includes archived chats too; cache their full settings,
+    // not just their contact names. getChat never opens or reads the chat.
+    auto details = std::make_shared<DeferGetChatDetailsRequest>();
+    details->chatIds.push_back(contactInfo.id);
+    SendRequest(details);
   },
   [this](td::td_api::updateChatTitle& update_chat_title)
   {
@@ -2168,14 +2192,9 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
         std::string chatId = StrUtil::NumToHex(update_chat_position.chat_id_);
         if (position->order_ == 0)
         {
-          // position 0 indicates removal
-          LOG_TRACE("delete chat notify %s", chatId.c_str());
-
-          std::shared_ptr<DeleteChatNotify> deleteChatNotify =
-            std::make_shared<DeleteChatNotify>(m_ProfileId);
-          deleteChatNotify->success = true;
-          deleteChatNotify->chatId = chatId;
-          CallMessageHandler(deleteChatNotify);
+          // Leaving Main also happens during archiving. It is not a deletion:
+          // erasing the cache here races with the Archive position update.
+          LOG_TRACE("chat left main list %s; retain cached settings", chatId.c_str());
         }
         else
         {

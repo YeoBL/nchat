@@ -724,6 +724,21 @@ bool MessageCache::FetchOneMessage(const std::string& p_ProfileId, const std::st
   }
 }
 
+std::vector<std::string> MessageCache::GetUnreadChatIds(const std::string& p_ProfileId)
+{
+  std::vector<std::string> ids;
+  std::unique_lock<std::mutex> lock(m_DbMutex);
+  auto db = m_Dbs.find(p_ProfileId);
+  if (db == m_Dbs.end() || !db->second) return ids;
+  try
+  {
+    *db->second << "SELECT DISTINCT chatId FROM messages WHERE isOutgoing=0 AND isRead=0 "
+      "AND COALESCE(isDeleted,0)=0;" >> [&](const std::string& id) { ids.push_back(id); };
+  }
+  catch (const sqlite::sqlite_exception& ex) { HANDLE_SQLITE_EXCEPTION(ex); }
+  return ids;
+}
+
 bool MessageCache::GetOneMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                                  const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages)
 {
