@@ -39,6 +39,7 @@
 #include "uikeyconfig.h"
 #include "uikeyinput.h"
 #include "uimessagedialog.h"
+#include "uimessageinfodialog.h"
 #include "uitextinputdialog.h"
 #include "uiview.h"
 
@@ -4636,6 +4637,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyPaste = UiKeyConfig::GetKey("paste");
 
   static wint_t keyReact = UiKeyConfig::GetKey("react");
+  static wint_t keyMessageInfo = UiKeyConfig::GetKey("message_info");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4820,6 +4822,10 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyPaste)
   {
     OnKeyPaste();
+  }
+  else if (p_Key == keyMessageInfo)
+  {
+    OnKeyMessageInfo();
   }
   else if (p_Key == keyReact)
   {
@@ -5440,6 +5446,41 @@ void UiModel::OnKeySelectMention()
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
     GetImpl().ReinitView();
   }
+}
+
+void UiModel::OnKeyMessageInfo()
+{
+  auto request = std::make_shared<GetMessageReceiptsRequest>();
+  std::shared_ptr<Protocol> protocol;
+  std::string profile;
+  bool outgoing = false;
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    auto& model = GetImpl();
+    if (!model.GetSelectMessageActive() || model.GetEditMessageActive()) return;
+    auto chat = model.GetCurrentChat();
+    auto& ids = model.GetMessageVec(chat.first, chat.second);
+    int offset = model.GetMessageOffset(chat.first, chat.second);
+    if (offset < 0 || offset >= (int)ids.size()) return;
+    auto& messages = model.GetMessages(chat.first, chat.second);
+    auto it = messages.find(ids[offset]);
+    if (it == messages.end() || it->second.isDeleted) return;
+    outgoing = it->second.isOutgoing;
+    profile = chat.first;
+    request->chatId = chat.second; request->msgId = it->second.id;
+    auto protocols = model.GetProtocols();
+    auto found = protocols.find(profile);
+    if (found != protocols.end()) protocol = found->second;
+  }
+  if (!outgoing)
+  {
+    MessageDialog("Message Info", "Select a message you sent to see receipt details.", 0.75, 5);
+    return;
+  }
+  if (!protocol) return;
+  UiDialogParams params(this, "Message Info", 0.85, 0.75);
+  UiMessageInfoDialog dialog(params, profile, protocol, request);
+  dialog.Run();
 }
 
 void UiModel::OnKeyReact()

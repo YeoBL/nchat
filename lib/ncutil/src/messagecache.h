@@ -49,6 +49,7 @@ private:
     UpdateArchivedRequestType,
     AddGroupMembersRequestType,
     FetchGroupMembersRequestType,
+    MessageReceiptsRequestType,
     UpdateMembershipRequestType,
   };
 
@@ -57,6 +58,15 @@ private:
   public:
     virtual ~Request() { }
     virtual RequestType GetRequestType() const { return UnknownRequestType; }
+  };
+
+  class MessageReceiptsRequest : public Request
+  {
+  public:
+    virtual RequestType GetRequestType() const { return MessageReceiptsRequestType; }
+    std::string profileId, chatId, msgId;
+    std::vector<MessageReceipt> receipts;
+    std::function<void(MessageReceiptInfo)> onResult; // Set for a read, absent for a write.
   };
 
   class AddMessagesRequest : public Request
@@ -249,6 +259,9 @@ public:
   static void Init();
   static void Cleanup();
   static void SetMessageHandler(const std::function<void(std::shared_ptr<ServiceMessage>)>& p_MessageHandler);
+  static void MessageReceipts(const std::string& profileId, const std::string& chatId,
+    const std::string& msgId, const std::vector<MessageReceipt>& receipts,
+    std::function<void(MessageReceiptInfo)> onResult = {});
 
   static void AddFromServiceMessage(const std::string& p_ProfileId, std::shared_ptr<ServiceMessage> p_ServiceMessage);
 

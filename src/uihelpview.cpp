@@ -127,6 +127,7 @@ void UiHelpView::Draw()
 
     AppendHelpItem("jump_quoted", "JumpQuoted", helpItems);
     AppendHelpItem("react", "AddReact", helpItems);
+    AppendHelpItem("message_info", "MsgInfo", helpItems);
     AppendHelpItem("open_msg", "ExtView", helpItems);
     AppendHelpItem("forward_msg", "FwdMsg", helpItems);
 

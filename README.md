@@ -72,6 +72,7 @@ Interactive Commands:
     Ctrl-y      toggle show emojis
     KeyUp       select message
     Alt-@       insert mention
+    Alt-m       message info (select one of your sent messages first)
     Alt-a       archive current chat
     Alt-d       delete/leave current chat
     Alt-e       external editor compose
@@ -780,6 +781,23 @@ Specifies top bar text to indicate proxy is enabled.
 ### read_indicator
 
 Specifies text to indicate a message has been read by the receiver.
+
+For per-person details, select one of your outgoing messages with the arrow keys
+and press **Alt-m** (Option-m on macOS, or Escape followed by m). Message Info
+shows “Read by” for Telegram and both “Read by” and “Delivered to” for WhatsApp,
+with local timestamps. Type a
+name to filter, use arrows/Page Up/Page Down to scroll, and Ctrl-c or Left to
+close. Reopen to refresh. Inspecting receipts does not itself mark messages read.
+
+Telegram supplies read details only for eligible recent outgoing messages;
+chat type, message age and privacy settings can limit availability. Telegram
+does not expose a per-recipient delivery list. WhatsApp details are recorded
+from received events and any receipts included in history sync. Receipts not
+supplied before this feature was installed cannot be reconstructed. Missing
+entries/times mean unknown, not proof that a recipient has not read/received it.
+The delivery list includes people whose read receipt confirms arrival even when
+WhatsApp supplied no separate delivery timestamp; these are labelled accordingly.
+The shortcut can be changed using `message_info` in key.conf.
 
 ### reactions_enabled
 

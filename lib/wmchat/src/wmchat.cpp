@@ -685,6 +685,13 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
       }
       break;
 
+    case GetMessageReceiptsRequestType:
+      {
+        auto request = std::static_pointer_cast<GetMessageReceiptsRequest>(p_RequestMessage);
+        MessageCache::MessageReceipts(m_ProfileId, request->chatId, request->msgId, {}, request->onResult);
+      }
+      break;
+
     default:
       LOG_DEBUG("unknown request %d", p_RequestMessage->GetMessageType());
       break;
@@ -1003,6 +1010,14 @@ void WmNewTypingNotify(int p_ConnId, char* p_ChatId, char* p_UserId, int p_IsTyp
 
   free(p_ChatId);
   free(p_UserId);
+}
+
+void WmMessageReceipt(int connId, char* chatId, char* msgId, char* userId, long long delivered, long long read)
+{
+  WmChat* instance = WmChat::GetInstance(connId);
+  if (instance) MessageCache::MessageReceipts(instance->GetProfileId(), chatId, msgId,
+    {{userId, delivered, read}});
+  free(chatId); free(msgId); free(userId);
 }
 
 void WmNewMessageStatusNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, int p_IsRead)

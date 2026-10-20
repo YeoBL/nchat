@@ -642,6 +642,76 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
       }
       break;
 
+    case GetMessageReceiptsRequestType:
+      {
+        auto request = std::static_pointer_cast<GetMessageReceiptsRequest>(p_RequestMessage);
+        if (!request->onResult) break;
+        const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
+        const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
+        const std::string deliveryNote = "Telegram does not provide per-person delivery receipts. ";
+        SendQuery(td::td_api::make_object<td::td_api::getMessageProperties>(chatId, msgId),
+          [this, request, chatId, msgId, deliveryNote](Object object)
+        {
+          if (object->get_id() == td::td_api::error::ID)
+          {
+            request->onResult({{}, deliveryNote + "Message details unavailable; try again when connected."});
+            return;
+          }
+          auto properties = td::move_tl_object_as<td::td_api::messageProperties>(object);
+          if (properties->can_get_viewers_)
+          {
+            SendQuery(td::td_api::make_object<td::td_api::getMessageViewers>(chatId, msgId),
+              [request, deliveryNote](Object viewersObject)
+            {
+              if (viewersObject->get_id() == td::td_api::error::ID)
+              {
+                request->onResult({{}, deliveryNote + "Reader list unavailable (eligibility, age or privacy restrictions)."});
+                return;
+              }
+              auto viewers = td::move_tl_object_as<td::td_api::messageViewers>(viewersObject);
+              MessageReceiptInfo info;
+              info.note = deliveryNote + "Readers reported by Telegram; dates are approximate. Voice/video notes report content opened.";
+              for (const auto& viewer : viewers->viewers_)
+                info.receipts.push_back({StrUtil::NumToHex(viewer->user_id_), 0,
+                  viewer->view_date_ > 0 ? viewer->view_date_ : -1});
+              request->onResult(info);
+            });
+          }
+          else if (properties->can_get_read_date_)
+          {
+            SendQuery(td::td_api::make_object<td::td_api::getMessageReadDate>(chatId, msgId),
+              [request, deliveryNote](Object date)
+            {
+              MessageReceiptInfo info;
+              info.note = deliveryNote;
+              switch (date->get_id())
+              {
+                case td::td_api::messageReadDateRead::ID:
+                  info.receipts.push_back({request->chatId, 0,
+                    td::move_tl_object_as<td::td_api::messageReadDateRead>(date)->read_date_});
+                  break;
+                case td::td_api::messageReadDateUnread::ID:
+                  info.note += "Telegram reports this message has not been read yet.";
+                  break;
+                case td::td_api::messageReadDateTooOld::ID:
+                  info.note += "Message is too old for a read timestamp.";
+                  break;
+                case td::td_api::messageReadDateUserPrivacyRestricted::ID:
+                case td::td_api::messageReadDateMyPrivacyRestricted::ID:
+                  info.note += "Read timestamp unavailable due to privacy settings.";
+                  break;
+                default:
+                  info.note += "Read timestamp unavailable. Try again when connected.";
+                  break;
+              }
+              request->onResult(info);
+            });
+          }
+          else request->onResult({{}, deliveryNote + "Read-by details unavailable for this message (chat type, message age or privacy restrictions)."});
+        });
+      }
+      break;
+
     case GetStatusRequestType:
       {
         LOG_DEBUG("Get status");

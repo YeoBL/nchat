@@ -311,6 +311,10 @@ void MessageCache::AddProfile(const std::string& p_ProfileId, bool p_CheckSequen
   {
     *m_Dbs[p_ProfileId] << "PRAGMA synchronous = FULL";
     *m_Dbs[p_ProfileId] << "PRAGMA journal_mode = DELETE";
+    *m_Dbs[p_ProfileId] << "CREATE TABLE IF NOT EXISTS message_receipts ("
+      "chatId TEXT NOT NULL,msgId TEXT NOT NULL,userId TEXT NOT NULL,"
+      "deliveredTime INTEGER NOT NULL,readTime INTEGER NOT NULL,"
+      "PRIMARY KEY(chatId,msgId,userId));";
 
     // note: use actual table names instead if variables during schema setup / update
 
@@ -1151,10 +1155,60 @@ void MessageCache::EnqueueRequest(std::shared_ptr<Request> p_Request)
   m_CondVar.notify_one();
 }
 
+void MessageCache::MessageReceipts(const std::string& profileId, const std::string& chatId,
+  const std::string& msgId, const std::vector<MessageReceipt>& receipts,
+  std::function<void(MessageReceiptInfo)> onResult)
+{
+  if (!m_CacheEnabled)
+  {
+    if (onResult) onResult({{}, "Message cache is disabled; receipt details unavailable."});
+    return;
+  }
+  auto request = std::make_shared<MessageReceiptsRequest>();
+  request->profileId = profileId; request->chatId = chatId; request->msgId = msgId;
+  request->receipts = receipts; request->onResult = onResult;
+  EnqueueRequest(request);
+}
+
 void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 {
   switch (p_Request->GetRequestType())
   {
+    case MessageReceiptsRequestType:
+      {
+        auto request = std::static_pointer_cast<MessageReceiptsRequest>(p_Request);
+        MessageReceiptInfo info;
+        {
+          std::unique_lock<std::mutex> lock(m_DbMutex);
+          auto it = m_Dbs.find(request->profileId);
+          if (it == m_Dbs.end() || !it->second)
+            info.note = "Receipt cache unavailable.";
+          else try
+          {
+            auto& db = *it->second;
+            if (request->onResult)
+            {
+              db << "SELECT userId,deliveredTime,readTime FROM message_receipts WHERE chatId=? AND msgId=? ORDER BY userId;"
+                << request->chatId << request->msgId >> [&](std::string user, int64_t delivered, int64_t read)
+                { info.receipts.push_back({user, delivered, read}); };
+              info.note = "WhatsApp: recorded receipts only. Missing entries/times are unknown, not proof of unread or undelivered. Older history may be incomplete.";
+            }
+            else for (const auto& receipt : request->receipts)
+            {
+              if (receipt.userId.empty() || (receipt.deliveredTime <= 0 && receipt.readTime <= 0)) continue;
+              // Preserve the earliest nonzero time across duplicate/out-of-order receipts.
+              db << "INSERT INTO message_receipts VALUES(?,?,?,?,?) ON CONFLICT(chatId,msgId,userId) DO UPDATE SET "
+                "deliveredTime=CASE WHEN excluded.deliveredTime<=0 THEN deliveredTime WHEN deliveredTime<=0 THEN excluded.deliveredTime ELSE min(deliveredTime,excluded.deliveredTime) END,"
+                "readTime=CASE WHEN excluded.readTime<=0 THEN readTime WHEN readTime<=0 THEN excluded.readTime ELSE min(readTime,excluded.readTime) END;"
+                << request->chatId << request->msgId << receipt.userId << receipt.deliveredTime << receipt.readTime;
+            }
+          }
+          catch (const sqlite::sqlite_exception&)
+          { info.note = "Receipt cache could not be read or updated. Try again."; }
+        }
+        if (request->onResult) request->onResult(info); // Never call UI code with the DB locked.
+      }
+      break;
     case AddMessagesRequestType:
       {
         std::unique_lock<std::mutex> lock(m_DbMutex);
@@ -1792,6 +1846,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
         try
         {
           *m_Dbs[profileId] << "DELETE FROM " + s_TableMessages + " WHERE chatId = ? AND id = ?;" << chatId << msgId;
+          *m_Dbs[profileId] << "DELETE FROM message_receipts WHERE chatId=? AND msgId=?;" << chatId << msgId;
         }
         catch (const sqlite::sqlite_exception& ex)
         {
@@ -1817,6 +1872,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
           *m_Dbs[profileId] << "DELETE FROM " + s_TableMessages + " WHERE chatId = ?;" << chatId;
 
           *m_Dbs[profileId] << "DELETE FROM " + s_TableChats + " WHERE id = ?;" << chatId;
+          *m_Dbs[profileId] << "DELETE FROM message_receipts WHERE chatId=?;" << chatId;
         }
         catch (const sqlite::sqlite_exception& ex)
         {

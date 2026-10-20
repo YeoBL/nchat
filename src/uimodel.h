@@ -407,6 +407,7 @@ private:
   void OnKeySelectEmoji();
   void OnKeySelectContact();
   void OnKeyReact();
+  void OnKeyMessageInfo();
   void OnKeyFind();
   void OnKeyFindNext();
   void OnKeyForwardMsg();

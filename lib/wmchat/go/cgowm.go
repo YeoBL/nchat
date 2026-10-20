@@ -16,6 +16,7 @@ package main
 // extern void WmNewStatusNotify(int p_ConnId, char* p_UserId, int p_IsOnline, int p_TimeSeen);
 // extern void WmNewTypingNotify(int p_ConnId, char* p_ChatId, char* p_UserId, int p_IsTyping);
 // extern void WmNewMessageStatusNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, int p_IsRead);
+// extern void WmMessageReceipt(int connId, char* chatId, char* msgId, char* userId, long long delivered, long long read);
 // extern void WmNewMessageIsPinnedNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, int p_IsPinned);
 // extern void WmNewMessageFileNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_FilePath, int p_FileStatus, int p_Action);
 // extern void WmNewMessageReactionNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_SenderId, char* p_Text, int p_FromMe);
@@ -164,6 +165,10 @@ func CWmNewTypingNotify(connId int, chatId string, userId string, isTyping int) 
 
 func CWmNewMessageStatusNotify(connId int, chatId string, msgId string, isRead int) {
 	C.WmNewMessageStatusNotify(C.int(connId), C.CString(chatId), C.CString(msgId), C.int(isRead))
+}
+
+func CWmMessageReceipt(connId int, chatId, msgId, userId string, delivered, read int64) {
+	C.WmMessageReceipt(C.int(connId), C.CString(chatId), C.CString(msgId), C.CString(userId), C.longlong(delivered), C.longlong(read))
 }
 
 func CWmNewMessageIsPinnedNotify(connId int, chatId string, msgId string, isPinned int) {

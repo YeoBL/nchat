@@ -900,6 +900,22 @@ func (handler *WmEventHandler) HandleConnected() {
 }
 
 func (handler *WmEventHandler) HandleReceipt(receipt *events.Receipt) {
+	// Preserve recipient-level events before reducing them to the legacy checkmark.
+	// Self/sync receipts describe our reading of incoming messages, not recipients.
+	if receipt.Type == types.ReceiptTypeDelivered || receipt.Type == types.ReceiptTypeRead || receipt.Type == types.ReceiptTypePlayed {
+		if client := GetClient(handler.connId); client != nil && !receipt.Sender.IsEmpty() && !IsSelfUser(client, StrFromJid(receipt.Sender)) {
+			var delivered, read int64
+			if receipt.Type == types.ReceiptTypeDelivered {
+				delivered = receipt.Timestamp.Unix()
+			} else {
+				read = receipt.Timestamp.Unix()
+			}
+			userID := GetChatId(client, &receipt.Sender, nil)
+			for _, id := range receipt.MessageIDs {
+				CWmMessageReceipt(handler.connId, GetChatId(client, &receipt.Chat, nil), id, userID, delivered, read)
+			}
+		}
+	}
 	if receipt.Type == events.ReceiptTypeRead || receipt.Type == events.ReceiptTypeReadSelf {
 		LOG_TRACE(fmt.Sprintf("%#v was read by %s at %s", receipt.MessageIDs, receipt.SourceString(), receipt.Timestamp))
 		connId := handler.connId
@@ -1025,6 +1041,16 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 		for _, syncMessage := range syncMessages {
 			webMessageInfo := syncMessage.Message
 			messageInfo := ParseWebMessageInfo(selfJid, chatJid, webMessageInfo)
+			if webMessageInfo.GetKey().GetFromMe() {
+				for _, receipt := range webMessageInfo.GetUserReceipt() {
+					user, err := types.ParseJID(receipt.GetUserJID())
+					if err != nil || user.IsEmpty() || IsSelfUser(client, StrFromJid(user)) {
+						continue
+					}
+					CWmMessageReceipt(handler.connId, GetChatId(client, &chatJid, nil), webMessageInfo.GetKey().GetID(),
+						GetChatId(client, &user, nil), receipt.GetReceiptTimestamp(), receipt.GetReadTimestamp())
+				}
+			}
 			message := webMessageInfo.GetMessage()
 
 			if (messageInfo == nil) || (message == nil) {
