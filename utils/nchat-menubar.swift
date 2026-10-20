@@ -43,6 +43,7 @@ let unreadCandidatePredicate = """
     m.isOutgoing = 0 AND m.isRead = 0 AND COALESCE(m.isDeleted, 0) = 0
 
     AND COALESCE(ch.isMuted, 0) = 0
+    AND COALESCE(ch.isArchived, 0) = 0
     AND m.chatId != 'status@broadcast'
     AND COALESCE(m.text, '') NOT IN ('[Joined]', '[Left]')
     AND COALESCE(m.text, '') NOT GLOB '[[]Added *]'
