@@ -330,6 +330,10 @@ void MessageCache::AddProfile(const std::string& p_ProfileId, bool p_CheckSequen
       };
     // *INDENT-ON*
 
+    // Kept separately so ordinary chat metadata refreshes cannot erase a leave.
+    *m_Dbs[p_ProfileId] << "CREATE TABLE IF NOT EXISTS chat_membership ("
+      "chatId TEXT PRIMARY KEY, isMember INTEGER NOT NULL);";
+
     LOG_DEBUG("detected db schema %d", schemaVersion);
 
     if (schemaVersion < 3)
@@ -863,6 +867,16 @@ void MessageCache::UpdateMute(const std::string& p_ProfileId, const std::string&
   EnqueueRequest(updateMuteRequest);
 }
 
+void MessageCache::UpdateMembership(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsMember)
+{
+  if (!m_CacheEnabled) return;
+  auto request = std::make_shared<UpdateMembershipRequest>();
+  request->profileId = p_ProfileId;
+  request->chatId = p_ChatId;
+  request->isMember = p_IsMember;
+  EnqueueRequest(request);
+}
+
 void MessageCache::UpdateArchived(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsArchived)
 {
   if (!m_CacheEnabled) return;
@@ -1367,8 +1381,11 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
         const bool noFilter = fetchChatsRequest->chatIds.empty();
         std::vector<ChatInfo> chatInfos;
+        std::map<std::string, int> memberships;
         try
         {
+          *m_Dbs[profileId] << "SELECT chatId,isMember FROM chat_membership;" >>
+            [&](const std::string& id, int member) { memberships[id] = member; };
           // *INDENT-OFF*
           std::map<std::string, int32_t> chatIdMuted;
           std::map<std::string, int32_t> chatIdPinned;
@@ -1409,6 +1426,14 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
         lock.unlock();
         LOG_DEBUG("cache fetch %d chats", chatInfos.size());
+
+        for (const auto& membership : memberships)
+        {
+          auto notify = std::make_shared<UpdateMembershipNotify>(profileId);
+          notify->chatId = membership.first;
+          notify->isMember = membership.second;
+          CallMessageHandler(notify);
+        }
 
         std::shared_ptr<NewChatsNotify> newChatsNotify =
           std::make_shared<NewChatsNotify>(profileId);
@@ -1977,6 +2002,26 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
         }
 
         LOG_DEBUG("cache update pinned %s %d", chatId.c_str(), isPinned);
+      }
+      break;
+
+    case UpdateMembershipRequestType:
+      {
+        auto request = std::static_pointer_cast<UpdateMembershipRequest>(p_Request);
+        std::unique_lock<std::mutex> lock(m_DbMutex);
+        auto db = m_Dbs.find(request->profileId);
+        if (db == m_Dbs.end() || !db->second) return;
+        try
+        {
+          *db->second << "INSERT INTO chat_membership(chatId,isMember) VALUES(?,?) "
+            "ON CONFLICT(chatId) DO UPDATE SET isMember=excluded.isMember;" << request->chatId << request->isMember;
+        }
+        catch (const sqlite::sqlite_exception& ex) { HANDLE_SQLITE_EXCEPTION(ex); return; }
+        lock.unlock();
+        auto notify = std::make_shared<UpdateMembershipNotify>(request->profileId);
+        notify->chatId = request->chatId;
+        notify->isMember = request->isMember;
+        CallMessageHandler(notify);
       }
       break;
 

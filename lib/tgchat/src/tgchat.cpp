@@ -33,6 +33,7 @@
 #include "cacheutil.h"
 #include "config.h"
 #include "fileutil.h"
+#include "tgmembership.h"
 #include "log.h"
 #include "messagecache.h"
 #include "protocolutil.h"
@@ -239,6 +240,7 @@ private:
   std::map<int64_t, int64_t> m_LastReadOutboxMessage;
   std::map<int64_t, std::set<int64_t>> m_UnreadInboxMessages;
   std::map<int64_t, std::set<int64_t>> m_UnreadOutboxMessages;
+  std::map<int64_t, int64_t> m_SupergroupChats, m_BasicGroupChats;
   std::map<int64_t, ContactInfo> m_ContactInfos;
   std::map<int64_t, ChatType> m_ChatTypes;
   int64_t m_CurrentChat = 0;
@@ -710,6 +712,13 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             {
               auto typeSupergroup =
                 td::move_tl_object_as<td::td_api::chatTypeSupergroup>(tchat->type_);
+              m_SupergroupChats[typeSupergroup->supergroup_id_] = tchat->id_;
+              SendQuery(td::td_api::make_object<td::td_api::getSupergroup>(typeSupergroup->supergroup_id_),
+                [this, chatId](Object object) {
+                  if (object->get_id() != td::td_api::supergroup::ID) return;
+                  auto group = td::move_tl_object_as<td::td_api::supergroup>(object);
+                  if (group->status_) MessageCache::UpdateMembership(m_ProfileId, chatId, TelegramIsMember(*group->status_));
+                });
               if (typeSupergroup->is_channel_)
               {
                 m_ChatTypes[tchat->id_] = ChatSuperGroupChannel;
@@ -722,6 +731,14 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             else if (tchat->type_->get_id() == td::td_api::chatTypeBasicGroup::ID)
             {
               m_ChatTypes[tchat->id_] = ChatBasicGroup;
+              const auto& type = static_cast<const td::td_api::chatTypeBasicGroup&>(*tchat->type_);
+              m_BasicGroupChats[type.basic_group_id_] = tchat->id_;
+              SendQuery(td::td_api::make_object<td::td_api::getBasicGroup>(type.basic_group_id_),
+                [this, chatId](Object object) {
+                  if (object->get_id() != td::td_api::basicGroup::ID) return;
+                  auto group = td::move_tl_object_as<td::td_api::basicGroup>(object);
+                  if (group->status_) MessageCache::UpdateMembership(m_ProfileId, chatId, TelegramIsMember(*group->status_));
+                });
             }
             else if (tchat->type_->get_id() == td::td_api::chatTypeSecret::ID)
             {
@@ -2345,9 +2362,12 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("update dice emojis");
   },
-  [](td::td_api::updateSupergroup&)
+  [this](td::td_api::updateSupergroup& update)
   {
-    LOG_TRACE("update supergroup");
+    if (!update.supergroup_ || !update.supergroup_->status_) return;
+    auto chat = m_SupergroupChats.find(update.supergroup_->id_);
+    if (chat != m_SupergroupChats.end())
+      MessageCache::UpdateMembership(m_ProfileId, StrUtil::NumToHex(chat->second), TelegramIsMember(*update.supergroup_->status_));
   },
   [](td::td_api::updateChatTheme&)
   {
@@ -2361,9 +2381,12 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("update animation search parameters");
   },
-  [](td::td_api::updateBasicGroup&)
+  [this](td::td_api::updateBasicGroup& update)
   {
-    LOG_TRACE("update basic group");
+    if (!update.basic_group_ || !update.basic_group_->status_) return;
+    auto chat = m_BasicGroupChats.find(update.basic_group_->id_);
+    if (chat != m_BasicGroupChats.end())
+      MessageCache::UpdateMembership(m_ProfileId, StrUtil::NumToHex(chat->second), TelegramIsMember(*update.basic_group_->status_));
   },
   [](td::td_api::updateSavedAnimations&)
   {

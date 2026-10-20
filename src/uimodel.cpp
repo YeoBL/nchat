@@ -1712,7 +1712,10 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
 
             m_ChatInfos[profileId][chatInfo.id] = chatInfo;
 
-            if (chatInfo.isArchived) continue;
+            if (chatInfo.isArchived || m_LeftChats[profileId].count(chatInfo.id)) continue;
+
+            for (const auto& message : m_Messages[profileId][chatInfo.id])
+              QueueTerminalNotification(profileId, chatInfo.id, message.second);
 
             if (m_ChatSet[profileId].insert(chatInfo.id).second)
             {
@@ -1739,6 +1742,7 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           bool hasNewMessage = false;
           const std::string& chatId = newMessagesNotify->chatId;
           if (IsChatForceHidden(chatId)) return;
+          if (m_LeftChats[profileId].count(chatId)) return;
           if (m_ChatInfos[profileId].count(chatId) && m_ChatInfos[profileId][chatId].isArchived) return;
 
           std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
@@ -2202,6 +2206,30 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
       }
       break;
 
+    case UpdateMembershipNotifyType:
+      {
+        auto notify = std::static_pointer_cast<UpdateMembershipNotify>(p_ServiceMessage);
+        const auto chat = std::make_pair(profileId, notify->chatId);
+        if (!notify->isMember)
+        {
+          m_LeftChats[profileId].insert(notify->chatId);
+          m_Notifications.RemoveChat(chat);
+        }
+        else
+        {
+          const bool rejoined = m_LeftChats[profileId].erase(notify->chatId) != 0;
+          auto info = m_ChatInfos[profileId].find(notify->chatId);
+          if (rejoined && info != m_ChatInfos[profileId].end() && !info->second.isArchived &&
+              !IsChatForceHidden(notify->chatId) && m_ChatSet[profileId].insert(notify->chatId).second)
+            m_ChatVec.push_back(chat);
+        }
+        SortChats();
+        UpdateList();
+        UpdateStatus();
+        UpdateHistory();
+      }
+      break;
+
     case UpdateArchivedNotifyType:
       {
         std::shared_ptr<UpdateArchivedNotify> updateArchivedNotify = std::static_pointer_cast<UpdateArchivedNotify>(
@@ -2439,6 +2467,12 @@ void UiModel::Impl::ProcessTimers()
 
 void UiModel::Impl::SortChats()
 {
+  const bool currentLeft = m_LeftChats[m_CurrentChat.first].count(m_CurrentChat.second) != 0;
+  m_ChatVec.erase(std::remove_if(m_ChatVec.begin(), m_ChatVec.end(), [&](const auto& chat) {
+    if (!m_LeftChats[chat.first].count(chat.second)) return false;
+    m_ChatSet[chat.first].erase(chat.second);
+    return true;
+  }), m_ChatVec.end());
   static const bool mutedPositionByTimestamp = UiConfig::GetBool("muted_position_by_timestamp");
   std::sort(m_ChatVec.begin(), m_ChatVec.end(),
             [&](const std::pair<std::string, std::string>& lhs, const std::pair<std::string, std::string>& rhs) -> bool
@@ -2467,6 +2501,15 @@ void UiModel::Impl::SortChats()
 
     return false;
   });
+
+  if (currentLeft)
+  {
+    // Do not automatically open/read an unrelated chat after a remote leave.
+    m_CurrentChat = s_ChatNone;
+    m_CurrentChatIndex = -1;
+    SetSelectMessageActive(false);
+    return;
+  }
 
   if (!m_ChatVec.empty())
   {

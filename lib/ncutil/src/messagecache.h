@@ -49,6 +49,7 @@ private:
     UpdateArchivedRequestType,
     AddGroupMembersRequestType,
     FetchGroupMembersRequestType,
+    UpdateMembershipRequestType,
   };
 
   class Request
@@ -210,6 +211,14 @@ private:
     int64_t timePinned = -1;
   };
 
+  class UpdateMembershipRequest : public Request
+  {
+  public:
+    virtual RequestType GetRequestType() const { return UpdateMembershipRequestType; }
+    std::string profileId, chatId;
+    bool isMember = true;
+  };
+
   class UpdateArchivedRequest : public Request
   {
   public:
@@ -260,6 +269,7 @@ public:
   static bool GetOneMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                             const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages);
   static std::vector<std::string> GetUnreadChatIds(const std::string& p_ProfileId);
+  static void UpdateMembership(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsMember);
   static void FindMessage(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_FromMsgId,
                           const std::string& p_LastMsgId, const std::string& p_FindText,
                           const std::string& p_FindMsgId, bool p_FindPinned);
