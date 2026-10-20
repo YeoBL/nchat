@@ -426,7 +426,124 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
     return true;
   }
 
+  if (operation == "tg.translate")
+  {
+    if (!msgId) { fail("Select a message to translate."); return true; }
+    const auto language = value("language", "en");
+    if (language.empty() || language.size() > 12 || language.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-") != std::string::npos)
+    {
+      fail("Enter a language code such as en, fr or zh.");
+      return true;
+    }
+    SendQuery(make_object<translateMessageText>(chatId, msgId, language, ""), [checked, finish](Object object)
+    {
+      if (!checked(object)) return;
+      ClientActionResult result;
+      result.title = "Translation";
+      result.text = static_cast<const formattedText&>(*object).text_;
+      finish(std::move(result));
+    });
+    return true;
+  }
 
+  if (operation == "tg.buttons")
+  {
+    if (!msgId) { fail("Select a message with buttons."); return true; }
+    SendQuery(make_object<getMessage>(chatId, msgId), [checked, finish, item](Object object)
+    {
+      if (!checked(object)) return;
+      const auto& message = static_cast<const td::td_api::message&>(*object);
+      ClientActionResult result;
+      result.title = "Message buttons";
+      if (message.reply_markup_ && message.reply_markup_->get_id() == replyMarkupShowKeyboard::ID)
+      {
+        const auto& keyboard = static_cast<const replyMarkupShowKeyboard&>(*message.reply_markup_);
+        for (const auto& row : keyboard.rows_)
+        {
+          for (const auto& button : row)
+          {
+            if (!button || !button->type_) continue;
+            if (button->type_->get_id() == keyboardButtonTypeText::ID)
+            {
+              auto action = item(button->text_, "tg.button.reply", "Send this response to the bot", true);
+              action.params["buttonText"] = button->text_;
+              result.items.push_back(std::move(action));
+            }
+            else if (button->type_->get_id() == keyboardButtonTypeRequestPhoneNumber::ID)
+              result.text += button->text_ + ": use Telegram to choose whether to share your phone number.\n";
+            else if (button->type_->get_id() == keyboardButtonTypeRequestLocation::ID)
+              result.text += button->text_ + ": use Telegram to choose whether to share your current location.\n";
+            else if (button->type_->get_id() == keyboardButtonTypeWebApp::ID)
+              result.text += button->text_ + ": open this Mini App in Telegram.\n";
+            else result.text += button->text_ + ": this selection menu requires Telegram.\n";
+          }
+        }
+        if (result.items.empty() && result.text.empty()) result.text = "This bot keyboard is empty.";
+        finish(std::move(result));
+        return;
+      }
+      if (!message.reply_markup_ || message.reply_markup_->get_id() != replyMarkupInlineKeyboard::ID)
+      {
+        result.text = "This message has no buttons.";
+        finish(std::move(result));
+        return;
+      }
+      const auto& keyboard = static_cast<const replyMarkupInlineKeyboard&>(*message.reply_markup_);
+      for (const auto& row : keyboard.rows_)
+      {
+        for (const auto& button : row)
+        {
+          if (!button || !button->type_) continue;
+          if (button->type_->get_id() == inlineKeyboardButtonTypeUrl::ID)
+          {
+            auto action = item(button->text_, "openUrl", "Open link");
+            action.params["url"] = static_cast<const inlineKeyboardButtonTypeUrl&>(*button->type_).url_;
+            result.items.push_back(std::move(action));
+          }
+          else if (button->type_->get_id() == inlineKeyboardButtonTypeCallback::ID)
+          {
+            auto action = item(button->text_, "tg.button.callback", "Send this button to the bot", true);
+            action.params["data"] = StrUtil::StrToHex(static_cast<const inlineKeyboardButtonTypeCallback&>(*button->type_).data_);
+            result.items.push_back(std::move(action));
+          }
+          else
+          {
+            result.text += button->text_ + ": requires Telegram (login, payment, password or Mini App).\n";
+          }
+        }
+      }
+      if (result.items.empty() && result.text.empty()) result.text = "No available buttons.";
+      finish(std::move(result));
+    });
+    return true;
+  }
+  if (operation == "tg.button.callback")
+  {
+    const auto data = value("data");
+    if (!msgId || data.empty() || (data.size() % 2) || data.size() > 128 ||
+        data.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+    {
+      fail("This button's data is invalid; reopen the message buttons.");
+      return true;
+    }
+    SendQuery(make_object<getCallbackQueryAnswer>(chatId, msgId, make_object<callbackQueryPayloadData>(StrUtil::StrFromHex(data))),
+              [checked, finish, item](Object object)
+    {
+      if (!checked(object)) return;
+      const auto& answer = static_cast<const callbackQueryAnswer&>(*object);
+      ClientActionResult result;
+      result.title = "Bot response";
+      result.text = answer.text_.empty() ? "Button sent. The bot may update its message." : answer.text_;
+      if (!answer.url_.empty())
+      {
+        auto link = item("Open response link", "openUrl", answer.url_);
+        link.params["url"] = answer.url_;
+        result.items.push_back(std::move(link));
+      }
+      finish(std::move(result));
+    });
+    return true;
+  }
 
 
 
