@@ -65,6 +65,7 @@ void UiConfig::Init()
     { "pinned_indicator", "\xe2\x9a\xb2" },
     { "proxy_indicator", "\xF0\x9F\x94\x92" },
     { "read_indicator", "\xe2\x9c\x93" },
+    { "record_app", "" },
     { "reactions_enabled", "1" },
     { "spell_check_command", "" },
     { "status_broadcast", "1" },

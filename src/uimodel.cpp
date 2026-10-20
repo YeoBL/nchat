@@ -5782,6 +5782,11 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
   auto dispatch = [this, context, chat, protocol, bulkMessages, selected, makeItem](
     const std::string& operation, const Params& values, std::function<void(ClientActionResult)> done) -> bool
   {
+    if (operation == "local.record.voice" || operation == "local.record.video")
+    {
+      FeatureMedia::Record(operation == "local.record.video", values, done);
+      return true;
+    }
     if (operation == "local.transcribe")
     {
       FeatureMedia::Transcribe(values, done);
@@ -5818,6 +5823,8 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       if (!chat.second.empty())
       {
         makeItem(page, "Select multiple messages", "local.bulk", {}, "Copy, bookmark, forward or delete loaded messages");
+        makeItem(page, "Record a voice message", "local.record.voice", {}, "Review the recording before sending");
+        makeItem(page, "Record a video note", "local.record.video", {}, "Review the recording before sending");
       }
       if (!Value(context, "msgId").empty())
       {
