@@ -16,6 +16,7 @@
 
 #include "apputil.h"
 #include "owned_mutex.h"
+#include "notificationstate.h"
 #include "protocol.h"
 
 class UiView;
@@ -95,6 +96,8 @@ private:
     std::string GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId);
     void UpdateChatInfoLastMessageTime(const std::string& p_ProfileId, const std::string& p_ChatId);
     void UpdateChatInfoIsUnread(const std::string& p_ProfileId, const std::string& p_ChatId);
+    void QueueTerminalNotification(const std::string& p_ProfileId, const std::string& p_ChatId,
+                                   const ChatMessage& p_Message);
     std::string GetContactName(const std::string& p_ProfileId, const std::string& p_ChatId);
     std::string GetContactNameIncludingSelf(const std::string& p_ProfileId, const std::string& p_ChatId);
     std::string GetContactListName(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_AllowId,
@@ -243,6 +246,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Protocol>> m_Protocols;
 
     std::unordered_map<std::string, std::unordered_set<std::string>> m_ChatSet;
+    std::unordered_map<std::string, std::unordered_set<std::string>> m_LeftChats;
     std::vector<std::pair<std::string, std::string>> m_ChatVec;
     std::unordered_map<std::string, std::unordered_map<std::string, ChatInfo>> m_ChatInfos;
     std::unordered_map<std::string, std::unordered_map<std::string, ContactInfo>> m_ContactInfos;
@@ -293,6 +297,8 @@ private:
     bool m_FindMessageActive = false;
 
     bool m_TriggerTerminalBell = false;
+    NotificationState m_Notifications;
+    int64_t m_NextBadgeSyncMs = -1;
     bool m_HomeFetchAll = false;
     bool m_TerminalActive = true;
     bool m_HistoryInteraction = false;
