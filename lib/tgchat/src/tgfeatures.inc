@@ -299,7 +299,166 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
     return;
   }
 
+  if (operation == "tg.search")
+  {
+    ClientActionResult result;
+    result.title = "Search Telegram";
+    result.text = "Searches Telegram's available history. Secret Chats have a separate device-local search. Sender and date filters are applied to each page; use More results to continue.";
+    auto context = params; context["offset"] = ""; context["from"] = ""; context["scope"] = ""; context["senderResolved"] = "";
+    context["topicId"] = ""; context["threadId"] = "";
+    result.items.push_back(TgFeatureItem("Search all Telegram chats", "tg.search.run", context,
+      {{"query", "Search text (may be blank with a type filter)", ""},
+       {"type", "Type: all/photo/video/audio/file/voice/video note/link/poll", "all"},
+       {"sender", "Sender name, @username or Telegram numeric ID (optional)", ""},
+       {"after", "From date YYYY-MM-DD (optional)", ""}, {"before", "Through date YYYY-MM-DD (optional)", ""}}));
+    if (chat)
+    {
+      context = params;
+      context["offset"] = ""; context["from"] = ""; context["senderResolved"] = "";
+      context["scope"] = "chat";
+      result.items.push_back(TgFeatureItem("Search this chat or topic", "tg.search.run", context,
+        {{"query", "Search text", ""}, {"type", "Type: all/photo/video/audio/file/voice/video note/link/poll/pinned", "all"},
+         {"sender", "Sender name, @username or numeric ID (optional)", ""},
+         {"after", "From date YYYY-MM-DD (optional)", ""}, {"before", "Through date YYYY-MM-DD (optional)", ""}}));
+    }
+    context = params;
+    context["scope"] = "secret";
+    context["offset"] = ""; context["from"] = ""; context["senderResolved"] = "";
+    context["topicId"] = ""; context["threadId"] = "";
+    result.items.push_back(TgFeatureItem("Search Secret Chats on this device", "tg.search.run", context,
+      {{"query", "Search text", ""}, {"type", "Type: all/photo/video/audio/file/voice/video note/link/poll", "all"},
+       {"sender", "Sender name or ID (optional)", ""},
+       {"after", "From date YYYY-MM-DD (optional)", ""}, {"before", "Through date YYYY-MM-DD (optional)", ""}}));
+    request->onResult(std::move(result));
+    return;
+  }
 
+  if (operation == "tg.search.run")
+  {
+    int32_t after = 0, before = 0;
+    if (!TgFeatureParseDate(TgFeatureParam(params, "after"), after) ||
+        !TgFeatureParseDate(TgFeatureParam(params, "before"), before, true) || (after && before && after > before))
+    { finish("Search", "Use valid dates in YYYY-MM-DD order.", false); return; }
+    const auto type = TgFeatureParam(params, "type");
+    const std::set<std::string> types = {"", "all", "photo", "video", "audio", "file", "voice", "video note", "link", "poll", "pinned"};
+    if (!types.count(type)) { finish("Search", "Choose a listed message type.", false); return; }
+    int64_t sender = 0;
+    const auto senderText = TgFeatureParam(params, "sender");
+    if (!senderText.empty() && TgFeatureParam(params, "senderResolved").empty())
+    {
+      if (!TgFeatureParseNumber(senderText, sender))
+      {
+        if (senderText.front() == '@')
+        {
+          SendQuery(make_object<searchPublicChat>(senderText.substr(1)), [this, request](Object object)
+          {
+            if (TgFeatureError(request, object)) return;
+            auto contact = td::move_tl_object_as<td::td_api::chat>(object);
+            if (contact->type_->get_id() != chatTypePrivate::ID)
+            {
+              ClientActionResult result; result.success = false; result.title = "Search";
+              result.text = "The sender username must identify a person or bot."; request->onResult(std::move(result)); return;
+            }
+            auto followup = std::make_shared<ClientActionRequest>(*request);
+            followup->params["senderResolved"] = std::to_string(static_cast<chatTypePrivate&>(*contact->type_).user_id_);
+            PerformClientAction(followup);
+          });
+          return;
+        }
+        std::vector<int64_t> matches;
+        for (const auto& contact : m_ContactInfos)
+          if (contact.first > 0 && StrUtil::ToLower(contact.second.name).find(StrUtil::ToLower(senderText)) != std::string::npos)
+            matches.push_back(contact.first);
+        if (matches.size() != 1)
+        {
+          ClientActionResult result;
+          result.title = "Choose sender";
+          for (auto id : matches)
+          {
+            auto context = params; context["senderResolved"] = std::to_string(id);
+            result.items.push_back(TgFeatureItem(GetContactName(id), "tg.search.run", context));
+          }
+          if (matches.empty()) result.text = "No cached name matches. Enter a Telegram @username or numeric user ID.";
+          request->onResult(std::move(result));
+          return;
+        }
+        sender = matches.front();
+      }
+    }
+    else if (!TgFeatureParam(params, "senderResolved").empty())
+      TgFeatureParseNumber(TgFeatureParam(params, "senderResolved"), sender);
+
+    const bool inChat = TgFeatureParam(params, "scope") == "chat";
+    const auto knownChat = m_ChatTypes.find(chat);
+    const bool secret = TgFeatureParam(params, "scope") == "secret" ||
+      (inChat && knownChat != m_ChatTypes.end() && knownChat->second == ChatSecret);
+    const bool secretText = secret && !TgFeatureParam(params, "query").empty();
+    if (!inChat && secret && !secretText)
+    { finish("Search", "Enter search text to search across Secret Chats.", false); return; }
+    if (!inChat && !secret && type == "pinned")
+    { finish("Search", "Pinned-message search is available under Search this chat.", false); return; }
+    const bool chatResults = inChat && !secretText;
+    auto handler = [showMessages, request, params, chatResults, sender, after, before](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      std::vector<object_ptr<td::td_api::message>> values;
+      auto next = params;
+      bool more = false;
+      if (chatResults)
+      {
+        auto found = td::move_tl_object_as<foundChatMessages>(object);
+        next["from"] = StrUtil::NumToHex(found->next_from_message_id_);
+        more = found->next_from_message_id_ != 0 && TgFeatureParam(next, "from") != TgFeatureParam(params, "from");
+        values = std::move(found->messages_);
+      }
+      else
+      {
+        auto found = td::move_tl_object_as<foundMessages>(object);
+        next["offset"] = found->next_offset_;
+        more = !found->next_offset_.empty() && found->next_offset_ != TgFeatureParam(params, "offset");
+        values = std::move(found->messages_);
+      }
+      std::vector<object_ptr<td::td_api::message>> filtered;
+      for (auto& value : values)
+      {
+        if (!value || (after && value->date_ < after) || (before && value->date_ > before)) continue;
+        if (sender && (!value->sender_id_ || value->sender_id_->get_id() != messageSenderUser::ID ||
+            static_cast<messageSenderUser&>(*value->sender_id_).user_id_ != sender)) continue;
+        filtered.push_back(std::move(value));
+      }
+      showMessages(std::move(filtered), "Telegram search results", params, more ? "tg.search.run" : "", next);
+    };
+    if (secretText)
+    {
+      auto query = make_object<searchSecretMessages>();
+      query->chat_id_ = inChat ? chat : 0;
+      query->query_ = TgFeatureParam(params, "query"); query->offset_ = TgFeatureParam(params, "offset");
+      query->limit_ = 50; query->filter_ = TgFeatureFilter(type);
+      SendQuery(std::move(query), handler);
+    }
+    else if (inChat)
+    {
+      auto query = make_object<searchChatMessages>();
+      query->chat_id_ = chat; query->query_ = TgFeatureParam(params, "query"); query->limit_ = 50;
+      query->from_message_id_ = StrUtil::NumFromHex<int64_t>(TgFeatureParam(params, "from"));
+      if (sender && !secret) query->sender_id_ = make_object<messageSenderUser>(sender);
+      query->filter_ = TgFeatureFilter(type);
+      int64_t topic = 0;
+      if (TgFeatureParseNumber(TgFeatureParam(params, "topicId"), topic))
+        query->topic_id_ = make_object<messageTopicForum>(static_cast<int32_t>(topic));
+      else if (TgFeatureParseNumber(TgFeatureParam(params, "threadId"), topic))
+        query->topic_id_ = make_object<messageTopicThread>(topic);
+      SendQuery(std::move(query), handler);
+    }
+    else
+    {
+      auto query = make_object<searchMessages>();
+      query->query_ = TgFeatureParam(params, "query"); query->offset_ = TgFeatureParam(params, "offset");
+      query->limit_ = 50; query->filter_ = TgFeatureFilter(type); query->min_date_ = after; query->max_date_ = before;
+      SendQuery(std::move(query), handler);
+    }
+    return;
+  }
 
 
 
