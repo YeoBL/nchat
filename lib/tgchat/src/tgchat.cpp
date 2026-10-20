@@ -3543,6 +3543,25 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
       p_Text = "[Photo Error]";
     }
   }
+  else if (p_TdMessageContent.get_id() == td::td_api::messagePoll::ID)
+  {
+    auto& messagePoll = static_cast<td::td_api::messagePoll&>(p_TdMessageContent);
+    p_Text = "[Poll]";
+    if (messagePoll.poll_)
+    {
+      auto& poll = *messagePoll.poll_;
+      const std::string question = GetText(std::move(poll.question_));
+      if (!question.empty()) p_Text += " " + question;
+      for (auto& option : poll.options_)
+      {
+        if (!option) continue;
+        p_Text += "\n• " + GetText(std::move(option->text_));
+        if (poll.can_see_results_) p_Text += " (" + std::to_string(option->vote_percentage_) + "%)";
+      }
+      if (poll.allows_multiple_answers_) p_Text += "\n[Choose multiple]";
+      if (poll.is_closed_) p_Text += "\n[Closed]";
+    }
+  }
   else if (p_TdMessageContent.get_id() == td::td_api::messageSticker::ID)
   {
     auto& messageSticker = static_cast<td::td_api::messageSticker&>(p_TdMessageContent);

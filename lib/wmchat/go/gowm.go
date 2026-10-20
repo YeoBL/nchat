@@ -59,6 +59,21 @@ type intString struct {
 	s string
 }
 
+type PollState struct {
+	Name         string
+	Options      []string
+	MaxChoices   int                 // Zero means any number of options.
+	KnownLimit   bool                // Old cached polls did not record their choice limit.
+	HiddenVoters bool                // The poll owner disabled participant-name disclosure.
+	Votes        map[string][]string // voter ID to SHA-256 option hashes
+	VoteTimes    map[string]int64    // latest vote timestamp in milliseconds, including withdrawn votes
+	SenderID     string
+	RawSenderID  string
+	TimeSent     int
+	FromMe       bool
+	IsRead       bool
+}
+
 type State int64
 
 const (
@@ -71,19 +86,58 @@ const (
 
 var (
 	mx          sync.Mutex
-	nextConnId  int                          = 0
-	clients     map[int]*whatsmeow.Client    = make(map[int]*whatsmeow.Client)
-	paths       map[int]string               = make(map[int]string)
-	contacts    map[int]map[string]string    = make(map[int]map[string]string)
-	senders     map[int]map[string]string    = make(map[int]map[string]string)
-	states      map[int]State                = make(map[int]State)
-	timeReads   map[int]map[string]time.Time = make(map[int]map[string]time.Time)
-	expirations map[int]map[string]uint32    = make(map[int]map[string]uint32)
-	handlers    map[int]*WmEventHandler      = make(map[int]*WmEventHandler)
-	sendTypes   map[int]int                  = make(map[int]int)
-	namesSynced map[int]bool                 = make(map[int]bool)
-	passkeyWait map[int]bool                 = make(map[int]bool)
+	nextConnId  int                           = 0
+	clients     map[int]*whatsmeow.Client     = make(map[int]*whatsmeow.Client)
+	paths       map[int]string                = make(map[int]string)
+	contacts    map[int]map[string]string     = make(map[int]map[string]string)
+	senders     map[int]map[string]string     = make(map[int]map[string]string)
+	states      map[int]State                 = make(map[int]State)
+	timeReads   map[int]map[string]time.Time  = make(map[int]map[string]time.Time)
+	expirations map[int]map[string]uint32     = make(map[int]map[string]uint32)
+	handlers    map[int]*WmEventHandler       = make(map[int]*WmEventHandler)
+	sendTypes   map[int]int                   = make(map[int]int)
+	namesSynced map[int]bool                  = make(map[int]bool)
+	passkeyWait map[int]bool                  = make(map[int]bool)
+	pollStates  map[int]map[string]*PollState = make(map[int]map[string]*PollState)
 )
+
+func pollStateKey(chatID, messageID string) string { return chatID + "\x00" + messageID }
+
+func pollStorePath(path string) string { return path + "/polls.dat" }
+
+func loadPollStates(path string) map[string]*PollState {
+	f, err := os.Open(path)
+	if err != nil {
+		return make(map[string]*PollState)
+	}
+	defer f.Close()
+	var states map[string]*PollState
+	if gob.NewDecoder(f).Decode(&states) != nil || states == nil {
+		return make(map[string]*PollState)
+	}
+	return states
+}
+
+func savePollStates(path string, states map[string]*PollState) {
+	f, err := os.CreateTemp(filepath.Dir(path), "polls-*.tmp")
+	if err != nil {
+		LOG_WARNING(fmt.Sprintf("save polls failed: %v", err))
+		return
+	}
+	defer os.Remove(f.Name())
+	if err := gob.NewEncoder(f).Encode(states); err != nil {
+		LOG_WARNING(fmt.Sprintf("encode polls failed: %v", err))
+		f.Close()
+		return
+	}
+	if err := f.Close(); err != nil {
+		LOG_WARNING(fmt.Sprintf("close polls failed: %v", err))
+		return
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		LOG_WARNING(fmt.Sprintf("replace polls failed: %v", err))
+	}
+}
 
 // keep in sync with enum AttachmentSendType in appconfig.h
 var AttachmentSendAsDocument = 0
@@ -157,6 +211,7 @@ func AddConn(conn *whatsmeow.Client, path string, sendType int) int {
 	handlers[connId] = &WmEventHandler{connId}
 	sendTypes[connId] = sendType
 	namesSynced[connId] = false
+	pollStates[connId] = loadPollStates(pollStorePath(path))
 	mx.Unlock()
 	return connId
 }
@@ -165,6 +220,7 @@ func RemoveConn(connId int) {
 	mx.Lock()
 	SaveMap(GetContactsStorePath(paths[connId]), contacts[connId])
 	SaveMap(GetSendersStorePath(paths[connId]), senders[connId])
+	savePollStates(pollStorePath(paths[connId]), pollStates[connId])
 	delete(clients, connId)
 	delete(paths, connId)
 	delete(contacts, connId)
@@ -175,6 +231,7 @@ func RemoveConn(connId int) {
 	delete(handlers, connId)
 	delete(sendTypes, connId)
 	delete(namesSynced, connId)
+	delete(pollStates, connId)
 	mx.Unlock()
 }
 
@@ -1632,6 +1689,12 @@ func (handler *WmEventHandler) HandleMessage(messageInfo types.MessageInfo, msg 
 	case msg.DocumentMessage != nil:
 		handler.HandleDocumentMessage(messageInfo, msg, isSyncRead)
 
+	case msg.PollCreationMessage != nil || msg.PollCreationMessageV2 != nil || msg.PollCreationMessageV3 != nil:
+		handler.HandlePollMessage(messageInfo, msg, isSyncRead)
+
+	case msg.PollUpdateMessage != nil:
+		handler.HandlePollUpdate(messageInfo, msg)
+
 	case msg.StickerMessage != nil:
 		handler.HandleStickerMessage(messageInfo, msg, isSyncRead)
 
@@ -1650,6 +1713,128 @@ func (handler *WmEventHandler) HandleMessage(messageInfo types.MessageInfo, msg 
 	default:
 		handler.HandleUnsupportedMessage(messageInfo, msg, isSyncRead)
 	}
+}
+
+func formatPollState(state *PollState) string {
+	text := "[Poll] " + state.Name
+	for _, option := range state.Options {
+		count := 0
+		wanted := fmt.Sprintf("%x", whatsmeow.HashPollOptions([]string{option})[0])
+		for _, hashes := range state.Votes {
+			for _, hash := range hashes {
+				if hash == wanted {
+					count++
+				}
+			}
+		}
+		text += "\n• " + option
+		if count > 0 {
+			text += fmt.Sprintf(" (%d recorded vote", count)
+			if count != 1 {
+				text += "s"
+			}
+			text += ")"
+		}
+	}
+	if state.KnownLimit && state.MaxChoices != 1 {
+		if state.MaxChoices == 0 {
+			text += "\n[Choose multiple]"
+		} else {
+			text += fmt.Sprintf("\n[Choose up to %d]", state.MaxChoices)
+		}
+	}
+	return text
+}
+
+func (handler *WmEventHandler) HandlePollMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
+	poll := msg.GetPollCreationMessage()
+	if poll == nil {
+		poll = msg.GetPollCreationMessageV2()
+	}
+	if poll == nil {
+		poll = msg.GetPollCreationMessageV3()
+	}
+	if poll == nil {
+		return
+	}
+	client := GetClient(handler.connId)
+	if client == nil {
+		return
+	}
+	chatID := GetChatId(client, &messageInfo.Chat, &messageInfo.Sender)
+	state := &PollState{
+		Name: poll.GetName(), SenderID: GetUserId(client, &messageInfo.Chat, &messageInfo.Sender),
+		MaxChoices: int(poll.GetSelectableOptionsCount()), KnownLimit: true,
+		HiddenVoters: poll.GetHideParticipantName(),
+		RawSenderID:  messageInfo.Sender.String(),
+		TimeSent:     int(messageInfo.Timestamp.Unix()), FromMe: messageInfo.IsFromMe,
+		IsRead: IsRead(isSyncRead, IsSelfChat(client, chatID), messageInfo.IsFromMe,
+			messageInfo.Timestamp, GetTimeRead(handler.connId, chatID)),
+	}
+	for _, option := range poll.GetOptions() {
+		if option != nil {
+			state.Options = append(state.Options, option.GetOptionName())
+		}
+	}
+	mx.Lock()
+	if previous := pollStates[handler.connId][pollStateKey(chatID, messageInfo.ID)]; previous != nil {
+		state.Votes = previous.Votes
+		state.VoteTimes = previous.VoteTimes
+	}
+	if state.Votes == nil {
+		state.Votes = make(map[string][]string)
+	}
+	normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(client, raw) })
+	pollStates[handler.connId][pollStateKey(chatID, messageInfo.ID)] = state
+	savePollStates(pollStorePath(paths[handler.connId]), pollStates[handler.connId])
+	text := formatPollState(state)
+	mx.Unlock()
+	handler.HandleTextMessage(messageInfo, &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: &text, ContextInfo: poll.GetContextInfo(),
+	}}, isSyncRead)
+}
+
+func (handler *WmEventHandler) HandlePollUpdate(messageInfo types.MessageInfo, msg *waE2E.Message) {
+	client := GetClient(handler.connId)
+	if client == nil {
+		return
+	}
+	vote, err := client.DecryptPollVote(context.Background(), &events.Message{Info: messageInfo, Message: msg})
+	if err != nil {
+		LOG_WARNING(fmt.Sprintf("decrypt poll vote failed: %v", err))
+		return
+	}
+	key := msg.GetPollUpdateMessage().GetPollCreationMessageKey()
+	if key == nil || key.GetID() == "" {
+		return
+	}
+	chatID := GetChatId(client, &messageInfo.Chat, &messageInfo.Sender)
+	voterID := canonicalPollVoterID(client, messageInfo.Sender.String())
+	mx.Lock()
+	state := pollStates[handler.connId][pollStateKey(chatID, key.GetID())]
+	text := ""
+	senderID := ""
+	fromMe := false
+	timeSent := 0
+	isRead := false
+	if state != nil {
+		normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(client, raw) })
+		timestamp := msg.GetPollUpdateMessage().GetSenderTimestampMS()
+		if timestamp <= 0 {
+			timestamp = messageInfo.Timestamp.UnixMilli()
+		}
+		if setRecordedPollVote(state, voterID, vote.GetSelectedOptions(), timestamp) {
+			savePollStates(pollStorePath(paths[handler.connId]), pollStates[handler.connId])
+			text = formatPollState(state)
+			senderID, fromMe, timeSent, isRead = state.SenderID, state.FromMe, state.TimeSent, state.IsRead
+		}
+	}
+	mx.Unlock()
+	if text == "" {
+		return
+	}
+	CWmNewMessagesNotify(handler.connId, chatID, key.GetID(), senderID, text,
+		BoolToInt(fromMe), "", "", "", FileStatusNone, timeSent, BoolToInt(isRead), BoolToInt(true))
 }
 
 func (handler *WmEventHandler) HandlePinInChatMessage(messageInfo types.MessageInfo, msg *waE2E.Message) {
