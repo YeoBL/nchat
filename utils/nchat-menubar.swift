@@ -169,6 +169,49 @@ final class Cache {
         return result
     }
 
+    func preview(chatID: String) throws -> [PreviewMessage] {
+        // A separate bounded SELECT, fully finalized before decoding images.
+        // No open-chat action, downloads, or read-state changes are involved.
+        var deadline = ProcessInfo.processInfo.systemUptime + readTimeout
+        let records: [(PreviewMessage, String)] = try withUnsafeMutablePointer(to: &deadline) { deadline in
+            sqlite3_progress_handler(db, 2000, { raw in
+                guard let raw = raw else { return 0 }
+                return ProcessInfo.processInfo.systemUptime > raw.assumingMemoryBound(to: Double.self).pointee ? 1 : 0
+            }, deadline)
+            defer { sqlite3_progress_handler(db, 0, nil, nil) }
+            let statement = try prepare("""
+                WITH progress AS (
+                    SELECT MAX(timeSent) AS time FROM messages
+                    WHERE chatId = ?1 AND isOutgoing = 0 AND isRead = 1
+                )
+                SELECT COALESCE(NULLIF(c.name, ''), NULLIF(m.senderId, ''), 'Unknown sender'),
+                       COALESCE(m.text, ''), m.timeSent,
+                       COALESCE(m.fileInfo, ''), m.id
+                FROM messages m LEFT JOIN contacts2 c ON c.id = m.senderId
+                LEFT JOIN chats2 ch ON ch.id = m.chatId CROSS JOIN progress p
+                WHERE m.chatId = ?1 AND \(unreadCandidatePredicate)\(knownSettingsPredicate)\(membershipPredicate)
+                    \(service == "Telegram" ? "" : "AND m.timeSent > COALESCE(p.time, 0)")
+                ORDER BY m.timeSent DESC, m.id DESC LIMIT 200
+                """)
+            defer { sqlite3_finalize(statement) }
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            guard sqlite3_bind_text(statement, 1, chatID, -1, transient) == SQLITE_OK else {
+                throw CacheError(description: "Cannot select chat")
+            }
+            var messages: [(PreviewMessage, String)] = []
+            var step = sqlite3_step(statement)
+            while step == SQLITE_ROW {
+                let info = String(cString: sqlite3_column_text(statement, 3))
+                messages.append((PreviewMessage(sender: String(cString: sqlite3_column_text(statement, 0)),
+                    text: String(cString: sqlite3_column_text(statement, 1)), time: sqlite3_column_int64(statement, 2),
+                    attachment: !info.isEmpty, id: String(cString: sqlite3_column_text(statement, 4))), info))
+                step = sqlite3_step(statement)
+            }
+            guard step == SQLITE_DONE else { throw CacheError(description: String(cString: sqlite3_errmsg(db))) }
+            return messages.reversed()
+        }
+        return records.map { $0.0 }
+    }
 }
 
 final class Reader {
@@ -178,6 +221,11 @@ final class Reader {
     init(root: String, checkBackend: Bool = true) {
         self.root = root
         self.checkBackend = checkBackend
+    }
+
+    func preview(_ chat: UnreadChat) throws -> [PreviewMessage] {
+        let cache = try Cache(path: chat.cachePath, service: chat.service)
+        return try cache.preview(chatID: chat.id)
     }
 
     func snapshot() -> Snapshot {
@@ -216,19 +264,387 @@ func menuLines(_ snapshot: Snapshot) -> [String] {
     }
 }
 
-final class MenuBar: NSObject, NSApplicationDelegate {
+final class FlippedView: NSView { override var isFlipped: Bool { true } }
+
+final class MessageCard: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.labelColor.withAlphaComponent(0.05).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+    }
+}
+
+final class ChatActionButton: NSButton {
+    var chat: UnreadChat?
+}
+
+final class ChatButton: NSButton {
+    var chat: UnreadChat?
+    var expandedHighlight = false { didSet { updateHighlight() } }
+    private var hover = false
+    private var tracking: NSTrackingArea?
+    override func updateTrackingAreas() {
+        if let tracking = tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        tracking = area
+        addTrackingArea(area)
+        super.updateTrackingAreas()
+    }
+    override func mouseEntered(with event: NSEvent) { hover = true; updateHighlight() }
+    override func mouseExited(with event: NSEvent) { hover = false; updateHighlight() }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateHighlight()
+    }
+    private func updateHighlight() {
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (expandedHighlight ? NSColor.controlAccentColor.withAlphaComponent(0.12) :
+                hover ? NSColor.labelColor.withAlphaComponent(0.07) : .clear).cgColor
+        }
+    }
+    override var isFlipped: Bool { true }
+    // Labels/icons are decorative; the entire row is one accessible button.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) == nil ? nil : self
+    }
+}
+
+final class UnreadPopoverController: NSViewController {
+    let scroll = NSScrollView()
+    let document = FlippedView()
+    let backButton = NSButton(title: "", target: nil, action: nil)
+    let header = FlippedView()
+    let heading = NSTextField(labelWithString: "Unread")
+    let options = NSPopUpButton(frame: .zero, pullsDown: true)
+    let closeButton = NSButton(title: "", target: nil, action: nil)
+    let headerRule = NSBox()
+    var state = Snapshot()
+    var expanded: Set<String> = []
+    var previews: [String: [PreviewMessage]] = [:]
+    var errors: [String: String] = [:]
+    var onToggle: ((UnreadChat) -> Void)?
+    var onClose: (() -> Void)?
+    var onCollapse: (() -> Void)?
+    var onQuit: (() -> Void)?
+    var onResize: ((NSSize) -> Void)?
+    var maxHeight: CGFloat = 760
+    var width: CGFloat = 454
+    var targetContentSize = NSSize(width: 454, height: 100)
+    private var serviceIcons: [String: NSImage] = [:]
+
+    override func loadView() {
+        view = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: 100))
+        scroll.frame = view.bounds
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.documentView = document
+        view.addSubview(scroll)
+        view.addSubview(header)
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        header.addSubview(heading)
+        options.isBordered = false
+        options.addItem(withTitle: "")
+        options.item(at: 0)?.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "Options")
+        options.addItem(withTitle: "Quit nchat Unread")
+        options.item(at: 1)?.target = self
+        options.item(at: 1)?.action = #selector(quitApp)
+        options.setAccessibilityLabel("Widget options")
+        options.toolTip = "Widget options"
+        header.addSubview(options)
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")
+        closeButton.isBordered = false
+        closeButton.target = self
+        closeButton.action = #selector(closePopover)
+        closeButton.toolTip = "Close preview (Esc)"
+        closeButton.setAccessibilityLabel("Close preview")
+        header.addSubview(closeButton)
+        headerRule.boxType = .separator
+        header.addSubview(headerRule)
+        backButton.bezelStyle = .rounded
+        backButton.isBordered = false
+        backButton.title = "All chats"
+        backButton.imagePosition = .imageLeading
+        backButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "All chats")
+        backButton.toolTip = "Back to all chats"
+        backButton.font = .systemFont(ofSize: 13, weight: .medium)
+        backButton.target = self
+        backButton.action = #selector(collapseAll)
+        backButton.setAccessibilityLabel("All chats — collapse message previews")
+        backButton.isHidden = true
+        header.addSubview(backButton)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        layoutScroll()
+    }
+
+    private func layoutScroll() {
+        let top: CGFloat = 46
+        let bottom: CGFloat = 0
+        backButton.isHidden = expanded.isEmpty
+        header.frame = NSRect(x: 0, y: 0, width: width, height: top)
+        backButton.frame = NSRect(x: 10, y: 7, width: 88, height: 30)
+        heading.frame = NSRect(x: expanded.isEmpty ? 18 : 110, y: 14, width: expanded.isEmpty ? width - 100 : width - 192, height: 20)
+        heading.stringValue = state.syncOffline ? "Unread · offline" : (state.error == nil ? "Unread · \(state.total)" : "Unread · unavailable")
+        options.frame = NSRect(x: width - 77, y: 7, width: 32, height: 30)
+        closeButton.frame = NSRect(x: width - 40, y: 7, width: 30, height: 30)
+        headerRule.frame = NSRect(x: 14, y: 45, width: width - 28, height: 1)
+        scroll.frame = NSRect(x: 0, y: top, width: width, height: max(0, view.bounds.height - top - bottom))
+        // Short lists must never retain a scrolled origin after the popover resizes.
+        if document.frame.height <= scroll.contentView.bounds.height {
+            scroll.contentView.scroll(to: .zero)
+        }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if expanded.isEmpty { onClose?() } else { onCollapse?() }
+    }
+
+    @objc func collapseAll() { onCollapse?() }
+    @objc func closePopover() { onClose?() }
+
+    func revealChat(_ chat: UnreadChat) {
+        view.layoutSubtreeIfNeeded()
+        guard let row = document.subviews.compactMap({ $0 as? ChatButton }).first(where: { $0.chat?.key == chat.key }) else { return }
+        // Scroll only our message viewport, never the popover's ancestor clip view.
+        let y = min(row.frame.minY, max(0, document.frame.height - scroll.contentView.bounds.height))
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    @discardableResult
+    func label(_ text: String, x: CGFloat, y: CGFloat, width: CGFloat, size: CGFloat = 13,
+               bold: Bool = false, secondary: Bool = false, lines: Int = 1,
+               selectable: Bool = false, parent: NSView? = nil) -> CGFloat {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = .systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        field.textColor = secondary ? .secondaryLabelColor : .labelColor
+        field.isSelectable = false
+        field.maximumNumberOfLines = lines
+        field.lineBreakMode = lines == 1 ? .byTruncatingTail : .byWordWrapping
+        field.cell?.truncatesLastVisibleLine = lines > 0
+        // Measure the same native wrapping layout that will actually be drawn.
+        let height = max(size + 4, ceil(field.sizeThatFits(NSSize(width: width, height: .greatestFiniteMagnitude)).height))
+        field.frame = NSRect(x: x, y: y, width: width, height: height)
+        if lines > 0 { field.toolTip = text }
+        (parent ?? document).addSubview(field)
+        return height
+    }
+
+    func serviceIcon(_ service: String) -> NSImage? {
+        if let icon = serviceIcons[service] { return icon }
+        let id = service == "WhatsApp" ? "net.whatsapp.WhatsApp" : "ru.keepcoder.Telegram"
+        let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { NSWorkspace.shared.icon(forFile: $0.path) }
+            ?? NSImage(systemSymbolName: service == "WhatsApp" ? "phone.bubble.fill" : "paperplane.fill", accessibilityDescription: service)
+        serviceIcons[service] = icon
+        return icon
+    }
+
+    func rebuild() {
+        _ = view
+        width = 454
+        let offset = scroll.contentView.bounds.origin.y
+        document.subviews.forEach { $0.removeFromSuperview() }
+        var y: CGFloat = 8
+        if state.syncOffline {
+            y += label("nchat is not running", x: 20, y: y + 16, width: width - 40, size: 14, bold: true) + 28
+            y += label("Start nchat to sync. Cached messages below may be out of date.", x: 20, y: y, width: width - 40, size: 12, secondary: true) + 20
+        } else if state.error != nil || state.chats.isEmpty {
+            y += label(state.error == nil ? "You're all caught up" : "Couldn't load messages", x: 20, y: y + 16, width: width - 40, size: 14, bold: true) + 28
+            y += label(state.error == nil ? "New messages will appear here." : "Retrying the local cache…", x: 20, y: y, width: width - 40, size: 12, secondary: true) + 20
+        }
+        for chat in state.chats {
+            let button = ChatButton(frame: NSRect(x: 8, y: y, width: width - 16, height: 62))
+            button.title = ""
+            button.isBordered = false
+            button.chat = chat
+            button.target = self
+            button.action = #selector(toggle(_:))
+            let isExpanded = expanded.contains(chat.key)
+            button.expandedHighlight = isExpanded
+            button.setAccessibilityLabel("\(clean(chat.name)), \(chat.count) unread messages, \(chat.service), \(isExpanded ? "expanded" : "collapsed")")
+            button.toolTip = "\(isExpanded ? "Collapse" : "Expand") unread messages"
+            let icon = NSImageView(frame: NSRect(x: 10, y: 17, width: 28, height: 28))
+            icon.image = serviceIcon(chat.service)
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            button.addSubview(icon)
+            label(clean(chat.name), x: 50, y: 11, width: width - 155, size: 14, bold: true, parent: button)
+            label("\(chat.count) unread · \(chat.service)", x: 50, y: 32, width: width - 135, size: 12, secondary: true, parent: button)
+            let age = max(0, Int(Date().timeIntervalSince(messageDate(chat.latest))))
+            let ageText = age < 60 ? "now" : age < 3600 ? "\(age / 60)m" : age < 86400 ? "\(age / 3600)h" : "\(age / 86400)d"
+            label(ageText, x: width - 98, y: 28, width: 45, size: 12, secondary: true, parent: button)
+            let chevron = NSImageView(frame: NSRect(x: width - 49, y: 26, width: 13, height: 13))
+            chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+            chevron.contentTintColor = .secondaryLabelColor
+            button.addSubview(chevron)
+            document.addSubview(button)
+            y += 66
+            if isExpanded {
+                if let messages = previews[chat.key] {
+                    if messages.isEmpty {
+                        y += label("No unread messages remain in the cache.", x: 60, y: y + 6, width: width - 85, secondary: true, lines: 2) + 18
+                    }
+                    if chat.count > 200 {
+                        y += label("Latest 200 of \(chat.count) unread messages", x: 60, y: y + 6, width: width - 85, secondary: true) + 14
+                    }
+                    let date = DateFormatter()
+                    date.dateFormat = "HH:mm"
+                    for message in messages {
+                        let cardTop = y + 6
+                        y += 12
+                        label(clean(message.sender), x: 60, y: y, width: width - 143, size: 12, bold: true)
+                        label(date.string(from: messageDate(message.time)), x: width - 68, y: y, width: 48, size: 11, secondary: true)
+                        y += 22
+                        if !message.text.isEmpty {
+                            y += label(message.text, x: 60, y: y, width: width - 86,
+                                       lines: 3) + 5
+                        }
+                        if message.attachment {
+                            y += label(message.attachmentStatus ?? "Attachment · preview not cached or unsupported", x: 60, y: y, width: width - 86, size: 12, secondary: true, lines: 2) + 5
+                        }
+                        y += 12
+                        let card = MessageCard(frame: NSRect(x: 46, y: cardTop, width: width - 62, height: y - cardTop - 3))
+                        document.addSubview(card, positioned: .below, relativeTo: nil)
+                    }
+                } else {
+                    y += label(errors[chat.key] ?? "Loading unread messages…", x: 60, y: y + 8, width: width - 85, secondary: true, lines: 2) + 24
+                }
+            }
+            y += 6
+        }
+        y += 8
+        document.frame = NSRect(x: 0, y: 0, width: width, height: y)
+        let bottom: CGFloat = 0
+        let size = NSSize(width: 454, height: min(maxHeight, y + bottom + 46))
+        // Do not publish the final size via preferredContentSize: AppKit can
+        // apply that separately and bypass the intermediate animation frames.
+        targetContentSize = size
+        // A hosted popover must resize its window before its content view.
+        // Pre-sizing the view makes NSPopover treat contentSize as unchanged,
+        // leaving the old small window clipping the expanded content.
+        if let resize = onResize { resize(size) }
+        else { view.setFrameSize(size) }
+        layoutScroll()
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(offset, max(0, y - scroll.contentView.bounds.height))))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    @objc func toggle(_ sender: ChatButton) {
+        if let chat = sender.chat { onToggle?(chat) }
+    }
+    @objc func quitApp() { onQuit?() }
+
+}
+
+final class PopoverSizer: NSObject {
+    private var displayLink: CADisplayLink?
+    private weak var popover: NSPopover?
+    private var target = NSSize.zero
+    private var height: CGFloat = 0
+    private var velocity: CGFloat = 0
+    private var previousTick: CFTimeInterval?
+    var onFrame: ((NSSize) -> Void)?
+    func resize(_ popover: NSPopover, to size: NSSize) {
+        self.popover = popover
+        target = size
+        guard popover.isShown, let screen = popover.contentViewController?.view.window?.screen ?? NSScreen.main else {
+            stop()
+            popover.contentSize = size
+            return
+        }
+        // Cache/thumbnail updates retarget the motion without stopping and easing
+        // in again. Repeated requests for the same height do not restart it.
+        guard displayLink == nil else { return }
+        guard popover.contentSize != size else { return }
+        height = popover.contentSize.height
+        velocity = 0
+        previousTick = nil
+        let link = screen.displayLink(target: self, selector: #selector(step(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        displayLink = link
+        link.add(to: .main, forMode: .common)
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        guard let popover = popover, popover.isShown else { stop(); return }
+        let dt = min(1.0 / 60, max(0, link.targetTimestamp - (previousTick ?? link.targetTimestamp)))
+        previousTick = link.targetTimestamp
+        // Exact critically damped spring: smooth velocity through new targets,
+        // no fixed-rate timer competing with the MacBook display's refresh.
+        let omega: CGFloat = 18
+        let displacement = height - target.height
+        let common = velocity + omega * displacement
+        let decay = exp(-omega * dt)
+        height = target.height + (displacement + common * dt) * decay
+        velocity = (velocity - omega * common * dt) * decay
+        let finished = abs(height - target.height) < 0.2 && abs(velocity) < 2
+        let next = finished ? target : NSSize(width: target.width, height: height.rounded())
+        if popover.contentSize != next {
+            popover.contentSize = next
+            onFrame?(popover.contentSize)
+        }
+        if finished { stop() }
+    }
+
+    private func stop() { displayLink?.invalidate(); displayLink = nil }
+    deinit { displayLink?.invalidate() }
+}
+
+final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let reader: Reader
     let diagnosticPath: String
     private var item: NSStatusItem!
     private var timer: DispatchSourceTimer?
+    private var previous = ""
     private let cacheQueue = DispatchQueue(label: "nchat.cache-reader", qos: .utility)
+    let content = UnreadPopoverController()
+    let popover = NSPopover()
+    private var previewRequests: [String: UUID] = [:]
+    private var imageRequests: [String: Set<String>] = [:]
+    private let sizer = PopoverSizer()
+    private var outsideClickMonitor: Any?
+    private var localClickMonitor: Any?
+
     init(root: String, diagnosticPath: String) {
         reader = Reader(root: root)
         self.diagnosticPath = diagnosticPath
     }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Stable AppKit identity; seed near the right edge only on first run.
+        let positionKey = "NSStatusItem Preferred Position nchatUnread"
+        if UserDefaults.standard.object(forKey: positionKey) == nil {
+            UserDefaults.standard.set(0, forKey: positionKey)
+        }
+        // Tahoe hosts status items through Control Center, which has its own
+        // visibility preference. Seed both the implicit and stable identities.
+        for name in ["Item-0", "nchatUnread"] {
+            let key = "NSStatusItem VisibleCC \(name)"
+            if UserDefaults.standard.object(forKey: key) == nil {
+                UserDefaults.standard.set(true, forKey: key)
+            }
+        }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = "nchatUnread"
+        item.button?.title = "nchat …"
+        item.button?.target = self
+        item.button?.action = #selector(togglePopover)
+        popover.behavior = .transient
+        popover.animates = false
+        popover.delegate = self
+        popover.contentViewController = content
+        content.onResize = { [weak self] size in
+            if let self = self { self.sizer.resize(self.popover, to: size) }
+            self?.recordUIState()
+        }
+        content.onToggle = { [weak self] chat in self?.toggleChat(chat) }
+        content.onClose = { [weak self] in self?.popover.performClose(nil) }
+        content.onCollapse = { [weak self] in self?.collapseChats() }
+        content.onQuit = { NSApplication.shared.terminate(nil) }
         let source = DispatchSource.makeTimerSource(queue: cacheQueue)
         source.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(200))
         source.setEventHandler { [weak self] in
@@ -239,22 +655,162 @@ final class MenuBar: NSObject, NSApplicationDelegate {
         timer = source
         source.resume()
     }
+
     func render(_ state: Snapshot) {
         let lines = menuLines(state)
-        item.button?.title = state.syncOffline ? "–" : state.error == nil ? "\(state.total)" : "?"
-        item.button?.image = NSImage(systemSymbolName: state.total > 0 ? "bubble.left.fill" : "bubble.left", accessibilityDescription: "nchat unread messages")
+        let signature = state.title + lines.joined(separator: "\n") + state.chats.map { "\($0.cachePath):\($0.id):\($0.latest):\($0.revision)" }.joined(separator: "\n")
+        if signature == previous { return }
+        previous = signature
+        item.button?.title = state.syncOffline ? "–" : (state.error == nil ? "\(state.total)" : "?")
+        let symbol = state.syncOffline || state.error != nil ? "exclamationmark.bubble" : (state.total > 0 ? "bubble.left.fill" : "bubble.left")
+        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "nchat unread messages")
         item.button?.image?.isTemplate = true
+        item.button?.imagePosition = .imageLeading
         item.button?.toolTip = lines.joined(separator: "\n")
-        let menu = NSMenu()
-        for line in lines { menu.addItem(withTitle: line, action: nil, keyEquivalent: "") }
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit nchat Unread", action: #selector(quitApp), keyEquivalent: "q").target = self
-        item.menu = menu
+        item.button?.setAccessibilityLabel(state.title + ". " + lines.joined(separator: ". "))
+        let oldChats = content.state.chats
+        content.state = state
+        let keys = Set(state.chats.map { $0.key })
+        content.expanded.formIntersection(keys)
+        content.previews = content.previews.filter { keys.contains($0.key) }
+        content.errors = content.errors.filter { keys.contains($0.key) }
+        previewRequests = previewRequests.filter { keys.contains($0.key) }
+        content.rebuild()
+        for chat in state.chats where content.expanded.contains(chat.key) {
+            if oldChats.first(where: { $0.key == chat.key }) != chat { loadPreview(chat) }
+        }
+        // Diagnostic records the same title/rows assigned to the native widget.
         if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: URL(fileURLWithPath: diagnosticPath), options: .atomic)
+            try? data.write(to: URL(fileURLWithPath: diagnosticPath), options: [.atomic])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: diagnosticPath)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            let placement: [String: Any] = ["visible": self.item.isVisible,
+                "window": self.item.button?.window.map { NSStringFromRect($0.frame) } ?? "none",
+                "screens": NSScreen.screens.map { NSStringFromRect($0.frame) },
+                "title": self.item.button?.title ?? "none"]
+            if let data = try? JSONSerialization.data(withJSONObject: placement) {
+                try? data.write(to: URL(fileURLWithPath: self.diagnosticPath + ".placement"), options: .atomic)
+            }
         }
     }
-    @objc func quitApp() { NSApplication.shared.terminate(nil) }
+
+    @objc func togglePopover() {
+        if popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        guard let button = item.button else { return }
+        content.maxHeight = min(760, max(200, (button.window?.screen?.visibleFrame.height ?? 800) - 60))
+        content.rebuild()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        content.view.window?.makeKey()
+        for chat in content.state.chats where content.expanded.contains(chat.key) { loadPreview(chat) }
+    }
+
+    func toggleChat(_ chat: UnreadChat) {
+        if content.expanded.contains(chat.key) {
+            imageRequests.removeValue(forKey: chat.key)
+            content.expanded.remove(chat.key)
+            previewRequests.removeValue(forKey: chat.key)
+            content.previews.removeValue(forKey: chat.key)
+        } else {
+            content.expanded.insert(chat.key)
+            content.errors.removeValue(forKey: chat.key)
+            loadPreview(chat)
+        }
+        content.rebuild()
+        // Preserve the clicked header, not the old bottom edge, after AppKit's resize pass.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.content.revealChat(chat)
+        }
+    }
+
+    func collapseChats() {
+        imageRequests.removeAll()
+        previewRequests.removeAll()
+        content.expanded.removeAll()
+        content.previews.removeAll()
+        content.errors.removeAll()
+        content.rebuild()
+        content.scroll.contentView.scroll(to: .zero)
+    }
+
+    func loadPreview(_ chat: UnreadChat) {
+        let request = UUID()
+        previewRequests[chat.key] = request
+        cacheQueue.async { [weak self] in
+            let messages: [PreviewMessage]?
+            let issue: String?
+            do {
+                messages = try self?.reader.preview(chat)
+                issue = nil
+            } catch {
+                messages = nil
+                issue = "Cache unavailable. Collapse and expand to retry."
+            }
+            DispatchQueue.main.async {
+                guard let self = self, self.previewRequests[chat.key] == request,
+                      self.content.expanded.contains(chat.key) else { return }
+                self.content.previews[chat.key] = messages
+                self.content.errors[chat.key] = issue
+                self.content.rebuild()
+            }
+        }
+    }
+
+    func popoverDidShow(_ notification: Notification) {
+        stopDismissMonitors()
+        // Mouse-only monitors exist solely while this popover is open. They do
+        // not inspect text, save input, or require Computer Control permission.
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
+            self?.popover.performClose(nil)
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks) { [weak self] event in
+            guard let self = self else { return event }
+            if event.window !== self.content.view.window && event.window !== self.item.button?.window {
+                self.popover.performClose(nil)
+            }
+            return event
+        }
+        recordUIState()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopDismissMonitors()
+        collapseChats() // Every dismissal reopens at the chat list.
+        recordUIState()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) { popover.performClose(nil) }
+
+    func stopDismissMonitors() {
+        if let monitor = outsideClickMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = localClickMonitor { NSEvent.removeMonitor(monitor) }
+        outsideClickMonitor = nil
+        localClickMonitor = nil
+    }
+
+    func recordUIState() {
+        // Only geometry/counts, never message text or image contents.
+        let state: [String: Any] = ["popoverShown": popover.isShown,
+            "expandedChats": content.expanded.count,
+            "previewMessages": content.previews.values.reduce(0) { $0 + $1.count },
+            "inlineImages": content.previews.values.flatMap { $0 }.filter { $0.image != nil }.count,
+            "width": content.targetContentSize.width, "height": content.targetContentSize.height,
+            "documentHeight": content.document.frame.height,
+            "viewportHeight": content.scroll.contentView.bounds.height,
+            "scrollY": content.scroll.contentView.bounds.origin.y,
+            "backButtonVisible": !content.backButton.isHidden]
+        if let data = try? JSONSerialization.data(withJSONObject: state) {
+            try? data.write(to: URL(fileURLWithPath: diagnosticPath + ".ui"), options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: diagnosticPath + ".ui")
+        }
+    }
 }
 
 @main
