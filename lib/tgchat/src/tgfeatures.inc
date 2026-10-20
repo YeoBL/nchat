@@ -178,9 +178,105 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
     request->onResult(std::move(result));
   };
 
+  if (operation == "tg.topics")
+  {
+    if (!chat) { finish("Topics", "Select a Telegram forum group first.", false); return; }
+    auto query = make_object<getForumTopics>();
+    query->chat_id_ = chat;
+    query->query_ = TgFeatureParam(params, "query");
+    query->offset_date_ = std::atoi(TgFeatureParam(params, "offsetDate").c_str());
+    query->offset_message_id_ = StrUtil::NumFromHex<int64_t>(TgFeatureParam(params, "offsetMessage"));
+    query->offset_forum_topic_id_ = std::atoi(TgFeatureParam(params, "offsetTopic").c_str());
+    query->limit_ = 50;
+    SendQuery(std::move(query), [request, params](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      auto topics = td::move_tl_object_as<forumTopics>(object);
+      ClientActionResult result;
+      result.title = "Topics";
+      auto search = params;
+      search["offsetDate"] = ""; search["offsetMessage"] = ""; search["offsetTopic"] = "";
+      result.items.push_back(TgFeatureItem("Find a topic", "tg.topics", search, {{"query", "Topic name", ""}}));
+      for (const auto& topic : topics->topics_)
+      {
+        if (!topic || !topic->info_) continue;
+        auto context = params;
+        context["topicId"] = std::to_string(topic->info_->forum_topic_id_);
+        context["topicName"] = topic->info_->name_;
+        context["from"] = "";
+        context["msgId"] = ""; context["threadId"] = "";
+        result.items.push_back(TgFeatureItem(topic->info_->name_, "tg.topic.history", context, {}, false,
+          std::to_string(topic->unread_count_) + " unread" + (topic->info_->is_closed_ ? " · closed" : "")));
+      }
+      if (topics->next_offset_forum_topic_id_)
+      {
+        auto next = params;
+        next["offsetDate"] = std::to_string(topics->next_offset_date_);
+        next["offsetMessage"] = StrUtil::NumToHex(topics->next_offset_message_id_);
+        next["offsetTopic"] = std::to_string(topics->next_offset_forum_topic_id_);
+        result.items.push_back(TgFeatureItem("More topics", "tg.topics", next));
+      }
+      if (topics->topics_.empty()) result.text = "No topics found. This chat must be a forum group.";
+      request->onResult(std::move(result));
+    });
+    return;
+  }
 
 
+  if (operation == "tg.topic.history" || operation == "tg.thread.history")
+  {
+    int64_t id = 0;
+    const bool forum = operation == "tg.topic.history";
+    if (!chat || !TgFeatureParseNumber(TgFeatureParam(params, forum ? "topicId" : "threadId"), id) || id <= 0 ||
+        (forum && id > INT32_MAX))
+    { finish("Messages", "Topic or thread is unavailable.", false); return; }
+    auto handler = [showMessages, request, params, operation, forum](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      auto page = td::move_tl_object_as<td::td_api::messages>(object);
+      auto next = params;
+      for (auto it = page->messages_.rbegin(); it != page->messages_.rend(); ++it)
+        if (*it) { next["from"] = StrUtil::NumToHex((*it)->id_); break; }
+      const auto boundary = StrUtil::NumFromHex<int64_t>(TgFeatureParam(params, "from"));
+      page->messages_.erase(std::remove_if(page->messages_.begin(), page->messages_.end(),
+        [boundary](const auto& value) { return value && boundary && value->id_ == boundary; }), page->messages_.end());
+      const bool more = !page->messages_.empty() && TgFeatureParam(next, "from") != TgFeatureParam(params, "from");
+      showMessages(std::move(page->messages_), forum ? TgFeatureParam(params, "topicName") : "Channel comments",
+        params, more ? operation : "", next);
+    };
+    const auto from = StrUtil::NumFromHex<int64_t>(TgFeatureParam(params, "from"));
+    if (forum) SendQuery(make_object<getForumTopicHistory>(chat, static_cast<int32_t>(id), from, 0, from ? 21 : 20), handler);
+    else SendQuery(make_object<getMessageThreadHistory>(chat, id, from, 0, from ? 21 : 20), handler);
+    return;
+  }
 
+  if (operation == "tg.thread.send")
+  {
+    const auto text = TgFeatureParam(params, "text");
+    if (!chat || text.empty()) { finish("Reply", "Enter a message.", false); return; }
+    auto query = make_object<sendMessage>();
+    query->chat_id_ = chat;
+    int64_t id = 0;
+    if (TgFeatureParseNumber(TgFeatureParam(params, "topicId"), id) && id > 0 && id <= INT32_MAX)
+      query->topic_id_ = make_object<messageTopicForum>(static_cast<int32_t>(id));
+    else if (TgFeatureParseNumber(TgFeatureParam(params, "threadId"), id) && id > 0)
+      query->topic_id_ = make_object<messageTopicThread>(id);
+    else { finish("Reply", "The topic or thread is missing; the message was not sent.", false); return; }
+    if (message) query->reply_to_ = make_object<inputMessageReplyToMessage>(message, nullptr, 0, "");
+    query->input_message_content_ = GetMessageText(text);
+    SendQuery(std::move(query), [request, params](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      ClientActionResult result;
+      result.title = "Reply sent";
+      result.text = "Your message was sent to this topic / discussion thread.";
+      auto context = params; context["text"] = ""; context["from"] = "";
+      result.items.push_back(TgFeatureItem("Refresh conversation",
+        TgFeatureParam(params, "topicId").empty() ? "tg.thread.history" : "tg.topic.history", context));
+      request->onResult(std::move(result));
+    });
+    return;
+  }
 
 
 
