@@ -236,6 +236,32 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
     return true;
   }
 
+  if (operation == "tg.chat.mute")
+  {
+    int64_t duration = 0;
+    if (!TgManage::Integer(value("seconds", "3600"), duration) || duration < 0 || duration > INT32_MAX)
+    {
+      fail("Enter a mute duration between 0 and 2147483647 seconds.");
+      return true;
+    }
+    SendQuery(make_object<getChat>(chatId), [this, chatId, duration, checked, complete](Object object)
+    {
+      if (!checked(object)) return;
+      auto chat = move_object_as<td::td_api::chat>(object);
+      auto settings = std::move(chat->notification_settings_);
+      if (!settings) settings = make_object<chatNotificationSettings>();
+      settings->use_default_mute_for_ = false;
+      settings->mute_for_ = static_cast<int32_t>(duration);
+      SendQuery(make_object<setChatNotificationSettings>(chatId, std::move(settings)),
+                complete("Notifications", duration == 0 ? "Chat unmuted." : "Chat muted."));
+    });
+    return true;
+  }
+  if (operation == "tg.chat.unread")
+  {
+    SendQuery(make_object<toggleChatIsMarkedAsUnread>(chatId, true), complete("Unread", "Chat marked unread."));
+    return true;
+  }
 
   if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" ||
       operation == "tg.send.voice" || operation == "tg.send.videoNote" || operation == "tg.poll.create" ||
