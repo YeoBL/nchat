@@ -19,7 +19,7 @@ public:
        (text.compare(0, 7, "[Added ") == 0 || text.compare(0, 9, "[Removed ") == 0));
   }
 
-  bool Add(const Chat& chat, const std::string& id, int64_t time = 0)
+  bool Add(const Chat& chat, const std::string& id, int64_t time = 0, bool hasMention = false)
   {
     if (IsRead(chat, id))
     {
@@ -27,6 +27,7 @@ public:
       return false;
     }
     if (time > 0 && time <= m_ReadTime[chat]) return false;
+    if (hasMention) m_Mentions[chat].insert(id);
     if (!m_Seen[chat].insert(id).second) return false;
     m_Times[chat][id] = time;
     m_Pending[chat].insert(id);
@@ -101,9 +102,18 @@ public:
   }
 
   size_t PendingChats() const { return m_Pending.size(); }
-  void RemoveChat(const Chat& chat)
+  void RemoveChat(const Chat& chat, bool preserveMentions = false)
   {
-    m_Pending.erase(chat);
+    auto pending = m_Pending.find(chat);
+    if (pending == m_Pending.end()) return;
+    if (preserveMentions)
+    {
+      for (auto id = pending->second.begin(); id != pending->second.end(); )
+        if (!m_Mentions[chat].count(*id)) id = pending->second.erase(id);
+        else ++id;
+    }
+    else pending->second.clear();
+    if (pending->second.empty()) m_Pending.erase(pending);
     if (m_Pending.empty()) m_Ring = false;
   }
 
@@ -148,6 +158,7 @@ private:
   // Retain seen IDs for the session: cache reloads must not replay old alerts.
   std::map<Chat, std::set<std::string>> m_Seen;
   std::map<Chat, std::set<std::string>> m_Pending;
+  std::map<Chat, std::set<std::string>> m_Mentions;
   bool m_Ring = false;
   bool m_Badge = false;
 };

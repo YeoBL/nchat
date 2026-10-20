@@ -1782,6 +1782,11 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
 
             m_ChatInfos[profileId][chatInfo.id] = chatInfo;
 
+            if (chatInfo.isArchived)
+              m_Notifications.RemoveChat({profileId, chatInfo.id});
+            else if (chatInfo.isMuted && !UiConfig::GetBool("muted_notify_unread"))
+              m_Notifications.RemoveChat({profileId, chatInfo.id}, true /*preserveMentions*/);
+
             if (chatInfo.isArchived || m_LeftChats[profileId].count(chatInfo.id)) continue;
 
             for (const auto& message : m_Messages[profileId][chatInfo.id])
@@ -1835,6 +1840,10 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
 
           for (auto chatMessage : chatMessages)
           {
+            const auto previous = messages.find(chatMessage.id);
+            if (previous != messages.end() && previous->second.isDeleted && !chatMessage.isDeleted)
+              continue; // Stale provider/cache history must not revive a retained deletion.
+
             if (!chatMessage.isOutgoing && m_Notifications.IsRead({profileId, chatId}, chatMessage.id))
               chatMessage.isRead = true;
             if (!chatMessage.isOutgoing && chatMessage.isRead)
@@ -2084,6 +2093,13 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         LOG_TRACE("new file info for %s is %s", msgId.c_str(), fileInfoStr.c_str());
         std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
         auto mit = messages.find(msgId);
+        std::vector<ChatMessage> cachedMessages;
+        const ChatMessage* previous = mit != messages.end() ? &mit->second : nullptr;
+        if (!previous && MessageCache::GetOneMessage(profileId, chatId, msgId, cachedMessages))
+          previous = &cachedMessages.front();
+        // A redacted deletion has deliberately removed its attachment. Late
+        // downloads must not restore it or open/save/transcribe it as a side effect.
+        if (previous && previous->isDeleted && previous->fileInfo.empty()) break;
         if (mit != messages.end())
         {
           mit->second.fileInfo = fileInfoStr;
@@ -2257,6 +2273,8 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         if (!m_ChatInfos[profileId].count(chatId)) break;
 
         m_ChatInfos[profileId][chatId].isMuted = isMuted;
+        if (isMuted && !UiConfig::GetBool("muted_notify_unread"))
+          m_Notifications.RemoveChat({profileId, chatId}, true /*preserveMentions*/);
         UpdateChatInfoLastMessageTime(profileId, chatId);
         SortChats();
         UpdateList();
@@ -2322,6 +2340,7 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         m_ChatInfos[profileId][chatId].isArchived = isArchived;
         if (isArchived)
         {
+          m_Notifications.RemoveChat({profileId, chatId});
           m_ChatSet[profileId].erase(chatId);
           m_ChatVec.erase(
             std::remove(m_ChatVec.begin(), m_ChatVec.end(), std::make_pair(profileId, chatId)),
@@ -2768,7 +2787,7 @@ void UiModel::Impl::QueueTerminalNotification(const std::string& p_ProfileId, co
   static const bool active = UiConfig::GetBool("terminal_bell_active");
   static const bool inactive = UiConfig::GetBool("terminal_bell_inactive");
   if ((m_TerminalActive ? active : inactive) &&
-      m_Notifications.Add({p_ProfileId, p_ChatId}, p_Message.id, p_Message.timeSent))
+      m_Notifications.Add({p_ProfileId, p_ChatId}, p_Message.id, p_Message.timeSent, p_Message.hasMention))
     LOG_DEBUG("notification queued: pending chats %zu", m_Notifications.PendingChats());
 }
 

@@ -49,6 +49,44 @@ int main() try
   MessageCache::m_Dbs.clear();
   std::cout << "production cache: partial, whole-chat, and message reads passed\n";
 
+  // Download callbacks may finish after a message has been redacted or retained.
+  for (const std::string& profile : {"files", "other-files"})
+  {
+    auto& files = MessageCache::m_Dbs[profile];
+    files = std::make_unique<sqlite::database>(":memory:");
+    *files << "CREATE TABLE messages(chatId TEXT, id TEXT, isDeleted INT, fileInfo TEXT);";
+    *files << "INSERT INTO messages VALUES ('chat','redacted',1,''),('chat','redacted-null',1,NULL),"
+              "('chat','retained',1,'original-file'),('chat','normal',0,''),"
+              "('chat','normal-null',NULL,NULL),('other','retained',1,'other-chat-file');";
+  }
+  auto fileUpdate = std::make_shared<MessageCache::UpdateMessageFileInfoRequest>();
+  fileUpdate->profileId = "files";
+  fileUpdate->chatId = "chat";
+  fileUpdate->fileInfo = "downloaded-file";
+  for (const std::string& id : {"redacted", "redacted-null", "retained", "normal", "normal-null", "missing"})
+  {
+    fileUpdate->msgId = id;
+    MessageCache::PerformRequest(fileUpdate);
+  }
+  auto& files = *MessageCache::m_Dbs.at("files");
+  files << "SELECT count(*) FROM messages WHERE chatId='chat' AND id LIKE 'redacted%' "
+           "AND isDeleted=1 AND COALESCE(fileInfo,'')='';" >> count;
+  assert(count == 2); // Stale media cannot reattach to redacted tombstones, including NULL metadata.
+  files << "SELECT count(*) FROM messages WHERE chatId='chat' "
+           "AND id IN ('retained','normal','normal-null') AND fileInfo='downloaded-file';" >> count;
+  assert(count == 3); // Mode 3 retained media and ordinary downloads can still finish.
+  files << "SELECT isDeleted FROM messages WHERE chatId='chat' AND id='retained';" >> count;
+  assert(count == 1);
+  files << "SELECT count(*) FROM messages WHERE chatId='other' AND id='retained' AND fileInfo='other-chat-file';" >> count;
+  assert(count == 1);
+  *MessageCache::m_Dbs.at("other-files") << "SELECT count(*) FROM messages WHERE chatId='chat' "
+    "AND id='retained' AND fileInfo='original-file';" >> count;
+  assert(count == 1); // Same message ids in another chat/account are unaffected.
+  files << "SELECT count(*) FROM messages;" >> count;
+  assert(count == 6); // An unknown message callback must not insert a record.
+  MessageCache::m_Dbs.clear();
+  std::cout << "production cache: late downloads preserve deletion redaction, retained media, and chat/account isolation\n";
+
   // Real on-disk production initialization and COMMIT vs. external reader.
   char temporary[] = "/tmp/nchat-cache-lock-test.XXXXXX";
   const char* directory = mkdtemp(temporary);

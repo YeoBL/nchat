@@ -63,7 +63,7 @@ void UiView::IncreaseListWidth() {}
 
 static void incoming(UiModel::Impl& model, const std::string& id,
                      const std::string& text = "hello", bool cached = false,
-                     const std::string& profile = "tg", const std::string& chat = "chat")
+                     const std::string& profile = "tg", const std::string& chat = "chat", bool hasMention = false)
 {
   model.m_ConnectTime[profile] = 1;
   model.m_ChatInfos[profile][chat].id = chat;
@@ -73,6 +73,7 @@ static void incoming(UiModel::Impl& model, const std::string& id,
   static int64_t timestamp = 100;
   message.id = id; message.text = text; message.timeSent = ++timestamp;
   message.isOutgoing = false;
+  message.hasMention = hasMention;
   event->chatMessages.push_back(message);
   model.MessageHandler(event);
 }
@@ -315,6 +316,133 @@ int main(int argc, char** argv)
     startup.MessageHandler(membership);
     assert(startup.m_ChatVec.empty() && startup.m_CurrentChat.first.empty());
     std::cout << "PASS: production nchat list excludes left chats on startup/live refresh, preserves history/read flags, suppresses late alerts, restores rejoined chats, safely handles last/selected chat\n";
+  }
+  {
+    UiConfig::SetBool("muted_notify_unread", false);
+    for (const bool archived : {false, true})
+      for (const bool snapshot : {false, true})
+      {
+        UiModel::Impl model(nullptr);
+        incoming(model, "old-alert"); model.Process();
+        assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+        if (snapshot)
+        {
+          auto event = std::make_shared<NewChatsNotify>("tg");
+          event->success = true;
+          ChatInfo chat; chat.id = "chat"; chat.isMuted = !archived; chat.isArchived = archived;
+          event->chatInfos = {chat};
+          model.MessageHandler(event);
+        }
+        else if (archived)
+        {
+          auto event = std::make_shared<UpdateArchivedNotify>("tg");
+          event->success = true; event->chatId = "chat"; event->isArchived = true;
+          model.MessageHandler(event);
+        }
+        else
+        {
+          auto event = std::make_shared<UpdateMuteNotify>("tg");
+          event->success = true; event->chatId = "chat"; event->isMuted = true;
+          model.MessageHandler(event);
+        }
+        model.Process();
+        assert(model.m_Notifications.PendingChats() == 0 && !badgeVisible);
+        assert(!model.m_Messages["tg"]["chat"]["old-alert"].isRead); // Suppression is not a read receipt.
+      }
+    // The opt-in terminal policy may retain muted alerts; archive never does.
+    UiConfig::SetBool("muted_notify_unread", true);
+    for (const bool snapshot : {false, true})
+    {
+      UiModel::Impl model(nullptr);
+      incoming(model, "opt-in-muted-alert"); model.Process();
+      if (snapshot)
+      {
+        auto event = std::make_shared<NewChatsNotify>("tg"); event->success = true;
+        ChatInfo chat; chat.id = "chat"; chat.isMuted = true; event->chatInfos = {chat};
+        model.MessageHandler(event);
+      }
+      else
+      {
+        auto event = std::make_shared<UpdateMuteNotify>("tg");
+        event->success = true; event->chatId = "chat"; event->isMuted = true;
+        model.MessageHandler(event);
+      }
+      model.Process(); assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+      auto archive = std::make_shared<UpdateArchivedNotify>("tg");
+      archive->success = true; archive->chatId = "chat"; archive->isArchived = true;
+      model.MessageHandler(archive); model.Process();
+      assert(model.m_Notifications.PendingChats() == 0 && !badgeVisible);
+    }
+    UiConfig::SetBool("muted_notify_unread", false);
+    for (const bool snapshot : {false, true})
+      for (const bool evicted : {false, true})
+      {
+        UiModel::Impl model(nullptr);
+        incoming(model, "mention-alert", "hello", false, "tg", "chat", true);
+        incoming(model, "ordinary-alert"); // Newer than the mention: reading it cannot retire this by time.
+        model.Process(); assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+        if (evicted) { model.m_Messages.clear(); model.m_MessageVec.clear(); }
+        if (snapshot)
+        {
+          auto event = std::make_shared<NewChatsNotify>("tg"); event->success = true;
+          ChatInfo chat; chat.id = "chat"; chat.isMuted = true; event->chatInfos = {chat};
+          model.MessageHandler(event);
+        }
+        else
+        {
+          auto event = std::make_shared<UpdateMuteNotify>("tg");
+          event->success = true; event->chatId = "chat"; event->isMuted = true;
+          model.MessageHandler(event);
+        }
+        model.Process(); assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+        read(model, "mention-alert"); model.Process();
+        assert(model.m_Notifications.PendingChats() == 0 && !badgeVisible); // Ordinary alert was purged.
+        incoming(model, "late-ordinary"); model.Process();
+        assert(model.m_Notifications.PendingChats() == 0);
+        incoming(model, "late-mention", "hello", false, "tg", "chat", true); model.Process();
+        assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+        auto archive = std::make_shared<UpdateArchivedNotify>("tg");
+        archive->success = true; archive->chatId = "chat"; archive->isArchived = true;
+        model.MessageHandler(archive); model.Process();
+        assert(model.m_Notifications.PendingChats() == 0 && !badgeVisible);
+      }
+    std::cout << "PASS: muted mentions survive live/snapshot cleanup and evicted history, ordinary alerts retire, future mention policy stays consistent\n";
+    std::cout << "PASS: live/snapshot archive and mute transitions retire pending badges without marking read, while opt-in muted alerts remain\n";
+  }
+  {
+    for (const bool cached : {false, true})
+      for (const bool replace : {false, true})
+      {
+        UiModel::Impl model(nullptr);
+        incoming(model, "retained"); model.Process();
+        auto event = std::make_shared<NewMessagesNotify>("tg");
+        event->success = true; event->chatId = "chat";
+        ChatMessage retained = model.m_Messages["tg"]["chat"]["retained"];
+        retained.isDeleted = true; retained.isRead = true;
+        retained.text = replace ? "[This message was deleted]" : "[This message was deleted]\noriginal text";
+        retained.fileInfo = replace ? "" : "retained-attachment";
+        event->chatMessages = {retained}; model.MessageHandler(event); model.Process();
+        assert(model.m_Notifications.PendingChats() == 0);
+        auto stale = retained;
+        stale.isDeleted = false; stale.isRead = false; stale.text = "stale original text";
+        stale.fileInfo = "stale-attachment";
+        event->cached = cached; event->chatMessages = {stale};
+        model.MessageHandler(event); model.Process();
+        const auto& actual = model.m_Messages["tg"]["chat"].at("retained");
+        assert(actual.isDeleted && actual.isRead && actual.text == retained.text &&
+          actual.fileInfo == retained.fileInfo);
+        assert(model.m_MessageVec["tg"]["chat"].size() == 1 && model.m_Notifications.PendingChats() == 0);
+        auto file = std::make_shared<NewMessageFileNotify>("tg");
+        file->chatId = "chat"; file->msgId = "retained"; file->fileInfo = "download-completed";
+        file->downloadFileAction = DownloadFileActionCacheOnly;
+        model.MessageHandler(file);
+        assert(model.m_Messages["tg"]["chat"].at("retained").fileInfo ==
+          (replace ? "" : "download-completed")); // Retained media stays downloadable; redaction stays empty.
+        // The same provider ID in another chat/account must remain independent.
+        incoming(model, "retained", "unrelated message", cached, "wa", "other");
+        assert(!model.m_Messages["wa"]["other"].at("retained").isDeleted);
+      }
+    std::cout << "PASS: retained deletion state, text and attachments survive stale live/cache replay without cross-chat/account interference\n";
   }
   if (argc == 3)
   {

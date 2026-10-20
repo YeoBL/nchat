@@ -2175,7 +2175,9 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
         try
         {
-          *m_Dbs[profileId] << "UPDATE " + s_TableMessages + " SET fileInfo = ? WHERE chatId = ? AND id = ?;"
+          // A late download must not restore media to a redacted deletion placeholder.
+          *m_Dbs[profileId] << "UPDATE " + s_TableMessages + " SET fileInfo = ? WHERE chatId = ? AND id = ? "
+            "AND (COALESCE(isDeleted,0)=0 OR COALESCE(fileInfo,'')!='');"
                             << fileInfo << chatId << msgId;
         }
         catch (const sqlite::sqlite_exception& ex)
