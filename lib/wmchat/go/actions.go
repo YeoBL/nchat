@@ -99,6 +99,7 @@ func actionContactName(connID int, id string) string {
 func wmClientAction(ctx context.Context, connID int, op string, p map[string]string) actionResult {
 	if op == "menu" {
 		r := actionOK("WhatsApp tools", "Choose an account or chat action.")
+		r.Items = append(r.Items, action("Status updates", "Browse updates received by this device", "status_list", nil, nil, false))
 		if p["chatId"] != "" {
 		}
 		if p["msgId"] != "" {
@@ -110,6 +111,9 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		return actionError("WhatsApp", fmt.Errorf("account is not connected"))
 	}
 	if r, handled := wmChannelAction(ctx, connID, cli, op, p); handled {
+		return r
+	}
+	if r, handled := wmStatusAction(ctx, connID, cli, op, p); handled {
 		return r
 	}
 	if r, handled := wmMessageAction(ctx, connID, cli, op, p); handled {
