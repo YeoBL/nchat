@@ -111,6 +111,36 @@ struct CacheError: Error, CustomStringConvertible {
     let description: String
 }
 
+// The companion can miss a cross-device read receipt during a disconnect.
+// Only the native Mac app's up-to-date, explicit zero can retire its stale badge.
+func whatsappChatsConfirmedRead(_ chats: [UnreadChat], databasePath: String) -> Set<String> {
+    guard chats.contains(where: { $0.service == "WhatsApp" }) else { return [] }
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(databasePath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
+          let db = db else { sqlite3_close(db); return [] }
+    defer { sqlite3_close(db) }
+    sqlite3_busy_timeout(db, 100)
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "SELECT ZUNREADCOUNT,ZLASTMESSAGEDATE FROM ZWACHATSESSION WHERE ZCONTACTJID=?1", -1, &statement, nil) == SQLITE_OK,
+          let statement = statement else { sqlite3_finalize(statement); return [] }
+    defer { sqlite3_finalize(statement) }
+    let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    var confirmed: Set<String> = []
+    for chat in chats where chat.service == "WhatsApp" {
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
+        guard sqlite3_bind_text(statement, 1, chat.id, -1, transient) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_type(statement, 0) != SQLITE_NULL,
+              sqlite3_column_type(statement, 1) != SQLITE_NULL else { continue }
+        let nativeLatestUnix = Int64(sqlite3_column_double(statement, 1)) + 978_307_200 // Core Data epoch.
+        if sqlite3_column_int64(statement, 0) == 0 && nativeLatestUnix >= chat.latest / 1000 {
+            confirmed.insert(chat.key)
+        }
+    }
+    return confirmed
+}
+
 final class Cache {
     var dismissed: Set<String> = [] {
         didSet { if oldValue != dismissed { version = -1 } }
@@ -331,6 +361,10 @@ final class Reader {
                 caches[path]!.dismissed = dismissed[path] ?? []
                 chats += try caches[path]!.rows()
             }
+            let nativeWhatsAppPath = FileManager.default.homeDirectoryForCurrentUser.path +
+                "/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"
+            let confirmedRead = whatsappChatsConfirmedRead(chats, databasePath: nativeWhatsAppPath)
+            chats.removeAll { confirmedRead.contains($0.key) }
             return Snapshot(chats: chats.sorted {
                 $0.latest != $1.latest ? $0.latest > $1.latest : ($0.name, $0.service, $0.id) < ($1.name, $1.service, $1.id)
             }, syncOffline: offline)
@@ -982,6 +1016,12 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         content.onSend = { [weak self] chat, reference, text in self?.sendReply(chat, reference: reference, text: text) }
         content.onClear = { [weak self] chat in self?.chatAction(chat, markRead: false) }
         content.onMarkRead = { [weak self] chat in self?.chatAction(chat, markRead: true) }
+        if let index = CommandLine.arguments.firstIndex(of: "--demo") {
+            let service = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : "both"
+            render(demoSnapshot(service))
+            item.button?.title = "Test \(content.state.total)"
+            return
+        }
         let source = DispatchSource.makeTimerSource(queue: cacheQueue)
         source.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(200))
         source.setEventHandler { [weak self] in
@@ -1078,6 +1118,11 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func loadPreview(_ chat: UnreadChat) {
+        if CommandLine.arguments.contains("--demo") {
+            content.previews[chat.key] = Array(demoMessages().prefix(chat.count))
+            content.rebuild()
+            return
+        }
         let request = UUID()
         previewRequests[chat.key] = request
         cacheQueue.async { [weak self] in
@@ -1114,6 +1159,11 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func chatAction(_ chat: UnreadChat, markRead: Bool) {
         guard !content.markingRead.contains(chat.key) else { return }
+        if CommandLine.arguments.contains("--demo") {
+            content.actionErrors[chat.key] = "Demo only — no read receipts sent."
+            content.rebuild()
+            return
+        }
         content.actionErrors[chat.key] = nil
         if markRead { content.markingRead.insert(chat.key) }
         content.rebuild()
@@ -1150,6 +1200,11 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func sendReply(_ chat: UnreadChat, reference: String, text: String) {
         guard !content.sending.contains(chat.key) else { return }
+        if CommandLine.arguments.contains("--demo") {
+            content.sendStatuses[chat.key] = "Test mode — nothing sent."
+            content.updateComposer()
+            return
+        }
         content.sending.insert(chat.key)
         content.sendStatuses[chat.key] = "Submitting reply…"
         content.updateComposer()
@@ -1210,6 +1265,660 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 }
 
+func selfTest() throws {
+    func expect(_ value: @autoclosure () throws -> Bool) rethrows {
+        let result = try value()
+        precondition(result)
+    }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let nativePath = root.appendingPathComponent("ChatStorage.sqlite").path
+    var native: OpaquePointer?
+    assert(sqlite3_open(nativePath, &native) == SQLITE_OK)
+    defer { sqlite3_close(native) }
+    func nativeSQL(_ value: String) {
+        precondition(sqlite3_exec(native, value, nil, nil, nil) == SQLITE_OK)
+    }
+    nativeSQL("CREATE TABLE ZWACHATSESSION(ZCONTACTJID TEXT,ZUNREADCOUNT INT,ZLASTMESSAGEDATE REAL);")
+    nativeSQL("INSERT INTO ZWACHATSESSION VALUES('wa-chat',0,1);")
+    let waCandidate = UnreadChat(id: "wa-chat", name: "Test", service: "WhatsApp", count: 1,
+        latest: 978_307_201_000, cachePath: "test")
+    expect(whatsappChatsConfirmedRead([waCandidate], databasePath: nativePath) == [waCandidate.key])
+    nativeSQL("UPDATE ZWACHATSESSION SET ZUNREADCOUNT=1;")
+    expect(whatsappChatsConfirmedRead([waCandidate], databasePath: nativePath).isEmpty)
+    nativeSQL("UPDATE ZWACHATSESSION SET ZUNREADCOUNT=0,ZLASTMESSAGEDATE=0;")
+    expect(whatsappChatsConfirmedRead([waCandidate], databasePath: nativePath).isEmpty)
+    expect(whatsappChatsConfirmedRead([waCandidate], databasePath: nativePath + ".missing").isEmpty)
+    print("PASS: native WhatsApp zero suppresses only caught-up chats; unread, stale and absent databases keep alerts")
+    var db: OpaquePointer?
+    let profile = root.appendingPathComponent("history/Telegram_fixture")
+    try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+    let path = profile.appendingPathComponent("db.sqlite").path
+    assert(sqlite3_open(path, &db) == SQLITE_OK)
+    defer { sqlite3_close(db) }
+    func sql(_ value: String) {
+        precondition(sqlite3_exec(db, value, nil, nil, nil) == SQLITE_OK, String(cString: sqlite3_errmsg(db)))
+    }
+    sql("CREATE TABLE messages(chatId TEXT, id TEXT, senderId TEXT, fileInfo TEXT, text TEXT, isOutgoing INT DEFAULT 0, isRead INT DEFAULT 0, isDeleted INT DEFAULT 0, timeSent INT);")
+    sql("CREATE TABLE chats2(id TEXT, isArchived INT DEFAULT 0, isMuted INT DEFAULT 0); CREATE TABLE contacts2(id TEXT, name TEXT);")
+    sql("INSERT INTO chats2(id) VALUES('one'),('two'),('events'),('archive'),('status@broadcast');")
+    sql("UPDATE chats2 SET isArchived=1 WHERE id='archive'; INSERT INTO contacts2 VALUES('one','Friends 🐢');")
+    sql("INSERT INTO messages(chatId,id,text,timeSent) VALUES('one','old','orphan',1),('one','read','read',2),('one','new','photo',3),('two','new','hello',4),('archive','new','hidden',5),('status@broadcast','x','hidden',6);")
+    sql("UPDATE messages SET isRead=1 WHERE id='read';")
+    for (i, event) in ["[Joined]", "[Left]", "[Added Alice]", "[Removed Bob]"].enumerated() {
+        sql("INSERT INTO messages(chatId,id,text,timeSent) VALUES('events','\(i)','\(event)',10);")
+    }
+    let cache = try Cache(path: path, service: "Telegram")
+    // Reading a later message in another forum topic must not hide this one.
+    try expect(cache.preview(chatID: "one").count == 2)
+    try expect(Snapshot(chats: cache.rows()).total == 3)
+    let whatsappCache = try Cache(path: path, service: "WhatsApp")
+    try expect(whatsappCache.preview(chatID: "one").count == 1)
+    sql("UPDATE messages SET isRead=1 WHERE id='old';")
+    print("PASS: Telegram topic reads preserve older unread messages; WhatsApp progress fallback unchanged")
+    var rows = try cache.rows()
+    assert(rows.count == 2 && rows[0].id == "two" && rows[1].name == "Friends 🐢")
+    assert(Snapshot(chats: rows).total == 2)
+    sql("CREATE TABLE chat_membership(chatId TEXT PRIMARY KEY,isMember INTEGER NOT NULL);")
+    let bytesBeforeMembershipRead = try Data(contentsOf: URL(fileURLWithPath: path))
+    try expect(cache.rows().count == 2) // Unknown membership is not a confirmed leave.
+    try expect(Data(contentsOf: URL(fileURLWithPath: path)) == bytesBeforeMembershipRead)
+    sql("INSERT INTO chat_membership VALUES('one',0);")
+    try expect(cache.rows().map { $0.id } == ["two"])
+    try expect(cache.preview(chatID: "one").isEmpty)
+    let afterRestart = try Cache(path: path, service: "Telegram")
+    try expect(afterRestart.rows().map { $0.id } == ["two"])
+    sql("INSERT INTO messages(chatId,id,text,timeSent) VALUES('one','left-channel-post','new cached post',50);")
+    try expect(cache.rows().map { $0.id } == ["two"])
+    sql("UPDATE chats2 SET isMuted=0,isArchived=0 WHERE id='one';")
+    try expect(cache.preview(chatID: "one").isEmpty)
+    sql("UPDATE chat_membership SET isMember=1 WHERE chatId='one';")
+    try expect(cache.preview(chatID: "one").count == 2) // Rejoining restores eligibility.
+    sql("DELETE FROM messages WHERE id='left-channel-post';")
+    print("PASS: left channels excluded from count/list/preview after restart and new cached posts; metadata refresh preserves leave; rejoin restores eligibility")
+    let dismissReader = Reader(root: root.appendingPathComponent("history").path, checkBackend: false)
+    let selected = dismissReader.snapshot().chats.first { $0.id == "one" }!
+    let cacheBeforeClear = try Data(contentsOf: URL(fileURLWithPath: path))
+    try dismissReader.clear(selected)
+    expect(dismissReader.snapshot().chats.map { $0.id } == ["two"])
+    try expect(dismissReader.preview(selected).isEmpty)
+    try expect(Data(contentsOf: URL(fileURLWithPath: path)) == cacheBeforeClear)
+    let reopened = Reader(root: root.appendingPathComponent("history").path, checkBackend: false)
+    expect(reopened.snapshot().chats.map { $0.id } == ["two"])
+    sql("INSERT INTO messages(chatId,id,text,timeSent) VALUES('one','same-time-new','new arrival',3);")
+    expect(reopened.snapshot().chats.first { $0.id == "one" }?.count == 1)
+    try expect(reopened.preview(selected).map { $0.id } == ["same-time-new"])
+    sql("DELETE FROM messages WHERE id='same-time-new';")
+    try FileManager.default.removeItem(at: root.appendingPathComponent("widget-dismissed.json"))
+    print("PASS: Clear persists exact displayed IDs, keeps new arrivals (including equal timestamps), and never changes cache/read flags")
+    for service in ["Telegram", "WhatsApp"] {
+        let muteCache = try Cache(path: path, service: service)
+        try expect(muteCache.rows().count == 2)
+        sql("UPDATE chats2 SET isMuted=1 WHERE id='one';")
+        let unmutedRows = try muteCache.rows()
+        assert(unmutedRows.map { $0.id } == ["two"] && Snapshot(chats: unmutedRows).total == 1)
+        try expect(muteCache.preview(chatID: "one").isEmpty)
+        sql("UPDATE chats2 SET isMuted=1 WHERE id='two';")
+        try expect(muteCache.rows().isEmpty)
+        sql("UPDATE chats2 SET isMuted=0 WHERE id IN ('one','two');")
+        try expect(muteCache.rows().count == 2)
+        try expect(muteCache.preview(chatID: "one").count == 1)
+    }
+    print("PASS: Telegram/WhatsApp muted chats excluded from list, count and previews; live mute/unmute refreshes without marking read")
+    for service in ["Telegram", "WhatsApp"] {
+        let missingSettingsCache = try Cache(path: path, service: service)
+        sql("DELETE FROM chats2 WHERE id='one';")
+        let unknownVisible = service == "Telegram" ? 0 : 1
+        try expect(missingSettingsCache.rows().count == 1 + unknownVisible)
+        try expect(missingSettingsCache.preview(chatID: "one").count == unknownVisible)
+        sql("INSERT INTO chats2(id,isMuted,isArchived) VALUES('one',0,NULL);")
+        try expect(missingSettingsCache.rows().count == 1 + unknownVisible)
+        try expect(missingSettingsCache.preview(chatID: "one").count == unknownVisible)
+        sql("DELETE FROM chats2 WHERE id='one';")
+        sql("INSERT INTO chats2(id,isMuted) VALUES('one',1);")
+        try expect(missingSettingsCache.rows().map { $0.id } == ["two"])
+        try expect(missingSettingsCache.preview(chatID: "one").isEmpty)
+        sql("UPDATE chats2 SET isMuted=0,isArchived=1 WHERE id='one';")
+        try expect(missingSettingsCache.preview(chatID: "one").isEmpty)
+        try expect(missingSettingsCache.rows().map { $0.id } == ["two"])
+        sql("UPDATE chats2 SET isArchived=0 WHERE id='one';")
+        try expect(missingSettingsCache.rows().count == 2)
+    }
+    print("PASS: unknown Telegram settings wait for sync; archive/unarchive and mute updates refresh lists and previews; WhatsApp missing-row behavior preserved")
+    sql("INSERT INTO contacts2 VALUES('alice','Alice 🐢'); UPDATE messages SET senderId='alice' WHERE chatId='one';")
+    let beforePreview = try cache.rows()
+    let bytesBeforePreview = try Data(contentsOf: URL(fileURLWithPath: path))
+    let messages = try cache.preview(chatID: "one")
+    try expect(Data(contentsOf: URL(fileURLWithPath: path)) == bytesBeforePreview)
+    assert(messages.count == 1 && messages.first?.time == 3)
+    assert(messages.first?.sender == "Alice 🐢")
+    try expect(cache.rows() == beforePreview) // Preview must not change unread state.
+    try expect(cache.preview(chatID: "one' OR 1=1 --").isEmpty) // Chat IDs are bound, not SQL.
+    try expect(cache.preview(chatID: "missing").isEmpty)
+    assert(clean("A\nB") == "A B")
+    assert(messageDate(1_000).timeIntervalSince1970 == 1)
+    try expect(cache.preview(chatID: "events").isEmpty)
+    try expect(cache.preview(chatID: "archive").isEmpty)
+    try expect(cache.preview(chatID: "status@broadcast").isEmpty)
+    sql("INSERT INTO messages(chatId,id,text,isOutgoing,timeSent) VALUES('two','sent','outgoing',1,20);")
+    try expect(cache.preview(chatID: "two").count == 1) // No outgoing or already-read messages.
+    try expect(cache.rows().map { $0.count } == rows.map { $0.count }) // Sending does not erase incoming unread.
+    sql("UPDATE messages SET isRead=1 WHERE chatId='two' AND id='new';")
+    rows = try cache.rows(); assert(rows.count == 1 && rows[0].id == "one")
+    sql("UPDATE messages SET isDeleted=1 WHERE chatId='one' AND id='new';")
+    try expect(cache.preview(chatID: "one").isEmpty)
+    try expect(cache.rows().isEmpty)
+    sql("INSERT INTO messages(chatId,id,text,timeSent) VALUES('one','ordinary','[Left] literally means left',30);")
+    try expect(cache.rows().count == 1) // Only exact service-event forms are suppressed.
+    sql("UPDATE messages SET isRead=1 WHERE id='ordinary';")
+    try expect(cache.rows().isEmpty)
+    assert(menuLines(Snapshot()) == ["No unread messages"])
+    assert(Snapshot(error: "busy").title == "nchat ?")
+    let offlineReader = Reader(root: root.appendingPathComponent("history").path)
+    assert(offlineReader.snapshot().syncOffline)
+    assert(offlineReader.snapshot().title == "nchat offline")
+    assert(!menuLines(offlineReader.snapshot()).contains("No unread messages"))
+    let markerDirectory = root.appendingPathComponent("widget-replies")
+    try FileManager.default.createDirectory(at: markerDirectory, withIntermediateDirectories: true)
+    let marker = markerDirectory.appendingPathComponent("server").path
+    for value in ["invalid", "2147483647 " + String(repeating: "a", count: 32), "\(getpid()) " + String(repeating: "a", count: 32)] {
+        try WidgetReplyBridge.writeRequest(value, path: marker)
+        assert(offlineReader.snapshot().syncOffline) // Missing/dead/reused PID is not a live nchat.
+    }
+    assert(!Reader(root: root.appendingPathComponent("history").path, checkBackend: false).snapshot().syncOffline)
+    assert(Reader(root: root.appendingPathComponent("missing").path).snapshot().error != nil)
+    sql("INSERT INTO chats2(id) VALUES('long'); WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<220) INSERT INTO messages(chatId,id,text,timeSent,isRead) SELECT 'long',printf('%03d',x),'message',x,0 FROM n;")
+    let limited = try cache.preview(chatID: "long")
+    assert(limited.count == 200 && limited.first?.time == 21 && limited.last?.time == 220)
+    let expired = try Cache(path: path, service: "WhatsApp", readTimeout: 0)
+    do { _ = try expired.rows(); assertionFailure("Expired query budget must interrupt") }
+    catch { assert(String(describing: error) == "interrupted") }
+    do { _ = try expired.preview(chatID: "long"); assertionFailure("Expired preview budget must interrupt") }
+    catch { assert(String(describing: error) == "interrupted") }
+    try expect(cache.preview(chatID: "long").count == 200)
+    assert(offlineReader.snapshot().total == 220) // Retain cached unread messages while offline.
+    print("PASS: list and preview deadlines still interrupt; subsequent normal reads succeed")
+    do {
+        // Preparing writes is allowed by SQLite, executing them must be rejected.
+        let write = try cache.prepare("UPDATE messages SET isRead=1")
+        defer { sqlite3_finalize(write) }
+        assert(sqlite3_step(write) == SQLITE_READONLY)
+    }
+    sql("DROP TABLE messages;")
+    do { _ = try cache.rows(); assertionFailure("Missing schema must fail") } catch { }
+    do { _ = try cache.preview(chatID: "one"); assertionFailure("Preview schema errors must surface") } catch { }
+    // Construct the real native view without activating it or opening a window.
+    _ = NSApplication.shared
+    let controller = UnreadPopoverController()
+    let fixture = demoSnapshot()
+    controller.state = fixture
+    controller.rebuild()
+    let collapsedHeight = controller.targetContentSize.height
+    let chat = fixture.chats[1]
+    controller.expanded.insert(chat.key)
+    controller.previews[chat.key] = demoMessages()
+    controller.rebuild()
+    controller.view.layoutSubtreeIfNeeded()
+    assert(!controller.backButton.isHidden && controller.backButton.superview === controller.header)
+    assert(controller.options.itemTitles.contains("Quit nchat Unread"))
+    assert(!controller.document.subviews.compactMap { $0 as? NSButton }.contains { $0.title == "Quit nchat Unread" })
+    var closedByButton = false
+    controller.onClose = { closedByButton = true }
+    controller.closeButton.performClick(nil)
+    assert(closedByButton)
+    assert(controller.view.hitTest(controller.closeButton.convert(NSPoint(x: controller.closeButton.bounds.midX, y: controller.closeButton.bounds.midY), to: controller.view.superview)) === controller.closeButton)
+    assert(controller.header.frame.maxY == controller.scroll.frame.minY)
+    assert(controller.document.subviews.filter { $0 is MessageCard }.count == demoMessages().count)
+    assert(controller.scroll.contentView.bounds.origin.y == 0)
+    assert(controller.targetContentSize.height > collapsedHeight)
+    let afterText = controller.document.frame.height
+    let testImage = NSImage(size: NSSize(width: 600, height: 400))
+    controller.previews[chat.key]![2].image = testImage
+    controller.rebuild()
+    assert(controller.document.frame.height > afterText)
+    let photo = controller.document.subviews.compactMap { $0 as? ImageButton }.first!
+    assert(abs(photo.frame.width / photo.frame.height - 1.5) < 0.001)
+    controller.previews[chat.key]![2].image = NSImage(size: NSSize(width: 400, height: 800))
+    controller.rebuild()
+    let portrait = controller.document.subviews.compactMap { $0 as? ImageButton }.first!
+    assert(abs(portrait.frame.width / portrait.frame.height - 0.5) < 0.001)
+    let caption = String(repeating: "A longer caption should wrap above the image, not leave unused space. ", count: 5)
+    controller.previews[chat.key] = [PreviewMessage(sender: "Jamie", text: caption, time: 1000, attachment: true, image: testImage)]
+    controller.rebuild()
+    let captionField = controller.document.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == caption }!
+    let captionPhoto = controller.document.subviews.compactMap { $0 as? ImageButton }.first!
+    assert(captionField.lineBreakMode == .byWordWrapping && captionField.maximumNumberOfLines == 0)
+    assert(captionField.isSelectable && !captionField.cell!.truncatesLastVisibleLine)
+    assert(captionField.frame.height > 60)
+    assert(abs(captionPhoto.frame.minY - captionField.frame.maxY - 8) < 0.001)
+    let webLink = "https://example.org/path/to/a/long/link?one=1&two=2"
+    let linkedText = "See \(webLink) for details."
+    controller.previews[chat.key] = [PreviewMessage(sender: "Jamie", text: linkedText, time: 1000, attachment: false)]
+    controller.rebuild()
+    let linkedField = controller.document.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == linkedText }!
+    let linkIndex = (linkedText as NSString).range(of: webLink).location
+    assert(linkedField.isSelectable && linkedField.allowsEditingTextAttributes)
+    assert((linkedField.attributedStringValue.attribute(.link, at: linkIndex, effectiveRange: nil) as? URL)?.absoluteString == webLink)
+    assert((linkedField.attributedStringValue.attribute(.paragraphStyle, at: linkIndex, effectiveRange: nil) as? NSParagraphStyle)?.lineBreakMode == .byWordWrapping)
+    controller.previews[chat.key] = (0..<200).map { _ in PreviewMessage(sender: "Long name 🐢", text: String(repeating: "Wrapped message ", count: 40), time: 1000, attachment: false) }
+    controller.rebuild()
+    assert(controller.targetContentSize.height == controller.maxHeight)
+    assert(controller.document.frame.height > controller.maxHeight)
+    controller.scroll.contentView.scroll(to: NSPoint(x: 0, y: 1000))
+    assert(controller.backButton.frame.maxY < controller.scroll.frame.minY) // Pinned header, outside the scrolling messages.
+    assert(controller.view.bounds.contains(controller.backButton.frame))
+    let origin = controller.view.bounds.origin
+    controller.revealChat(chat)
+    assert(controller.view.bounds.origin == origin)
+    assert(controller.view.hitTest(controller.backButton.convert(NSPoint(x: controller.backButton.bounds.midX, y: controller.backButton.bounds.midY), to: controller.view.superview)) === controller.backButton)
+    var collapsed = false
+    controller.onCollapse = { collapsed = true }
+    controller.backButton.performClick(nil)
+    assert(collapsed)
+    collapsed = false
+    controller.cancelOperation(nil)
+    assert(collapsed) // Escape backs out of expanded messages before closing.
+    controller.expanded.removeAll()
+    controller.rebuild()
+    assert(controller.targetContentSize.height == collapsedHeight)
+    assert(controller.backButton.isHidden)
+    var clicked = false
+    controller.onToggle = { clicked = $0.key == fixture.chats[0].key }
+    let button = controller.document.subviews.compactMap { $0 as? ChatButton }.first!
+    button.performClick(nil)
+    assert(clicked)
+    var cleared: String?, marked: String?
+    controller.onClear = { cleared = $0.key }
+    controller.onMarkRead = { marked = $0.key }
+    let actions = controller.document.subviews.compactMap { $0 as? ChatActionButton }
+    let clearControl = actions.first { $0.title == "Clear" }!
+    let readControl = actions.first { $0.title == "Mark as read" }!
+    for control in [clearControl, readControl] {
+        assert(controller.document.hitTest(NSPoint(x: control.frame.midX, y: control.frame.midY)) === control)
+    }
+    clearControl.performClick(nil)
+    assert(cleared == fixture.chats[0].key && marked == nil)
+    readControl.performClick(nil)
+    assert(marked == fixture.chats[0].key)
+    controller.markingRead.insert(fixture.chats[0].key)
+    controller.rebuild()
+    assert(controller.document.subviews.compactMap { $0 as? ChatActionButton }.filter { $0.chat?.key == fixture.chats[0].key }.allSatisfy { !$0.isEnabled })
+    controller.markingRead.removeAll()
+    print("PASS: native Clear/Mark as read buttons hit correct chat independently; duplicate actions disabled while pending")
+    var closed = false
+    controller.onClose = { closed = true }
+    controller.cancelOperation(nil)
+    assert(closed)
+    controller.state = Snapshot()
+    controller.rebuild()
+    assert(controller.document.subviews.compactMap { $0 as? ChatButton }.isEmpty)
+    assert(decodedFilePath("0,,zz,xx") == nil)
+    assert(decodedFilePath("0,,2f746d702f612e706e67,") == "/tmp/a.png")
+    assert(cachedThumbnail("0,,2f746d702f612e706e67,", cacheRoot: root.path) == nil)
+    let photoURL = root.appendingPathComponent("orientation.jpg")
+    let context = CGContext(data: nil, width: 1200, height: 800, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    context.setFillColor(NSColor.systemTeal.cgColor)
+    context.fill(CGRect(x: 0, y: 0, width: 1200, height: 800))
+    let destination = CGImageDestinationCreateWithURL(photoURL as CFURL, "public.jpeg" as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, context.makeImage()!, [kCGImagePropertyOrientation: 6] as CFDictionary)
+    assert(CGImageDestinationFinalize(destination))
+    func fileInfo(_ path: String) -> String { "0,," + path.utf8.map { String(format: "%02x", $0) }.joined() + "," }
+    let thumb = cachedThumbnail(fileInfo(photoURL.path), cacheRoot: root.path)!
+    assert(abs(thumb.size.width / thumb.size.height - 2.0 / 3.0) < 0.01) // EXIF rotation respected.
+    assert(max(thumb.size.width, thumb.size.height) <= 640)
+    assert(cachedThumbnail(fileInfo(photoURL.path), cacheRoot: root.appendingPathComponent("elsewhere").path) == nil)
+    let emptyURL = root.appendingPathComponent("broken.jpg")
+    try Data("not an image".utf8).write(to: emptyURL)
+    assert(cachedThumbnail(fileInfo(emptyURL.path), cacheRoot: root.path) == nil)
+    // Cache -> real native button -> original URL, without launching an app or
+    // touching message read flags. The source is larger than the 640px thumbnail.
+    sql("CREATE TABLE messages(chatId TEXT, id TEXT, senderId TEXT, fileInfo TEXT, text TEXT, isOutgoing INT DEFAULT 0, isRead INT DEFAULT 0, isDeleted INT DEFAULT 0, timeSent INT);")
+    sql("INSERT INTO messages(chatId,id,fileInfo,text,timeSent) VALUES('one','photo','\(fileInfo(photoURL.path))','Full image',100);")
+    let fullMessages = try cache.preview(chatID: "one")
+    assert(fullMessages.count == 1 && fullMessages[0].imageURL == photoURL)
+    let imageChat = UnreadChat(id: "one", name: "Image test", service: "Telegram", count: 1, latest: 100, cachePath: path)
+    controller.state = Snapshot(chats: [imageChat])
+    controller.expanded = [imageChat.key]
+    controller.previews[imageChat.key] = fullMessages
+    controller.rebuild()
+    let imageButton = controller.document.subviews.compactMap { $0 as? ImageButton }.first!
+    assert(imageButton.isEnabled && imageButton.action == #selector(UnreadPopoverController.openImage(_:)))
+    let hit = controller.document.hitTest(NSPoint(x: imageButton.frame.midX, y: imageButton.frame.midY))
+    assert(hit === imageButton)
+    let originalBytes = try Data(contentsOf: photoURL)
+    let databaseBytes = try Data(contentsOf: URL(fileURLWithPath: path))
+    var opened: [URL] = []
+    var imageErrors = 0
+    controller.onOpenImage = { opened.append($0) }
+    controller.onImageOpenError = { _ in imageErrors += 1 }
+    imageButton.performClick(nil)
+    assert(opened == [photoURL.resolvingSymlinksInPath()])
+    let fullSource = CGImageSourceCreateWithURL(opened[0] as CFURL, nil)!
+    let fullProperties = CGImageSourceCopyPropertiesAtIndex(fullSource, 0, nil)! as NSDictionary
+    assert(fullProperties[kCGImagePropertyPixelWidth] as? Int == 1200)
+    assert(fullProperties[kCGImagePropertyPixelHeight] as? Int == 800)
+    try expect(Data(contentsOf: photoURL) == originalBytes)
+    try expect(Data(contentsOf: URL(fileURLWithPath: path)) == databaseBytes)
+    assert(NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") != nil)
+    imageButton.imageURL = emptyURL
+    imageButton.performClick(nil)
+    imageButton.imageURL = root.appendingPathComponent("missing.jpg")
+    imageButton.performClick(nil)
+    assert(opened.count == 1 && imageErrors == 2)
+    let restricted = root.appendingPathComponent("restricted")
+    try FileManager.default.createDirectory(at: restricted, withIntermediateDirectories: true)
+    let link = restricted.appendingPathComponent("outside.jpg")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: photoURL)
+    assert(cachedImageURL(link, cacheRoot: restricted.path) == nil)
+    assert(cachedImageURL(URL(string: "https://example.com/image.jpg")!, cacheRoot: root.path) == nil)
+    print("PASS: native image click opens original 1200×800 file, not thumbnail; cache unchanged; missing/corrupt/outside files rejected; Preview available")
+    for service in ["WhatsApp", "Telegram", "both"] {
+        controller.state = demoSnapshot(service)
+        controller.rebuild()
+        assert(controller.document.subviews.compactMap { $0 as? ChatButton }.count == (service == "both" ? 4 : 2))
+        assert(controller.state.total == (service == "WhatsApp" ? 4 : service == "Telegram" ? 5 : 9))
+        for button in controller.document.subviews.compactMap({ $0 as? ChatButton }) {
+            let labels = button.subviews.compactMap { $0 as? NSTextField }
+            assert(labels[0].frame.maxY <= labels[1].frame.minY)
+            assert(labels.allSatisfy { $0.frame.maxX <= button.bounds.width })
+        }
+    }
+    controller.state = fixture
+    controller.expanded = [chat.key]
+    controller.previews[chat.key] = demoMessages()
+    controller.rebuild()
+    let reply = controller.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title == "Reply…" }!
+    var sends = 0
+    controller.onSend = { selected, reference, text in
+        assert(selected.key == chat.key && reference == "demo3" && text.contains("Draft 🐢"))
+        sends += 1
+        controller.sending.insert(selected.key)
+        controller.updateComposer()
+    }
+    reply.performClick(nil)
+    assert(controller.replyChat?.key == chat.key && sends == 0 && !controller.sendButton.isEnabled)
+    controller.replyField.string = "Draft 🐢"
+    controller.replyField.insertNewline(nil)
+    controller.textDidChange(Notification(name: NSText.didChangeNotification))
+    assert(sends == 0 && controller.sendButton.isEnabled) // Enter cannot send.
+    let draft = controller.replyField.string
+    controller.state = Snapshot() // Read on another device during composition.
+    controller.rebuild()
+    assert(controller.replyField.string == draft && controller.replyChat?.key == chat.key)
+    controller.sendButton.performClick(nil)
+    controller.sendButton.performClick(nil)
+    assert(sends == 1 && !controller.sendButton.isEnabled)
+    controller.completeReply(chat, text: draft, outcome: .failed("Test failure"))
+    assert(controller.replyField.string == draft && controller.sendButton.isEnabled)
+    controller.completeReply(chat, text: draft, outcome: .unknown)
+    assert(!controller.sendButton.isEnabled && controller.replyField.string == draft)
+    controller.replyField.string = "A different draft"
+    controller.textDidChange(Notification(name: NSText.didChangeNotification))
+    controller.completeReply(chat, text: draft, outcome: .accepted)
+    assert(controller.replyField.string == "A different draft") // A late ack cannot erase newer typing.
+    controller.closeComposer()
+    assert(controller.drafts[chat.key] == "A different draft")
+    let resume = controller.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title.hasPrefix("Resume reply") }!
+    resume.performClick(nil)
+    assert(controller.replyField.string == "A different draft")
+    controller.completeReply(chat, text: "A different draft", outcome: .accepted)
+    assert(controller.replyField.string.isEmpty && controller.drafts[chat.key] == "")
+    if case .failed = WidgetReplyBridge.submit(cachePath: path, chatID: "test", referenceID: "id", text: " ") {} else {
+        assertionFailure("Empty reply must not queue anything")
+    }
+    assert(isImageReference("30,61,5b50686f746f5d,"))
+    assert(!isImageReference("30,61,66696c652e706466,"))
+    assert(decodedFilePath("30,61,5b50686f746f5d,") == nil)
+    let queue = root.appendingPathComponent("peek-downloads")
+    try FileManager.default.createDirectory(at: queue, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try WidgetReplyBridge.writeRequest(String(getpid()), path: queue.appendingPathComponent("server").path)
+    let imageCache = root.appendingPathComponent("history/Telegram_test/db.sqlite").path
+    assert(WidgetReplyBridge.queueImage(cachePath: imageCache, chatID: "exact-chat", messageID: "exact-message"))
+    let requests = try FileManager.default.contentsOfDirectory(atPath: queue.path).filter { $0.hasSuffix(".request") }
+    assert(requests.count == 1)
+    let payload = try String(contentsOf: queue.appendingPathComponent(requests[0]), encoding: .utf8)
+    let expected = ["Telegram_test", "exact-chat", "exact-message"].map { $0.utf8.map { String(format: "%02x", $0) }.joined() }.joined(separator: "\n") + "\n"
+    assert(payload == expected)
+    print("PASS: image references distinguished from documents; cache-only download queue uses exact profile/chat/message")
+    controller.closeComposer()
+    controller.state = fixture
+    for height: CGFloat in [240, 420, 760] {
+        controller.maxHeight = height
+        controller.expanded = [chat.key]
+        controller.previews[chat.key] = (0..<200).map { _ in demoMessages()[0] }
+        controller.rebuild()
+        for fraction: CGFloat in [0, 0.5, 1] {
+            controller.scroll.contentView.scroll(to: NSPoint(x: 0, y: fraction * (controller.document.frame.height - controller.scroll.contentView.bounds.height)))
+            controller.view.layoutSubtreeIfNeeded()
+            assert(controller.view.bounds.contains(controller.backButton.frame))
+            assert(controller.backButton.frame.maxY < controller.scroll.frame.minY)
+            assert(controller.view.hitTest(controller.backButton.convert(NSPoint(x: controller.backButton.bounds.midX, y: controller.backButton.bounds.midY), to: controller.view.superview)) === controller.backButton)
+        }
+    }
+    let navigation = MenuBar(root: root.path, diagnosticPath: root.appendingPathComponent("test-state").path)
+    navigation.content.state = fixture
+    navigation.content.expanded = [chat.key]
+    navigation.content.previews[chat.key] = demoMessages()
+    navigation.content.rebuild()
+    navigation.content.beginReply(navigation.content.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title == "Reply…" }!)
+    navigation.content.replyField.string = "Keep this draft"
+    navigation.content.onCollapse = { navigation.collapseChats() }
+    navigation.content.backButton.performClick(nil)
+    assert(navigation.content.expanded.isEmpty && navigation.content.replyChat == nil)
+    assert(navigation.content.drafts[chat.key] == "Keep this draft")
+    assert(navigation.content.scroll.contentView.bounds.origin == .zero)
+    navigation.content.expanded = [chat.key]
+    navigation.content.previews[chat.key] = demoMessages()
+    navigation.content.rebuild()
+    navigation.content.beginReply(navigation.content.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title == "Reply…" }!)
+    navigation.content.replyField.string = "Draft survives dismissal"
+    navigation.popoverDidClose(Notification(name: NSPopover.didCloseNotification, object: navigation.popover))
+    navigation.content.rebuild() // The next open rebuilds the same controller.
+    assert(navigation.content.expanded.isEmpty && navigation.content.previews.isEmpty)
+    assert(navigation.content.replyChat == nil && navigation.content.backButton.isHidden)
+    assert(navigation.content.drafts[chat.key] == "Draft survives dismissal")
+    assert(navigation.content.scroll.contentView.bounds.origin == .zero)
+    print("PASS: popover dismissal resets expansion, previews, composer and scroll while retaining unsent drafts")
+    print("PASS: left back button hit-testing at three menu heights and scroll positions; real collapse action restores main list and preserves reply draft")
+    print("PASS: unread-only selection, membership events, archives, outgoing/read/deleted exclusions, read progress, live changes, query errors, SQL binding, read-only enforcement; millisecond timestamps, native row clicks, expand/collapse, Escape, long text, bounded scrolling, landscape/portrait aspect ratios and empty state")
+    print("PASS: reply recipient, explicit Send only, Enter/newlines, duplicate-click guard, draft retention through refresh/read/close, failure and uncertain-send handling, late acknowledgements and cleared sent drafts")
+}
+
+// Local visual fixtures. Never inserted into nchat's database or sent to a chat.
+func demoSnapshot(_ service: String = "both") -> Snapshot {
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+    let chats = [
+        UnreadChat(id: "family", name: "Family", service: "WhatsApp", count: 3, latest: now - 120_000, cachePath: "demo-wa"),
+        UnreadChat(id: "study", name: "Study group", service: "Telegram", count: 3, latest: now - 240_000, cachePath: "demo-tg"),
+        UnreadChat(id: "sam", name: "Sam", service: "Telegram", count: 2, latest: now - 360_000, cachePath: "demo-tg"),
+        UnreadChat(id: "alex", name: "Alex", service: "WhatsApp", count: 1, latest: now - 480_000, cachePath: "demo-wa")
+    ]
+    return Snapshot(chats: chats.filter { service == "both" || $0.service == service })
+}
+
+func demoMessages() -> [PreviewMessage] {
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+    return [PreviewMessage(sender: "Jamie", text: "Anyone free for coffee tomorrow?", time: now - 360_000, attachment: false, id: "demo1"),
+        PreviewMessage(sender: "Priya", text: "I can do 3!", time: now - 300_000, attachment: false, id: "demo2"),
+        PreviewMessage(sender: "Jamie", text: "Great, see you there.", time: now - 240_000, attachment: false, id: "demo3")]
+}
+
+func renderUITests(_ directory: String) throws {
+    _ = NSApplication.shared
+    let root = URL(fileURLWithPath: directory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let controller = UnreadPopoverController()
+    controller.maxHeight = 760
+    let appearance = NSAppearance(named: .darkAqua)!
+    controller.view.appearance = appearance
+    // Rasterize the actual AppKit content view, not a separately drawn mockup.
+    func save(_ name: String) throws {
+        controller.rebuild()
+        controller.view.wantsLayer = true
+        controller.view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            controller.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+        let size = controller.view.bounds.size
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        bitmap.size = size
+        controller.view.cacheDisplay(in: controller.view.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: root.appendingPathComponent(name + ".png"))
+    }
+    for (service, filename) in [("WhatsApp", "1-whatsapp"), ("Telegram", "2-telegram"), ("both", "3-both")] {
+        controller.state = demoSnapshot(service)
+        try save(filename)
+    }
+    let chat = controller.state.chats[1]
+    controller.expanded.insert(chat.key)
+    controller.previews[chat.key] = demoMessages()
+    try save("4-expanded-text")
+    // Known-aspect fixture tests pixel geometry without reusing private chat photos.
+    let image = NSImage(size: NSSize(width: 600, height: 400), flipped: false) { rect in
+        NSColor.systemTeal.setFill(); rect.fill()
+        NSColor.white.setFill(); NSBezierPath(ovalIn: NSRect(x: 225, y: 125, width: 150, height: 150)).fill()
+        return true
+    }
+    controller.previews[chat.key]![2] = PreviewMessage(sender: "Jamie", text: "Image preview test", time: Int64(Date().timeIntervalSince1970 * 1000), attachment: true, image: image)
+    try save("5-expanded-image")
+    controller.view.appearance = NSAppearance(named: .aqua)
+    try save("6-light-image")
+    controller.view.appearance = appearance
+    controller.previews[chat.key] = demoMessages()
+    controller.rebuild()
+    let reply = controller.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title == "Reply…" }!
+    reply.performClick(nil)
+    controller.replyField.string = "Sounds good, see you there!"
+    controller.textDidChange(Notification(name: NSText.didChangeNotification))
+    try save("7-reply-composer")
+    controller.closeComposer()
+    controller.expanded.removeAll()
+    controller.state = Snapshot()
+    try save("8-empty")
+    controller.state.error = "Test error"
+    try save("9-error")
+    controller.state = Snapshot(syncOffline: true)
+    try save("9a-offline-empty")
+    controller.state = Snapshot(chats: [chat], syncOffline: true)
+    try save("9b-offline-cached")
+    controller.drafts.removeAll()
+    controller.state = Snapshot(chats: [chat])
+    controller.expanded = [chat.key]
+    controller.previews[chat.key] = [PreviewMessage(sender: "Jamie", text: "You can sign up for student discounts with your university email. Check the offers throughout the year before buying a new laptop. Some shops run special promotions at the start of term, so it may be worth waiting until you have compared the available prices.", time: Int64(Date().timeIntervalSince1970 * 1000), attachment: true, image: image)]
+    try save("10-wrapped-caption-image")
+    print("Rendered actual native views: \(directory)")
+}
+
+func testPopoverLayout() {
+    _ = NSApplication.shared
+    NSApplication.shared.setActivationPolicy(.accessory)
+    let copyItem = NSApplication.shared.mainMenu?.item(withTitle: "Edit")?.submenu?.item(withTitle: "Copy")
+    precondition(copyItem?.keyEquivalent == "c" && copyItem?.action == #selector(NSText.copy(_:)))
+    let host = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 500, height: 100), styleMask: [.borderless], backing: .buffered, defer: false)
+    let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 30, height: 20))
+    host.contentView!.addSubview(anchor)
+    let controller = UnreadPopoverController()
+    let popover = NSPopover()
+    popover.animates = false
+    popover.contentViewController = controller
+    let sizer = PopoverSizer()
+    var frames: [NSSize] = []
+    var windowHeights: [CGFloat] = []
+    sizer.onFrame = {
+        frames.append($0)
+        windowHeights.append(controller.view.window!.frame.height)
+    }
+    controller.onResize = { sizer.resize(popover, to: $0) }
+    controller.state = demoSnapshot("Telegram")
+    controller.rebuild()
+    host.alphaValue = 0
+    host.orderBack(nil)
+    popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    controller.view.window?.alphaValue = 0
+    func settle(_ label: String) {
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        precondition(popover.isShown, "Test must use an actual hosted popover")
+        precondition(popover.contentSize == controller.targetContentSize, "Popover window did not resize: \(label)")
+        precondition(popover.contentSize.width == 454, "Menu width changed with content: \(label)")
+        precondition(controller.view.visibleRect.contains(controller.view.bounds), "Popover clips content: \(label)")
+        if !controller.expanded.isEmpty {
+            precondition(controller.backButton.visibleRect.contains(controller.backButton.bounds), "Back arrow clipped: \(label)")
+            let point = NSPoint(x: controller.backButton.frame.midX, y: controller.backButton.frame.midY)
+            precondition(controller.view.hitTest(controller.view.convert(point, to: controller.view.superview)) === controller.backButton)
+        }
+    }
+    settle("collapsed")
+    precondition(controller.scroll.frame.minX == 0 && controller.document.frame.width == 454, "Collapsed menu retains an empty gutter")
+    let initialHeight = popover.contentSize.height
+    let initialWindowHeight = controller.view.window!.frame.height
+    let chat = controller.state.chats[0]
+    controller.expanded = [chat.key]
+    controller.previews[chat.key] = demoMessages()
+    controller.rebuild()
+    precondition(popover.contentSize.height == initialHeight, "Height snapped before animation")
+    Thread.sleep(forTimeInterval: 0.35) // Simulate a busy main loop before its first animation tick.
+    settle("expanded")
+    controller.view.window?.makeKey()
+    let copyField = controller.document.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == demoMessages()[0].text }!
+    copyField.selectText(nil)
+    precondition(controller.view.window?.firstResponder is NSTextView, "Selecting a preview must focus its field editor")
+    precondition(frames.contains { $0.height > initialHeight && $0.height < controller.targetContentSize.height }, "Expected intermediate animation frames")
+    precondition(frames.allSatisfy { $0.width == 454 })
+    let intermediate = windowHeights.filter { $0 > initialWindowHeight && $0 < controller.view.window!.frame.height }
+    precondition(intermediate.count >= 10, "Actual window did not animate through enough visible sizes")
+    let heightRange = controller.targetContentSize.height - initialHeight
+    let actualFrames = [initialWindowHeight] + windowHeights
+    precondition(zip(actualFrames, actualFrames.dropFirst()).allSatisfy { abs($1 - $0) <= heightRange * 0.15 + 2 }, "Actual window snapped between frames")
+    // Repeated cache refreshes and thumbnail arrivals must not restart motion.
+    controller.previews[chat.key] = (0..<30).map { _ in demoMessages()[0] }
+    controller.rebuild()
+    for delay in [0.03, 0.06, 0.09] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            let before = popover.contentSize
+            controller.rebuild()
+            precondition(popover.contentSize == before, "Refresh jumped instead of retargeting")
+        }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        let before = popover.contentSize
+        controller.previews[chat.key] = demoMessages()
+        controller.rebuild()
+        precondition(popover.contentSize == before, "Direction change jumped")
+    }
+    settle("rapid refresh and reversal")
+    controller.onCollapse = {
+        if controller.replyChat != nil { controller.closeComposer() }
+        controller.expanded.removeAll()
+        controller.rebuild()
+    }
+    for height: CGFloat in [240, 420, 760] {
+        controller.maxHeight = height
+        controller.previews[chat.key] = (0..<200).map { _ in demoMessages()[0] }
+        controller.rebuild()
+        controller.revealChat(chat)
+        settle("long preview at \(height)")
+        controller.scroll.contentView.scroll(to: NSPoint(x: 0, y: controller.document.frame.height - controller.scroll.contentView.bounds.height))
+        settle("scrolled to bottom at \(height)")
+    }
+    controller.previews[chat.key] = demoMessages()
+    controller.rebuild()
+    settle("short preview after long preview")
+    let reply = controller.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title == "Reply…" }!
+    reply.performClick(nil)
+    controller.replyField.string = "Draft preserved"
+    settle("reply composer")
+    controller.backButton.performClick(nil)
+    settle("back to main list")
+    precondition(controller.scroll.frame.minX == 0 && controller.document.frame.width == 454)
+    precondition(controller.expanded.isEmpty && controller.replyChat == nil)
+    precondition(controller.drafts[chat.key] == "Draft preserved")
+    popover.close()
+    host.orderOut(nil)
+    print("PASS: display-synchronised actual-window animation, bounded frame jumps, refresh retargeting/reversal, delayed first frame, fixed width, no collapsed gutter, scrolling, reply and Back")
+}
+
 func installCopyMenu() {
     let mainMenu = NSMenu()
     let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
@@ -1222,23 +1931,30 @@ func installCopyMenu() {
 
 @main
 struct UnreadApp {
-    static func main() throws {
-        let args = CommandLine.arguments
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let root: String = {
-            if let index = args.firstIndex(of: "--history-root"), index + 1 < args.count { return args[index + 1] }
-            return home + "/.config/nchat/history"
-        }()
-        if args.contains("--snapshot") {
-            let data = try JSONEncoder().encode(Reader(root: root).snapshot())
-            print(String(decoding: data, as: UTF8.self))
-        } else {
-            let app = NSApplication.shared
-            app.setActivationPolicy(.accessory)
-            installCopyMenu()
-            let delegate = MenuBar(root: root, diagnosticPath: home + "/.config/nchat/menubar-state.json")
-            app.delegate = delegate
-            app.run()
-        }
-    }
+static func main() throws {
+let args = CommandLine.arguments
+let home = FileManager.default.homeDirectoryForCurrentUser.path
+let root: String = {
+    if let index = args.firstIndex(of: "--history-root"), index + 1 < args.count { return args[index + 1] }
+    return home + "/.config/nchat/history"
+}()
+if args.contains("--test-popover-layout") {
+    installCopyMenu()
+    testPopoverLayout()
+} else if args.contains("--self-test") {
+    do { try selfTest() } catch { fputs("\(error)\n", stderr); exit(1) }
+} else if let index = args.firstIndex(of: "--render-ui-tests"), index + 1 < args.count {
+    try renderUITests(args[index + 1])
+} else if args.contains("--snapshot") {
+    let data = try JSONEncoder().encode(Reader(root: root).snapshot())
+    print(String(decoding: data, as: UTF8.self))
+} else {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    installCopyMenu()
+    let delegate = MenuBar(root: root, diagnosticPath: home + "/.config/nchat/menubar-state.json")
+    app.delegate = delegate
+    app.run()
+}
+}
 }
