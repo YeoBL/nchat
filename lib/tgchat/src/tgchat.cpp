@@ -8,7 +8,9 @@
 #include "tgchat.h"
 
 #include <cstdint>
+#include <ctime>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -156,6 +158,9 @@ private:
 private:
   void CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage);
   void PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage);
+  void PerformClientAction(std::shared_ptr<ClientActionRequest> p_Request);
+  bool HandleSocialAction(std::shared_ptr<ClientActionRequest> p_Request);
+  bool HandleManageAction(std::shared_ptr<ClientActionRequest> p_Request);
 
   using Object = td::td_api::object_ptr<td::td_api::Object>;
   void Init();
@@ -244,6 +249,7 @@ private:
   std::map<int64_t, int64_t> m_SupergroupChats, m_BasicGroupChats;
   std::map<int64_t, ContactInfo> m_ContactInfos;
   std::map<int64_t, ChatType> m_ChatTypes;
+  std::map<int64_t, std::vector<int32_t>> m_ActiveStories;
   int64_t m_CurrentChat = 0;
   const char m_SponsoredMessageMsgIdPrefix = '+';
   std::map<std::string, std::set<std::string>> m_SponsoredMessageIds;
@@ -557,6 +563,16 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
   // *INDENT-OFF*
   switch (p_RequestMessage->GetMessageType())
   {
+    case ClientActionRequestType:
+      // Run tools on the TDLib response thread, which also owns the contact,
+      // chat-type and story maps used by these asynchronous menus.
+      {
+        auto request = std::static_pointer_cast<ClientActionRequest>(p_RequestMessage);
+        SendQuery(td::td_api::make_object<td::td_api::getOption>("version"), [this, request](Object)
+          { PerformClientAction(request); });
+      }
+      break;
+
     case GetContactsRequestType:
       {
         LOG_DEBUG("Get contacts");
@@ -640,6 +656,46 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         SendQuery(td::td_api::make_object<td::td_api::getChats>(nullptr, limit), receiveChats);
         SendQuery(td::td_api::make_object<td::td_api::getChats>(
                     td::td_api::make_object<td::td_api::chatListArchive>(), limit), receiveChats);
+      }
+      break;
+
+    case VotePollRequestType:
+      {
+        auto request = std::static_pointer_cast<VotePollRequest>(p_RequestMessage);
+        const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
+        const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
+        SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+          [this, request, chatId, msgId](Object object)
+        {
+          if (object->get_id() != td::td_api::message::ID)
+          {
+            if (request->onResult) request->onResult(false, "Could not load this poll.");
+            return;
+          }
+          auto message = td::move_tl_object_as<td::td_api::message>(object);
+          if (!message->content_ || message->content_->get_id() != td::td_api::messagePoll::ID)
+          {
+            if (request->onResult) request->onResult(false, "This message is not a poll.");
+            return;
+          }
+          auto& content = static_cast<td::td_api::messagePoll&>(*message->content_);
+          if (!content.poll_ || content.poll_->is_closed_ || request->optionIndexes.empty() ||
+              (!content.poll_->allows_multiple_answers_ && request->optionIndexes.size() != 1) ||
+              std::any_of(request->optionIndexes.begin(), request->optionIndexes.end(),
+                [&content](int index) { return index < 0 ||
+                  index >= static_cast<int>(content.poll_->options_.size()); }))
+          {
+            if (request->onResult) request->onResult(false, "This poll is closed or the option is unavailable.");
+            return;
+          }
+          std::vector<int32_t> ids(request->optionIndexes.begin(), request->optionIndexes.end());
+          SendQuery(td::td_api::make_object<td::td_api::setPollAnswer>(chatId, msgId, std::move(ids)),
+            [request](Object answer)
+          {
+            if (request->onResult) request->onResult(answer->get_id() == td::td_api::ok::ID,
+              answer->get_id() == td::td_api::ok::ID ? "Vote sent." : "Telegram rejected the vote.");
+          });
+        });
       }
       break;
 
@@ -826,46 +882,6 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             });
           }
           else request->onResult({{}, deliveryNote + "Read-by details unavailable for this message (chat type, message age or privacy restrictions)."});
-        });
-      }
-      break;
-
-    case VotePollRequestType:
-      {
-        auto request = std::static_pointer_cast<VotePollRequest>(p_RequestMessage);
-        const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
-        const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
-        SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
-          [this, request, chatId, msgId](Object object)
-        {
-          if (object->get_id() != td::td_api::message::ID)
-          {
-            if (request->onResult) request->onResult(false, "Could not load this poll.");
-            return;
-          }
-          auto message = td::move_tl_object_as<td::td_api::message>(object);
-          if (!message->content_ || message->content_->get_id() != td::td_api::messagePoll::ID)
-          {
-            if (request->onResult) request->onResult(false, "This message is not a poll.");
-            return;
-          }
-          auto& content = static_cast<td::td_api::messagePoll&>(*message->content_);
-          if (!content.poll_ || content.poll_->is_closed_ || request->optionIndexes.empty() ||
-              (!content.poll_->allows_multiple_answers_ && request->optionIndexes.size() != 1) ||
-              std::any_of(request->optionIndexes.begin(), request->optionIndexes.end(),
-                [&content](int index) { return index < 0 ||
-                  index >= static_cast<int>(content.poll_->options_.size()); }))
-          {
-            if (request->onResult) request->onResult(false, "This poll is closed or the option is unavailable.");
-            return;
-          }
-          std::vector<int32_t> ids(request->optionIndexes.begin(), request->optionIndexes.end());
-          SendQuery(td::td_api::make_object<td::td_api::setPollAnswer>(chatId, msgId, std::move(ids)),
-            [request](Object answer)
-          {
-            if (request->onResult) request->onResult(answer->get_id() == td::td_api::ok::ID,
-              answer->get_id() == td::td_api::ok::ID ? "Vote sent." : "Telegram rejected the vote.");
-          });
         });
       }
       break;
@@ -2147,6 +2163,14 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
 {
   // *INDENT-OFF*
   td::td_api::downcast_call(*update, overloaded(
+  [this](td::td_api::updateChatActiveStories& stories)
+  {
+    if (!stories.active_stories_) return;
+    auto& ids = m_ActiveStories[stories.active_stories_->chat_id_];
+    ids.clear();
+    for (const auto& story : stories.active_stories_->stories_)
+      if (story) ids.push_back(story->story_id_);
+  },
   [this](td::td_api::updateAuthorizationState& update_authorization_state)
   {
     LOG_TRACE("auth update");
@@ -4593,3 +4617,7 @@ void TgChat::Impl::UpdateLastReadInboxMessage(int64_t p_ChatId, int64_t p_LastRe
   newMessageStatusNotify->isRead = true;
   CallMessageHandler(newMessageStatusNotify);
 }
+
+#include "tgfeatures.inc"
+#include "tgfeatures_social.inc"
+#include "tgfeatures_manage.inc"
