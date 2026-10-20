@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -32,5 +33,54 @@ func TestEarlierHistoryRequestUsesMilliseconds(t *testing.T) {
 	params["msgId"] = ""
 	if _, err := buildEarlierHistoryRequest(&whatsmeow.Client{}, chat, params); err == nil {
 		t.Fatal("missing history anchor accepted")
+	}
+}
+
+func TestSelectedHistoryRecoveryRequiresLaterAnchor(t *testing.T) {
+	chat := types.NewJID("123", types.GroupServer)
+	params := map[string]string{"msgId": "later-anchor", "timeSent": "60001", "targetMsgId": "selected", "targetTimeSent": "59999"}
+	message, err := buildEarlierHistoryRequest(&whatsmeow.Client{}, chat, params)
+	if err != nil || message == nil {
+		t.Fatalf("valid selected history request failed: %v", err)
+	}
+	for _, invalid := range []string{"", "invalid", "60000", "60099", "61000", "-1"} {
+		params["targetTimeSent"] = invalid
+		if _, err := buildEarlierHistoryRequest(&whatsmeow.Client{}, chat, params); err == nil {
+			t.Fatalf("invalid target accepted: %q", invalid)
+		}
+	}
+	params["targetTimeSent"] = "59999"
+	params["targetMsgId"] = params["msgId"]
+	if _, err := buildEarlierHistoryRequest(&whatsmeow.Client{}, chat, params); err == nil {
+		t.Fatal("target itself accepted as history anchor")
+	}
+	params["targetMsgId"] = "selected"
+	for _, synthetic := range []string{"60", "+local"} {
+		params["msgId"] = synthetic
+		if _, err := buildEarlierHistoryRequest(&whatsmeow.Client{}, chat, params); err == nil {
+			t.Fatalf("local synthetic anchor accepted: %s", synthetic)
+		}
+	}
+	params["msgId"] = "later-anchor"
+	for _, server := range []string{types.NewsletterServer, types.BroadcastServer, "invalid"} {
+		if _, err := buildEarlierHistoryRequest(&whatsmeow.Client{}, types.NewJID("123", server), params); err == nil {
+			t.Fatalf("unsupported chat accepted: %s", server)
+		}
+	}
+}
+
+func TestSelectedHistoryRecoveryIsExplicitAndConfirmed(t *testing.T) {
+	page := wmClientAction(context.Background(), -1, "menu", map[string]string{"chatId": "123@g.us", "msgId": "selected"})
+	found := false
+	for _, item := range page.Items {
+		if item.Operation == "local.whatsapp.history" {
+			found = true
+			if !item.Confirm || len(item.Fields) != 0 {
+				t.Fatal("history recovery must be an explicit confirmed action without a blocking form")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("selected message history recovery missing from account tools")
 	}
 }

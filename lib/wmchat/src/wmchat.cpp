@@ -786,6 +786,8 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
         {
           info.canVote = false;
           info.note = "Poll votes are not in nchat's local cache yet.";
+          if (poll.IsObject() && poll.HasMember("note") && poll["note"].IsString())
+            info.note = poll["note"].GetString();
         }
         else
         {
@@ -831,7 +833,28 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
     case GetMessageReceiptsRequestType:
       {
         auto request = std::static_pointer_cast<GetMessageReceiptsRequest>(p_RequestMessage);
-        MessageCache::MessageReceipts(m_ProfileId, request->chatId, request->msgId, {}, request->onResult);
+        const int connId = m_ConnId;
+        const auto onResult = request->onResult;
+        MessageCache::MessageReceipts(m_ProfileId, request->chatId, request->msgId, {},
+          [connId, onResult](MessageReceiptInfo info)
+          {
+            if (!onResult) return;
+            rapidjson::StringBuffer buffer;
+            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            writer.StartArray();
+            for (const auto& receipt : info.receipts)
+              writer.String(receipt.userId.data(), static_cast<rapidjson::SizeType>(receipt.userId.size()));
+            writer.EndArray();
+            char* raw = CWmCanonicalReceiptUsers(connId, const_cast<char*>(buffer.GetString()));
+            rapidjson::Document data;
+            std::map<std::string, std::string> aliases;
+            if (raw && !data.Parse(raw).HasParseError() && data.IsObject())
+              for (const auto& alias : data.GetObject())
+                if (alias.value.IsString()) aliases.emplace(alias.name.GetString(), alias.value.GetString());
+            free(raw);
+            MessageCache::MergeMessageReceiptAliases(info, aliases);
+            onResult(std::move(info));
+          });
       }
       break;
 
@@ -1084,12 +1107,16 @@ void WmNewMessagesNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_Se
       }
     }
 
+    if (p_IsRead == -1)
+      MessageCache::PrepareHistoricalMessage(instance->GetProfileId(), p_ChatId, chatMessage);
+
     std::shared_ptr<NewMessagesNotify> newMessagesNotify =
       std::make_shared<NewMessagesNotify>(instance->GetProfileId());
     newMessagesNotify->success = true;
     newMessagesNotify->chatId = std::string(p_ChatId);
     newMessagesNotify->chatMessages = std::vector<ChatMessage>({ chatMessage });
     newMessagesNotify->cached = false;
+    newMessagesNotify->historical = (p_IsRead == -1);
     newMessagesNotify->sequence = true;
 
     std::shared_ptr<DeferNotifyRequest> deferNotifyRequest = std::make_shared<DeferNotifyRequest>();

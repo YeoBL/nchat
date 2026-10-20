@@ -1816,9 +1816,10 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         {
           bool hasNewMessage = false;
           const std::string& chatId = newMessagesNotify->chatId;
+          const bool historical = newMessagesNotify->historical;
           if (IsChatForceHidden(chatId)) return;
           if (m_LeftChats[profileId].count(chatId)) return;
-          if (m_ChatInfos[profileId].count(chatId) && m_ChatInfos[profileId][chatId].isArchived) return;
+          if (!historical && m_ChatInfos[profileId].count(chatId) && m_ChatInfos[profileId][chatId].isArchived) return;
 
           std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
           std::vector<std::string>& messageVec = m_MessageVec[profileId][chatId];
@@ -1862,10 +1863,22 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
               chatMessage.fileInfo = overlay->second.fileInfo;
             }
 
-            if (!chatMessage.isOutgoing && m_Notifications.IsRead({profileId, chatId}, chatMessage.id))
-              chatMessage.isRead = true;
-            if (!chatMessage.isOutgoing && chatMessage.isRead)
-              m_Notifications.Read({profileId, chatId}, chatMessage.id, "", chatMessage.timeSent);
+            if (historical && previous != messages.end())
+            {
+              // A partial phone snapshot is not newer read/download state than
+              // the live UI, even when its cache write happened first.
+              if (!chatMessage.isDeleted) chatMessage.isRead = previous->second.isRead;
+              chatMessage.timeSent = previous->second.timeSent;
+              if (!chatMessage.isDeleted && !previous->second.fileInfo.empty())
+                chatMessage.fileInfo = previous->second.fileInfo;
+            }
+            if (!historical)
+            {
+              if (!chatMessage.isOutgoing && m_Notifications.IsRead({profileId, chatId}, chatMessage.id))
+                chatMessage.isRead = true;
+              if (!chatMessage.isOutgoing && chatMessage.isRead)
+                m_Notifications.Read({profileId, chatId}, chatMessage.id, "", chatMessage.timeSent);
+            }
             hasNewMessage = true;
             if (messages.insert({ chatMessage.id, chatMessage }).second)
             {
@@ -1876,7 +1889,7 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
               messages[chatMessage.id] = chatMessage;
             }
 
-            QueueTerminalNotification(profileId, chatId, chatMessage);
+            if (!historical) QueueTerminalNotification(profileId, chatId, chatMessage);
 
             if (newMessagesNotify->sequence)
             {
@@ -1921,7 +1934,7 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
                 }
               }
 
-              if (!newMessagesNotify->cached)
+              if (!historical && !newMessagesNotify->cached)
               {
                 RequestMessagesCurrentChat();
               }
@@ -1929,32 +1942,35 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
               UpdateHistory();
             }
 
-            SetHistoryInteraction(false);
+            if (!historical) SetHistoryInteraction(false);
           }
 
-          const std::pair<std::string, std::string>& nextChat = GetNextChat();
-          if ((profileId == nextChat.first) && (chatId == nextChat.second))
+          if (!historical)
           {
-            if (!newMessagesNotify->cached)
+            const std::pair<std::string, std::string>& nextChat = GetNextChat();
+            if ((profileId == nextChat.first) && (chatId == nextChat.second))
             {
-              RequestMessagesNextChat();
+              if (!newMessagesNotify->cached)
+              {
+                RequestMessagesNextChat();
+              }
             }
-          }
 
-          std::unordered_map<std::string, ChatInfo>& chatInfos = m_ChatInfos[profileId];
-          if (!chatInfos.count(chatId))
-          {
-            LOG_TRACE("new message in unknown chat, get chat %s", chatId.c_str());
-            std::shared_ptr<GetChatsRequest> getChatsRequest = std::make_shared<GetChatsRequest>();
-            getChatsRequest->chatIds.insert(chatId);
-            SendProtocolRequest(profileId, getChatsRequest);
-          }
+            std::unordered_map<std::string, ChatInfo>& chatInfos = m_ChatInfos[profileId];
+            if (!chatInfos.count(chatId))
+            {
+              LOG_TRACE("new message in unknown chat, get chat %s", chatId.c_str());
+              std::shared_ptr<GetChatsRequest> getChatsRequest = std::make_shared<GetChatsRequest>();
+              getChatsRequest->chatIds.insert(chatId);
+              SendProtocolRequest(profileId, getChatsRequest);
+            }
 
-          UpdateChatInfoLastMessageTime(profileId, chatId);
-          UpdateChatInfoIsUnread(profileId, chatId);
-          SortChats();
-          UpdateList();
-          HomeFetchNext(profileId, chatId, (int)chatMessages.size());
+            UpdateChatInfoLastMessageTime(profileId, chatId);
+            UpdateChatInfoIsUnread(profileId, chatId);
+            SortChats();
+            UpdateList();
+            HomeFetchNext(profileId, chatId, (int)chatMessages.size());
+          }
         }
       }
       break;
@@ -5860,6 +5876,39 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
   auto dispatch = [this, context, chat, protocol, bulkMessages, selected, makeItem](
     const std::string& operation, const Params& values, std::function<void(ClientActionResult)> done) -> bool
   {
+    if (operation == "local.whatsapp.history")
+    {
+      ClientActionResult result;
+      result.title = "Recover message details";
+      result.success = false;
+      int64_t selectedTime = 0;
+      try { selectedTime = std::stoll(Value(values, "timeSent")); } catch (...) {}
+      ChatMessage anchor;
+      // WhatsApp returns messages BEFORE an anchor, not including it. Use a
+      // real later cached message, never an invented ID or the selected ID.
+      // Ignore the cache's subsecond tie-breaker: provider timestamps are seconds.
+      if (chat.first.rfind("WhatsApp", 0) != 0 || Value(values, "chatId") != chat.second ||
+          Value(values, "msgId").empty() || selectedTime < 1000 ||
+          selectedTime > INT64_MAX - 999 ||
+          !MessageCache::FindNewerMessage(chat.first, chat.second, selectedTime / 1000 * 1000 + 999, anchor))
+      {
+        result.text = "No later cached message is available as an anchor. Load a newer message in this chat and retry. WhatsApp only supplies history before an anchor; complete receipt and voter recovery is not guaranteed.";
+        done(std::move(result));
+        return true;
+      }
+      auto request = std::make_shared<ClientActionRequest>();
+      request->operation = "history_request";
+      request->params = values;
+      request->params["targetMsgId"] = Value(values, "msgId");
+      request->params["targetTimeSent"] = Value(values, "timeSent");
+      request->params["msgId"] = anchor.id;
+      request->params["timeSent"] = std::to_string(anchor.timeSent);
+      request->params["isOutgoing"] = anchor.isOutgoing ? "1" : "0";
+      request->params["senderId"] = anchor.senderId;
+      request->onResult = std::move(done);
+      protocol->SendRequest(request);
+      return true;
+    }
     if (operation == "local.record.voice" || operation == "local.record.video")
     {
       FeatureMedia::Record(operation == "local.record.video", values, done);

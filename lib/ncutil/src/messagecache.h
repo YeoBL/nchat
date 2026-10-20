@@ -101,6 +101,7 @@ private:
     std::string chatId;
     std::string fromMsgId;
     std::vector<ChatMessage> chatMessages;
+    bool historical = false;
   };
 
   class AddChatsRequest : public Request
@@ -286,13 +287,15 @@ public:
   static void MessageReceipts(const std::string& profileId, const std::string& chatId,
     const std::string& msgId, const std::vector<MessageReceipt>& receipts,
     std::function<void(MessageReceiptInfo)> onResult = {});
+  static void MergeMessageReceiptAliases(MessageReceiptInfo& info,
+    const std::map<std::string, std::string>& aliases);
 
   static void AddFromServiceMessage(const std::string& p_ProfileId, std::shared_ptr<ServiceMessage> p_ServiceMessage);
 
   static void AddProfile(const std::string& p_ProfileId, bool p_CheckSequence, int p_DirVersion, bool p_IsSetup,
                          bool p_AllowReadOnly, bool* p_IsRemoved = nullptr);
   static void AddMessages(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_FromMsgId,
-                          const std::vector<ChatMessage>& p_ChatMessages);
+                          const std::vector<ChatMessage>& p_ChatMessages, bool historical = false);
   static void AddChats(const std::string& p_ProfileId, const std::vector<ChatInfo>& p_ChatInfos);
   static void AddContacts(const std::string& p_ProfileId, bool p_FullSync,
                           const std::vector<ContactInfo>& p_ContactInfos);
@@ -305,6 +308,10 @@ public:
                               const std::string& p_MsgId, const bool p_Sync);
   static bool GetOneMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                             const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages);
+  static bool FindNewerMessage(const std::string& profileId, const std::string& chatId,
+    int64_t timeSent, ChatMessage& result);
+  static void PrepareHistoricalMessage(const std::string& profileId, const std::string& chatId,
+    ChatMessage& message);
   static std::vector<std::string> GetUnreadMessageIds(const std::string& p_ProfileId,
                                                     const std::string& p_ChatId);
   static std::vector<std::string> GetUnreadChatIds(const std::string& p_ProfileId);

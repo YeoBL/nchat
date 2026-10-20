@@ -91,6 +91,16 @@ static void read(UiModel::Impl& model, const std::string& id, const std::string&
   model.MessageHandler(event);
 }
 
+class HistoricalTestProtocol : public ReceiptTestProtocol
+{
+public:
+  std::vector<MessageType> requests;
+  void SendRequest(std::shared_ptr<RequestMessage> request) override
+  {
+    requests.push_back(request->GetMessageType()); // Record only; never reaches a service.
+  }
+};
+
 int main(int argc, char** argv)
 {
   assert(argc == 2 || argc == 3);
@@ -488,6 +498,74 @@ int main(int argc, char** argv)
     }
     MessageCache::m_CacheEnabled = cacheEnabled;
     std::cout << "PASS: production cache deletion overlays protect evicted/stale-loaded history from live/cache replay without marking other chats read\n";
+  }
+  {
+    UiModel::Impl model(nullptr);
+    const std::string profile = "WhatsAppMd_requestedhistory";
+    incoming(model, "pending", "live unread", false, profile);
+    model.Process();
+    assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+    const auto beforeBells = bells, beforeClears = clears;
+    auto protocol = std::make_shared<HistoricalTestProtocol>();
+    model.m_Protocols[profile] = protocol;
+    auto& live = model.m_Messages[profile]["chat"].at("pending");
+    live.fileInfo = "live-downloaded-file";
+    const auto liveTime = live.timeSent;
+    auto knownRead = live; knownRead.id = "already-read"; knownRead.isRead = true;
+    knownRead.timeSent = liveTime + 1;
+    model.m_Messages[profile]["chat"][knownRead.id] = knownRead;
+    model.m_MessageVec[profile]["chat"].push_back(knownRead.id);
+    ChatInfo next; next.id = "next"; next.lastMessageTime = 9000;
+    ChatInfo current; current.id = "chat"; current.lastMessageTime = 8000; current.isUnread = true;
+    model.m_ChatInfos[profile]["chat"] = current;
+    model.m_ChatInfos[profile]["next"] = next;
+    model.m_ChatVec = {{profile, "next"}, {profile, "chat"}};
+    model.m_ChatSet[profile] = {"next", "chat"};
+    model.m_CurrentChat = {profile, "chat"}; model.m_CurrentChatIndex = 1;
+    model.m_SelectMessageActive = true; model.m_MessageOffset[profile]["chat"] = 0;
+    model.m_HistoryInteraction = true; model.m_HomeFetchAll = true;
+    const auto order = model.m_ChatVec;
+    auto event = std::make_shared<NewMessagesNotify>(profile);
+    event->success = true; event->chatId = "chat"; event->historical = true;
+    event->sequence = true; event->cached = false;
+    ChatMessage historical = live; historical.id = "old-history";
+    historical.timeSent = 10; historical.isRead = true;
+    ChatMessage staleUnread = live; staleUnread.isRead = true; staleUnread.timeSent = liveTime + 1000;
+    staleUnread.fileInfo = "older-cache-file";
+    ChatMessage staleRead = knownRead; staleRead.isRead = false;
+    event->chatMessages = {historical, staleUnread, staleRead};
+    model.MessageHandler(event); model.Process();
+    assert(model.m_Notifications.PendingChats() == 1 && badgeVisible);
+    assert(bells == beforeBells && clears == beforeClears);
+    assert(!model.m_Notifications.IsRead({profile, "chat"}, "pending"));
+    const auto& restored = model.m_Messages[profile]["chat"].at("pending");
+    assert(!restored.isRead && restored.timeSent == liveTime && restored.fileInfo == "live-downloaded-file");
+    assert(model.m_Messages[profile]["chat"].at("already-read").isRead);
+    assert(model.m_ChatVec == order && model.m_CurrentChat == std::make_pair(profile, std::string("chat")));
+    assert(model.m_CurrentChatIndex == 1 && model.m_SelectMessageActive && model.m_HistoryInteraction && model.m_HomeFetchAll);
+    assert(model.m_MessageVec[profile]["chat"].at(model.m_MessageOffset[profile]["chat"]) == "pending");
+    assert(model.m_MessageVec[profile]["chat"].back() == "old-history");
+    assert(model.m_OldestMessageId[profile]["chat"] == "old-history" && model.m_OldestMessageTime[profile]["chat"] == 10);
+    assert(model.m_ChatInfos[profile]["chat"].isUnread && !model.m_ChatInfos[profile]["chat"].isArchived);
+    assert(model.m_ChatInfos[profile]["chat"].lastMessageTime == current.lastMessageTime);
+    // Requested history in next, unknown and archived chats must not start
+    // provider lookups, pagination cascades or change current list metadata.
+    for (const std::string chat : {"next", "unknown", "archived"})
+    {
+      if (chat == "archived")
+      {
+        auto archived = current; archived.id = chat; archived.isArchived = true;
+        model.m_ChatInfos[profile][chat] = archived;
+      }
+      event->chatId = chat; event->chatMessages = {historical};
+      model.MessageHandler(event);
+      assert(model.m_Messages[profile][chat].count("old-history"));
+    }
+    assert(!model.m_ChatInfos[profile].count("unknown"));
+    assert(model.m_ChatInfos[profile]["archived"].isArchived);
+    assert(model.m_ChatVec == order && protocol->requests.empty());
+    assert(model.m_HistoryInteraction && model.m_HomeFetchAll && model.m_Notifications.PendingChats() == 1);
+    std::cout << "PASS: requested historical snapshots preserve live read/download state, unread badges, chat order/metadata and interaction while storing sorted history without provider requests\n";
   }
   if (argc == 3)
   {

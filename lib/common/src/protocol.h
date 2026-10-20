@@ -634,6 +634,7 @@ public:
   std::vector<ChatMessage> chatMessages;
   std::string fromMsgId;
   bool cached = false;
+  bool historical = false; // Requested old history; not fresh unread/chat metadata.
   bool sequence = false;
 };
 

@@ -33,6 +33,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 
@@ -116,7 +117,7 @@ var (
 
 func pollStateKey(chatID, messageID string) string { return chatID + "\x00" + messageID }
 
-// Called with mx held. Early votes stay in memory only and cannot grow without bound.
+// Called with mx held. Early votes are bounded and saved with the private poll cache.
 func queuePendingPollVote(connID int, key string, event *events.Message, vote *waE2E.PollVoteMessage) {
 	if event == nil || event.Message == nil || proto.Size(event.Message) > maxPendingPollVoteSize ||
 		(vote != nil && proto.Size(vote) > maxPendingPollVoteSize) {
@@ -128,8 +129,18 @@ func queuePendingPollVote(connID int, key string, event *events.Message, vote *w
 		if previous.key != key {
 			continue
 		}
-		if previous.event.Info.ID == event.Info.ID && previous.event.Info.Sender == event.Info.Sender {
-			return // Resent updates must not consume the bounded queue.
+		if previous.event.Info.ID == event.Info.ID &&
+			canonicalPollVoterID(clients[connID], previous.event.Info.Sender.String()) ==
+				canonicalPollVoterID(clients[connID], event.Info.Sender.String()) {
+			if previous.vote == nil && vote != nil {
+				// Phone history can supply the already-decoded version of an
+				// update whose original encryption secret never reaches us.
+				copyEvent := *event
+				copyEvent.Message = proto.Clone(event.Message).(*waE2E.Message)
+				pending[i] = pendingPollVote{key, &copyEvent, proto.Clone(vote).(*waE2E.PollVoteMessage)}
+				pendingPollVotes[connID] = pending
+			}
+			return // Never downgrade a decoded update on an encrypted resend.
 		}
 		if oldest < 0 {
 			oldest = i
@@ -172,6 +183,9 @@ func decryptPendingPollVotes(client *whatsmeow.Client, pending []pendingPollVote
 	var ready []pendingPollVote
 	for _, update := range pending {
 		if update.vote == nil {
+			if client == nil || client.Store == nil || client.Store.MsgSecrets == nil {
+				continue
+			}
 			vote, err := client.DecryptPollVote(context.Background(), update.event)
 			if err != nil {
 				continue // Missing or invalid secrets cannot produce a trustworthy vote.
@@ -193,40 +207,6 @@ func recordPollUpdate(state *PollState, client *whatsmeow.Client, update pending
 }
 
 func pollStorePath(path string) string { return path + "/polls.dat" }
-
-func loadPollStates(path string) map[string]*PollState {
-	f, err := os.Open(path)
-	if err != nil {
-		return make(map[string]*PollState)
-	}
-	defer f.Close()
-	var states map[string]*PollState
-	if gob.NewDecoder(f).Decode(&states) != nil || states == nil {
-		return make(map[string]*PollState)
-	}
-	return states
-}
-
-func savePollStates(path string, states map[string]*PollState) {
-	f, err := os.CreateTemp(filepath.Dir(path), "polls-*.tmp")
-	if err != nil {
-		LOG_WARNING(fmt.Sprintf("save polls failed: %v", err))
-		return
-	}
-	defer os.Remove(f.Name())
-	if err := gob.NewEncoder(f).Encode(states); err != nil {
-		LOG_WARNING(fmt.Sprintf("encode polls failed: %v", err))
-		f.Close()
-		return
-	}
-	if err := f.Close(); err != nil {
-		LOG_WARNING(fmt.Sprintf("close polls failed: %v", err))
-		return
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		LOG_WARNING(fmt.Sprintf("replace polls failed: %v", err))
-	}
-}
 
 // keep in sync with enum AttachmentSendType in appconfig.h
 var AttachmentSendAsDocument = 0
@@ -297,10 +277,15 @@ func AddConn(conn *whatsmeow.Client, path string, sendType int) int {
 	states[connId] = None
 	timeReads[connId] = make(map[string]time.Time)
 	expirations[connId] = make(map[string]uint32)
-	handlers[connId] = &WmEventHandler{connId}
+	handlers[connId] = &WmEventHandler{connId: connId}
 	sendTypes[connId] = sendType
 	namesSynced[connId] = false
-	pollStates[connId] = loadPollStates(pollStorePath(path))
+	var loadErr error
+	pollStates[connId], pendingPollVotes[connId], loadErr = loadPollCache(pollStorePath(path))
+	if loadErr != nil {
+		pollStoreBlocked[connId] = true
+		LOG_WARNING(fmt.Sprintf("load poll cache failed: %v", loadErr))
+	}
 	mx.Unlock()
 	return connId
 }
@@ -310,7 +295,7 @@ func RemoveConn(connId int) {
 	mx.Lock()
 	SaveMap(GetContactsStorePath(paths[connId]), contacts[connId])
 	SaveMap(GetSendersStorePath(paths[connId]), senders[connId])
-	savePollStates(pollStorePath(paths[connId]), pollStates[connId])
+	savePollCache(connId)
 	delete(clients, connId)
 	delete(paths, connId)
 	delete(contacts, connId)
@@ -323,6 +308,8 @@ func RemoveConn(connId int) {
 	delete(namesSynced, connId)
 	delete(pollStates, connId)
 	delete(pendingPollVotes, connId)
+	delete(pollStoreBlocked, connId)
+	delete(pollStoreWriteErrors, connId)
 	mx.Unlock()
 }
 
@@ -904,6 +891,8 @@ func (s *ncSignalLogger) Configure(ss string) {
 // event handling
 type WmEventHandler struct {
 	connId int
+	importedHistory bool
+	notifyMessage messageNotifyFunc // Optional per-handler sink for offline bridge fixtures.
 }
 
 func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
@@ -953,6 +942,10 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 			message = markDeliveredViewOnce(message)
 		}
 		handler.HandleMessage(evt.Info, message, false /*isSyncRead*/)
+		if evt.SourceWebMsg != nil {
+			handler.RecoverHistoricalReceipts(evt.Info.Chat, evt.SourceWebMsg)
+			handler.RecoverHistoricalPollVotes(evt.Info, evt.SourceWebMsg)
+		}
 
 	case *events.UndecryptableMessage:
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
@@ -1054,6 +1047,7 @@ func (handler *WmEventHandler) HandleConnected() {
 		LOG_WARNING("client is nil")
 		return
 	}
+	handler.ReplayCachedPolls()
 
 	if len(client.Store.PushName) == 0 {
 		return
@@ -1071,7 +1065,7 @@ func (handler *WmEventHandler) HandleReceipt(receipt *events.Receipt) {
 			} else {
 				read = receipt.Timestamp.Unix()
 			}
-			userID := GetChatId(client, &receipt.Sender, nil)
+			userID := canonicalReceiptUserID(client, receipt.Sender.String())
 			for _, id := range receipt.MessageIDs {
 				CWmMessageReceipt(handler.connId, GetChatId(client, &receipt.Chat, nil), id, userID, delivered, read)
 			}
@@ -1178,11 +1172,19 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 		return
 	}
 	selfJid := *client.Store.ID
+	onDemand := historySync.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND
+	if onDemand {
+		// A private handler copy carries import context through each renderer;
+		// concurrent live messages keep their own normal notification semantics.
+		importer := *handler
+		importer.importedHistory = true
+		handler = &importer
+	}
 
 	LOG_TRACE(fmt.Sprintf("HandleHistorySync SyncType %s Progress %d",
 		historySync.Data.GetSyncType().String(), historySync.Data.GetProgress()))
 
-	if historySync.Data.GetProgress() < 98 {
+	if !onDemand && historySync.Data.GetProgress() < 98 {
 		LOG_TRACE("Set Syncing")
 		CWmSetStatus(handler.connId, FlagSyncing)
 	}
@@ -1196,22 +1198,13 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 		isUnread := 0
 		lastMessageTime := 0
 
-		isSyncRead := (conversation.GetUnreadCount() == 0)
+		isSyncRead := !onDemand && conversation.GetUnreadCount() == 0
 		hasMessages := false
 		syncMessages := conversation.GetMessages()
 		for _, syncMessage := range syncMessages {
 			webMessageInfo := syncMessage.Message
 			messageInfo := ParseWebMessageInfo(selfJid, chatJid, webMessageInfo)
-			if webMessageInfo.GetKey().GetFromMe() {
-				for _, receipt := range webMessageInfo.GetUserReceipt() {
-					user, err := types.ParseJID(receipt.GetUserJID())
-					if err != nil || user.IsEmpty() || IsSelfUser(client, StrFromJid(user)) {
-						continue
-					}
-					CWmMessageReceipt(handler.connId, GetChatId(client, &chatJid, nil), webMessageInfo.GetKey().GetID(),
-						GetChatId(client, &user, nil), receipt.GetReceiptTimestamp(), receipt.GetReadTimestamp())
-				}
-			}
+			handler.RecoverHistoricalReceipts(chatJid, webMessageInfo)
 			message := webMessageInfo.GetMessage()
 
 			if (messageInfo == nil) || (message == nil) {
@@ -1229,7 +1222,7 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 		}
 
 		chatId := GetChatId(client, &chatJid, nil)
-		if hasMessages {
+		if hasMessages && !onDemand {
 			isMuted := false
 			isPinned := false
 			isArchived := conversation.GetArchived()
@@ -1265,7 +1258,7 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 
 	}
 
-	if historySync.Data.GetProgress() == 100 {
+	if !onDemand && historySync.Data.GetProgress() == 100 {
 		LOG_TRACE("Clear Syncing")
 		CWmClearStatus(handler.connId, FlagSyncing)
 	}
@@ -1896,9 +1889,12 @@ func (handler *WmEventHandler) HandlePollMessage(messageInfo types.MessageInfo, 
 		}
 	}
 	mx.Lock()
+	previousPoll := false
 	if previous := pollStates[handler.connId][pollStateKey(chatID, messageInfo.ID)]; previous != nil {
+		previousPoll = true
 		state.Votes = previous.Votes
 		state.VoteTimes = previous.VoteTimes
+		state.IsRead = previous.IsRead
 	}
 	if state.Votes == nil {
 		state.Votes = make(map[string][]string)
@@ -1906,23 +1902,20 @@ func (handler *WmEventHandler) HandlePollMessage(messageInfo types.MessageInfo, 
 	normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(client, raw) })
 	stateKey := pollStateKey(chatID, messageInfo.ID)
 	pollStates[handler.connId][stateKey] = state
-	pending := takePendingPollVotes(handler.connId, stateKey)
+	savePollCache(handler.connId)
 	mx.Unlock()
-	// The original poll's message secret is now available. Decrypt outside mx,
-	// then merge by timestamp so an older queued vote cannot undo a withdrawal.
-	pending = decryptPendingPollVotes(client, pending)
+	replayPendingPollVotes(handler.connId, client, stateKey)
 	mx.Lock()
 	state = pollStates[handler.connId][stateKey]
 	if state == nil {
 		mx.Unlock()
 		return
 	}
-	for _, update := range pending {
-		recordPollUpdate(state, client, update)
-	}
-	savePollStates(pollStorePath(paths[handler.connId]), pollStates[handler.connId])
 	text := formatPollState(state)
 	mx.Unlock()
+	if previousPoll {
+		messageInfo.Edit = types.EditAttributeMessageEdit // Keep the original cached read state during replay.
+	}
 	handler.HandleTextMessage(messageInfo, &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 		Text: &text, ContextInfo: poll.GetContextInfo(),
 	}}, isSyncRead)
@@ -1943,6 +1936,7 @@ func (handler *WmEventHandler) HandlePollUpdate(messageInfo types.MessageInfo, m
 	mx.Lock()
 	if pollStates[handler.connId][stateKey] == nil {
 		queuePendingPollVote(handler.connId, stateKey, event, nil)
+		savePollCache(handler.connId)
 		mx.Unlock()
 		return
 	}
@@ -1952,11 +1946,13 @@ func (handler *WmEventHandler) HandlePollUpdate(messageInfo types.MessageInfo, m
 	state := pollStates[handler.connId][stateKey]
 	if state == nil {
 		queuePendingPollVote(handler.connId, stateKey, event, vote)
+		savePollCache(handler.connId)
 		mx.Unlock()
 		return
 	}
 	if err != nil {
 		queuePendingPollVote(handler.connId, stateKey, event, nil)
+		savePollCache(handler.connId)
 		mx.Unlock()
 		LOG_WARNING(fmt.Sprintf("decrypt poll vote failed: %v", err))
 		return
@@ -1967,9 +1963,12 @@ func (handler *WmEventHandler) HandlePollUpdate(messageInfo types.MessageInfo, m
 	timeSent := 0
 	isRead := false
 	if state != nil {
-		normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(client, raw) })
+		changed := normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(client, raw) })
 		if recordPollUpdate(state, client, pendingPollVote{stateKey, event, vote}) {
-			savePollStates(pollStorePath(paths[handler.connId]), pollStates[handler.connId])
+			changed = true
+		}
+		if changed {
+			savePollCache(handler.connId)
 			text = formatPollState(state)
 			senderID, fromMe, timeSent, isRead = state.SenderID, state.FromMe, state.TimeSent, state.IsRead
 		}
@@ -1978,7 +1977,7 @@ func (handler *WmEventHandler) HandlePollUpdate(messageInfo types.MessageInfo, m
 	if text == "" {
 		return
 	}
-	CWmNewMessagesNotify(handler.connId, chatID, key.GetID(), senderID, text,
+	handler.NotifyNewMessage(handler.connId, chatID, key.GetID(), senderID, text,
 		BoolToInt(fromMe), "", "", "", FileStatusNone, timeSent, BoolToInt(isRead), BoolToInt(true))
 }
 
@@ -2133,7 +2132,7 @@ func (handler *WmEventHandler) HandleTextMessage(messageInfo types.MessageInfo, 
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: %s", chatId, text))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2189,7 +2188,7 @@ func (handler *WmEventHandler) HandleImageMessage(messageInfo types.MessageInfo,
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: image", chatId))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2255,7 +2254,7 @@ func (handler *WmEventHandler) HandleVideoMessage(messageInfo types.MessageInfo,
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: video", chatId))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2310,7 +2309,7 @@ func (handler *WmEventHandler) HandleAudioMessage(messageInfo types.MessageInfo,
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: audio", chatId))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2369,7 +2368,7 @@ func (handler *WmEventHandler) HandleDocumentMessage(messageInfo types.MessageIn
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: document", chatId))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2421,7 +2420,7 @@ func (handler *WmEventHandler) HandleStickerMessage(messageInfo types.MessageInf
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: sticker", chatId))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2518,7 +2517,7 @@ func (handler *WmEventHandler) HandleTemplateMessage(messageInfo types.MessageIn
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: template", chatId))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -2795,7 +2794,7 @@ func (handler *WmEventHandler) HandleUnsupportedMessage(messageInfo types.Messag
 	handler.ProcessMessageInfo(messageInfo)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: %s", chatId, text))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 
@@ -4124,7 +4123,7 @@ func WmVotePoll(connId int, chatID, msgID, optionIndexes string) int {
 		self := StrFromJid(*client.Store.ID)
 		hashes := whatsmeow.HashPollOptions(options)
 		setRecordedPollVote(current, self, hashes, time.Now().UnixMilli())
-		savePollStates(pollStorePath(paths[connId]), pollStates[connId])
+		savePollCache(connId)
 		updatedText = formatPollState(current)
 		updatedSender, updatedTime = current.SenderID, current.TimeSent
 		updatedFromMe, updatedIsRead = current.FromMe, current.IsRead
@@ -4138,13 +4137,20 @@ func WmVotePoll(connId int, chatID, msgID, optionIndexes string) int {
 }
 
 func WmGetPollVotes(connId int, chatID, msgID string) string {
+	client := GetClient(connId)
+	replayPendingPollVotes(connId, client, pollStateKey(chatID, msgID))
 	mx.Lock()
 	defer mx.Unlock()
 	state := pollStates[connId][pollStateKey(chatID, msgID)]
 	if state == nil {
+		if pollStoreBlocked[connId] {
+			return `{"status":"missing","note":"Saved poll data could not be loaded. The original private poll cache was preserved; repair or restore it before restarting."}`
+		}
 		return `{"status":"missing"}`
 	}
-	normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(clients[connId], raw) })
+	if normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(clients[connId], raw) }) {
+		savePollCache(connId)
+	}
 	hashes := make(map[string]int, len(state.Options))
 	for i, option := range state.Options {
 		hashes[fmt.Sprintf("%x", whatsmeow.HashPollOptions([]string{option})[0])] = i
@@ -4172,6 +4178,7 @@ func WmGetPollVotes(connId int, chatID, msgID string) string {
 	}
 	counts := make([]int, len(state.Options))
 	total := 0
+	unmatched := 0
 	voters := make([]string, 0, len(state.Votes))
 	for voter := range state.Votes {
 		voters = append(voters, voter)
@@ -4179,15 +4186,14 @@ func WmGetPollVotes(connId int, chatID, msgID string) string {
 	sort.Strings(voters)
 	for _, voter := range voters {
 		choices := state.Votes[voter]
-		if len(choices) > 0 {
-			total++
-		}
+		recognized := false
 		displayID := voter
 		if client := clients[connId]; IsSelfUser(client, voter) {
 			displayID = "You"
 		}
 		for _, choice := range choices {
 			if option, ok := hashes[choice]; ok {
+				recognized = true
 				counts[option]++
 				if displayID == "You" {
 					output.Selected = append(output.Selected, option)
@@ -4197,11 +4203,30 @@ func WmGetPollVotes(connId int, chatID, msgID string) string {
 				}
 			}
 		}
+		if recognized {
+			total++
+		} else if len(choices) > 0 {
+			unmatched++
+		}
 	}
 	for i, count := range counts {
 		output.Options[i] += fmt.Sprintf(" (%d recorded votes)", count)
 	}
 	output.Summary = fmt.Sprintf("%d recorded voters; history may be incomplete", total)
+	if unmatched > 0 {
+		output.Summary += fmt.Sprintf("; %d supplied voters have unavailable poll choices", unmatched)
+	}
+	if pollStoreBlocked[connId] {
+		output.Summary += "; old poll cache could not be read and was preserved"
+	} else if pollStoreWriteErrors[connId] {
+		output.Summary += "; cache save failed, new data may not survive restart"
+	}
+	for _, update := range pendingPollVotes[connId] {
+		if update.key == pollStateKey(chatID, msgID) {
+			output.Summary += "; some supplied votes await their original poll/secret"
+			break
+		}
+	}
 	data, err := json.Marshal(output)
 	if err != nil {
 		return `{"status":"missing"}`

@@ -112,7 +112,8 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 				action("Message details and buttons", "Locations, contact cards and business replies", "message_details", nil, nil, false),
 				action("Star message", "Save in WhatsApp starred messages", "star_message", map[string]string{"starred": "true"}, nil, true),
 				action("Unstar message", "Remove from starred messages", "star_message", map[string]string{"starred": "false"}, nil, true),
-				action("Request earlier history", "Ask your phone for up to 50 earlier messages and supplied receipts/votes", "history_request", nil, nil, true))
+				action("Request earlier history", "Ask your phone for up to 50 messages before this message", "history_request", nil, nil, true),
+				action("Recover selected message details", "Ask your phone for history including this message, if available; receipts/voters are not guaranteed", "local.whatsapp.history", nil, nil, true))
 		}
 		return r
 	}
@@ -185,6 +186,9 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		if _, err = cli.SendPeerMessage(ctx, request); err != nil {
 			return actionError("Earlier history", err)
 		}
+		if p["targetMsgId"] != "" {
+			return actionOK("Message history requested", "Your phone was asked for up to 50 messages before a later cached message, to include the selected message if available. This is a request acknowledgement, not confirmation of recovery. Supplied receipts and poll votes will be merged automatically; reopen Message Info or the poll to check. No read receipt was sent.")
+		}
 		return actionOK("History requested", "Your phone was asked for up to 50 messages before the selected message. Supplied receipts and poll votes are merged automatically. WhatsApp does not provide an API to retrieve a guaranteed complete historical receipt or voter list.")
 	case "group_info", "group_invite", "group_name", "group_description", "group_announce", "group_locked", "group_member", "group_leave":
 		return wmGroupAction(ctx, connID, cli, op, p, chat)
@@ -193,9 +197,18 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 }
 
 func buildEarlierHistoryRequest(cli *whatsmeow.Client, chat types.JID, p map[string]string) (*waE2E.Message, error) {
+	if chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer && chat.Server != types.GroupServer {
+		return nil, fmt.Errorf("phone history is available only for regular WhatsApp chats and groups")
+	}
 	stamp, err := strconv.ParseInt(p["timeSent"], 10, 64)
-	if err != nil || stamp < 1000 || p["msgId"] == "" {
+	if err != nil || stamp < 1000 || p["msgId"] == "" || strings.HasPrefix(p["msgId"], "+") || p["msgId"] == strconv.FormatInt(stamp/1000, 10) {
 		return nil, fmt.Errorf("select a dated message as the history anchor")
+	}
+	if p["targetMsgId"] != "" {
+		targetStamp, targetErr := strconv.ParseInt(p["targetTimeSent"], 10, 64)
+		if targetErr != nil || targetStamp < 1000 || p["targetMsgId"] == p["msgId"] || stamp/1000 <= targetStamp/1000 {
+			return nil, fmt.Errorf("recovering this message requires a different cached anchor with a later timestamp")
+		}
 	}
 	// ChatMessage.timeSent uses milliseconds; the phone history API requires seconds.
 	info := types.MessageInfo{MessageSource: types.MessageSource{Chat: chat,

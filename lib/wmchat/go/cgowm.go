@@ -44,6 +44,11 @@ import (
 	"runtime"
 )
 
+//export CWmCanonicalReceiptUsers
+func CWmCanonicalReceiptUsers(connID int, users *C.char) *C.char {
+	return C.CString(WmCanonicalReceiptUsers(connID, C.GoString(users)))
+}
+
 //export CWmInit
 func CWmInit(path *C.char, proxy *C.char, sendType int) int {
 	return WmInit(C.GoString(path), C.GoString(proxy), sendType)

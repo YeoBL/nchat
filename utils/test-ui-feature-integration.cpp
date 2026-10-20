@@ -138,6 +138,26 @@ struct EditingProtocol : FakeProtocol
   std::vector<std::shared_ptr<EditMessageRequest>> edits;
 };
 
+struct HistoryProtocol : FakeProtocol
+{
+  const std::string profile = "WhatsAppMd_offline_history_test";
+  std::vector<std::shared_ptr<ClientActionRequest>> historyRequests;
+  std::string GetProfileId() const override { return profile; }
+  void SendRequest(std::shared_ptr<RequestMessage> request) override
+  {
+    assert(request->GetMessageType() != SendMessageRequestType &&
+      request->GetMessageType() != MarkMessageReadRequestType);
+    if (request->GetMessageType() != ClientActionRequestType) return;
+    auto action = std::static_pointer_cast<ClientActionRequest>(request);
+    assert(action->operation == "history_request");
+    historyRequests.push_back(action);
+    ClientActionResult result;
+    result.title = "Synthetic history requested";
+    result.text = "Offline request acknowledgement only.";
+    action->onResult(result);
+  }
+};
+
 void Populate(UiModel& model, const std::shared_ptr<FakeProtocol>& protocol)
 {
   model.AddProtocol(protocol);
@@ -401,6 +421,44 @@ int main()
     model.Cleanup();
   }
   protocol->AssertNoMutations();
+
+  // Selected-message recovery must anchor after the target's provider second,
+  // not on the target itself or a subsecond cache tie-breaker. This exercises
+  // the actual UI dispatch and cache without contacting a phone or marking read.
+  {
+    auto history = std::make_shared<HistoryProtocol>();
+    MessageCache::AddProfile(history->profile, false, 1, false, false);
+    ChatMessage target;
+    target.id = "selected"; target.timeSent = 10099;
+    ChatMessage sameSecond = target;
+    sameSecond.id = "same-second"; sameSecond.timeSent = 10999;
+    ChatMessage later = target;
+    later.id = "later-anchor"; later.timeSent = 12099; later.isOutgoing = true;
+    later.senderId = "self";
+    ChatMessage localGroupEvent = target;
+    localGroupEvent.id = "11"; localGroupEvent.timeSent = 11050;
+    MessageCache::AddMessages(history->profile, "history-chat", "", {target, sameSecond, localGroupEvent, later});
+    std::vector<ChatMessage> stored;
+    for (int i = 0; i < 100 && !MessageCache::GetOneMessage(history->profile, "history-chat", later.id, stored); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    assert(!stored.empty());
+    UiModel model;
+    model.AddProtocol(history); model.Init();
+    const std::map<std::string, std::string> values = {{"profile", history->profile},
+      {"chatId", "history-chat"}, {"msgId", target.id}, {"timeSent", std::to_string(target.timeSent)}};
+    Key("Synthetic history requested", "cancel");
+    model.OnKeyClientActions("local.whatsapp.history", values);
+    assert(input.empty() && history->historyRequests.size() == 1);
+    const auto& sent = history->historyRequests.front()->params;
+    assert(sent.at("msgId") == later.id && sent.at("timeSent") == "12099" && sent.at("isOutgoing") == "1");
+    assert(sent.at("targetMsgId") == target.id && sent.at("targetTimeSent") == "10099");
+    auto noAnchor = values;
+    noAnchor["msgId"] = later.id; noAnchor["timeSent"] = "12099";
+    Key("No later cached message", "cancel");
+    model.OnKeyClientActions("local.whatsapp.history", noAnchor);
+    assert(input.empty() && history->historyRequests.size() == 1);
+    model.Cleanup();
+  }
 
   // Editing a sent message is a temporary composer mode. Cancel, save, cloud
   // draft loading, navigation and disappearing history must never turn its

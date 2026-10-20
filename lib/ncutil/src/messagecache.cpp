@@ -164,7 +164,8 @@ void MessageCache::AddFromServiceMessage(const std::string& p_ProfileId,
             newMessagesNotify->sequence)
         {
           MessageCache::AddMessages(p_ProfileId, newMessagesNotify->chatId,
-                                    newMessagesNotify->fromMsgId, newMessagesNotify->chatMessages);
+                                    newMessagesNotify->fromMsgId, newMessagesNotify->chatMessages,
+                                    newMessagesNotify->historical);
         }
       }
       break;
@@ -603,7 +604,7 @@ void MessageCache::InitSearch(const std::string& p_ProfileId)
 
 void MessageCache::AddMessages(const std::string& p_ProfileId, const std::string& p_ChatId,
                                const std::string& p_FromMsgId,
-                               const std::vector<ChatMessage>& p_ChatMessages)
+                               const std::vector<ChatMessage>& p_ChatMessages, bool historical)
 {
   if (!m_CacheEnabled) return;
 
@@ -612,6 +613,7 @@ void MessageCache::AddMessages(const std::string& p_ProfileId, const std::string
   addMessagesRequest->chatId = p_ChatId;
   addMessagesRequest->fromMsgId = p_FromMsgId;
   addMessagesRequest->chatMessages = p_ChatMessages;
+  addMessagesRequest->historical = historical;
   EnqueueRequest(addMessagesRequest);
 }
 
@@ -1031,6 +1033,63 @@ bool MessageCache::GetOneMessage(const std::string& p_ProfileId, const std::stri
   return !p_ChatMessages.empty();
 }
 
+bool MessageCache::FindNewerMessage(const std::string& profileId, const std::string& chatId,
+  int64_t timeSent, ChatMessage& result)
+{
+  result = {};
+  if (!m_CacheEnabled || timeSent <= 0) return false;
+  std::unique_lock<std::mutex> lock(m_DbMutex);
+  auto db = m_Dbs.find(profileId);
+  if (db == m_Dbs.end() || !db->second) return false;
+  try
+  {
+    std::string id;
+    // WhatsApp group-info rows use the timestamp itself as a local synthetic
+    // ID. Such rows cannot anchor a phone history request. Telegram numeric IDs
+    // and real protocol IDs (including other numeric values) stay eligible.
+    const bool otherProtocol = profileId.rfind("WhatsApp", 0) != 0;
+    *db->second << "SELECT id FROM messages WHERE chatId=? AND timeSent>? AND id<>'' AND id NOT LIKE '+%' "
+      "AND (? OR id<>CAST(timeSent/1000 AS TEXT)) ORDER BY timeSent ASC,id ASC LIMIT 1;" <<
+      chatId << timeSent << int(otherProtocol) >>
+      [&](std::string value) { id = value; };
+    if (id.empty()) return false;
+    std::vector<ChatMessage> messages;
+    PerformFetchOneMessage(profileId, chatId, id, messages);
+    if (messages.empty()) return false;
+    result = std::move(messages.front());
+    return true;
+  }
+  catch (const sqlite::sqlite_exception& ex)
+  {
+    HANDLE_SQLITE_EXCEPTION(ex);
+  }
+  return false;
+}
+
+static void PreserveHistoricalState(ChatMessage& message, const std::vector<ChatMessage>& previous)
+{
+  if (!previous.empty())
+  {
+    message.isRead = previous.front().isRead;
+    message.timeSent = previous.front().timeSent;
+    if (!previous.front().fileInfo.empty()) message.fileInfo = previous.front().fileInfo;
+  }
+  else if (!message.isOutgoing)
+  {
+    // Requested old history has no authoritative incoming unread state. It is
+    // locally non-notifying, not a server read confirmation; no receipt is sent.
+    message.isRead = true;
+  }
+}
+
+void MessageCache::PrepareHistoricalMessage(const std::string& profileId, const std::string& chatId,
+  ChatMessage& message)
+{
+  std::vector<ChatMessage> previous;
+  GetOneMessage(profileId, chatId, message.id, previous);
+  PreserveHistoricalState(message, previous);
+}
+
 void MessageCache::FindMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                                const std::string& p_FromMsgId, const std::string& p_LastMsgId,
                                const std::string& p_FindText, const std::string& p_FindMsgId,
@@ -1422,6 +1481,33 @@ void MessageCache::MessageReceipts(const std::string& profileId, const std::stri
   EnqueueRequest(request);
 }
 
+void MessageCache::MergeMessageReceiptAliases(MessageReceiptInfo& info,
+  const std::map<std::string, std::string>& aliases)
+{
+  std::map<std::string, MessageReceipt> merged;
+  auto earliestKnown = [](int64_t first, int64_t second)
+  {
+    if (first > 0 && second > 0) return std::min(first, second);
+    return std::max(first, second);
+  };
+  for (const auto& receipt : info.receipts)
+  {
+    const auto alias = aliases.find(receipt.userId);
+    const std::string& id = alias != aliases.end() && !alias->second.empty()
+      ? alias->second : receipt.userId;
+    if (id.empty() || (receipt.deliveredTime <= 0 && receipt.readTime <= 0 && receipt.readTime != -1)) continue;
+    auto& target = merged[id];
+    target.userId = id;
+    target.deliveredTime = earliestKnown(target.deliveredTime, receipt.deliveredTime);
+    // -1 means a known reader without a supplied read date. Keep that confirmation
+    // unless a real positive timestamp is available; never invent a delivery date.
+    target.readTime = target.readTime == 0 ? receipt.readTime :
+      (receipt.readTime == 0 ? target.readTime : earliestKnown(target.readTime, receipt.readTime));
+  }
+  info.receipts.clear();
+  for (auto& receipt : merged) info.receipts.push_back(std::move(receipt.second));
+}
+
 void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 {
   switch (p_Request->GetRequestType())
@@ -1539,8 +1625,16 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
           }
         }
 
-        for (const auto& msg : addMessagesRequest->chatMessages)
+        for (auto msg : addMessagesRequest->chatMessages)
         {
+          if (addMessagesRequest->historical)
+          {
+            // Re-read at the actual write while holding m_DbMutex. A receipt or
+            // download can finish between preparing the notification and here.
+            std::vector<ChatMessage> previous;
+            PerformFetchOneMessage(profileId, chatId, msg.id, previous);
+            PreserveHistoricalState(msg, previous);
+          }
           // Telegram omits permanently deleted messages from history. Keep a
           // cached deletion marker if stale history ever supplies that ID.
           int wasDeleted = 0;

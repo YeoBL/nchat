@@ -190,6 +190,104 @@ int main() try
   assert(count == 1);
   std::cout << "production receipts: duplicate/out-of-order merge, recipient isolation, unknown dates, SQL binding and unchanged read flags passed\n";
   {
+    // Old rows predate the phone/LID mapping; merge only verified aliases at
+    // read time so an unavailable mapping cannot silently erase history.
+    MessageReceiptInfo info{{{"123@lid", 0, 200}, {"447700900123@s.whatsapp.net", 150, 0},
+      {"447700900123:2@s.whatsapp.net", 160, 250}, {"reader@lid", 0, -1},
+      {"other@s.whatsapp.net", 0, 300}, {"empty", 0, 0}}, "Keep the uncertainty note."};
+    MessageCache::MergeMessageReceiptAliases(info,
+      {{"123@lid", "447700900123@s.whatsapp.net"},
+       {"447700900123:2@s.whatsapp.net", "447700900123@s.whatsapp.net"}});
+    assert(info.receipts.size() == 3 && info.note == "Keep the uncertainty note.");
+    assert(info.receipts[0].userId == "447700900123@s.whatsapp.net" &&
+      info.receipts[0].deliveredTime == 150 && info.receipts[0].readTime == 200);
+    assert(info.receipts[1].userId == "other@s.whatsapp.net" &&
+      info.receipts[1].deliveredTime == 0 && info.receipts[1].readTime == 300);
+    assert(info.receipts[2].userId == "reader@lid" && info.receipts[2].readTime == -1);
+    MessageCache::MergeMessageReceiptAliases(info, {});
+    assert(info.receipts.size() == 3); // Idempotent; no fabricated recipients or dates.
+    writer << "SELECT count(*) FROM messages WHERE chatId='chat' AND isRead=0;" >> count;
+    assert(count == 1);
+  }
+  {
+    writer << "INSERT INTO messages(chatId,id,timeSent,isOutgoing,isRead) VALUES"
+      "('anchors','old',1000,0,1),('anchors','same-time',2000,0,0),"
+      "('anchors','next-b',3000,0,1),('anchors','next-a',3000,1,1),('other','wrong-chat',2500,0,0),"
+      "('anchors','',2100,0,0),('anchors','+local',2200,0,0);";
+    ChatMessage anchor;
+    assert(MessageCache::FindNewerMessage("test", "anchors", 2000, anchor));
+    assert(anchor.id == "next-a" && anchor.timeSent == 3000 && anchor.isOutgoing);
+    assert(!MessageCache::FindNewerMessage("test", "anchors", 3000, anchor));
+    assert(anchor.id.empty());
+    assert(!MessageCache::FindNewerMessage("test", "anchors' OR 1=1 --", 2000, anchor));
+    assert(!MessageCache::FindNewerMessage("missing", "anchors", 2000, anchor));
+    assert(!MessageCache::FindNewerMessage("test", "anchors", 0, anchor));
+    for (const auto& item : {std::make_pair("old", true), std::make_pair("same-time", false)})
+    {
+      ChatMessage historical;
+      historical.id = item.first;
+      historical.timeSent = 99999;
+      historical.isRead = !item.second; // Historical inference must never flip either known state.
+      MessageCache::PrepareHistoricalMessage("test", "anchors", historical);
+      assert(historical.isRead == item.second && historical.timeSent != 99999);
+    }
+    ChatMessage missing;
+    missing.id = "not-yet-cached";
+    missing.isOutgoing = false;
+    missing.isRead = false;
+    missing.timeSent = 100;
+    MessageCache::PrepareHistoricalMessage("test", "anchors", missing);
+    assert(missing.isRead && missing.timeSent == 100); // Local non-notifying history only.
+    ChatMessage outgoing;
+    outgoing.id = "outgoing-not-cached";
+    outgoing.isOutgoing = true;
+    outgoing.isRead = false;
+    outgoing.timeSent = 100;
+    MessageCache::PrepareHistoricalMessage("test", "anchors", outgoing);
+    assert(!outgoing.isRead); // No invented checkmark/read confirmation for our old outgoing message.
+    writer << "SELECT count(*) FROM messages WHERE chatId='anchors' AND id='same-time' AND isRead=0;" >> count;
+    assert(count == 1); // Preparation itself is read-only and cannot send provider requests.
+    ChatMessage stale;
+    stale.id = "same-time";
+    stale.isOutgoing = false;
+    stale.timeSent = 99999;
+    stale.fileInfo = "obsolete-file";
+    MessageCache::PrepareHistoricalMessage("test", "anchors", stale);
+    assert(!stale.isRead && stale.timeSent == 2000);
+    writer << "UPDATE messages SET isRead=1,fileInfo='fresh-file' WHERE chatId='anchors' AND id='same-time';";
+    auto history = std::make_shared<MessageCache::AddMessagesRequest>();
+    history->profileId = "test"; history->chatId = "anchors";
+    history->historical = true; history->chatMessages = {stale};
+    MessageCache::PerformRequest(history);
+    std::vector<ChatMessage> stored;
+    assert(MessageCache::GetOneMessage("test", "anchors", "same-time", stored));
+    assert(stored.front().isRead && stored.front().timeSent == 2000 && stored.front().fileInfo == "fresh-file");
+    history->chatMessages = stored;
+    writer << "UPDATE messages SET isRead=0,fileInfo='newer-file' WHERE chatId='anchors' AND id='same-time';";
+    MessageCache::PerformRequest(history);
+    stored.clear();
+    assert(MessageCache::GetOneMessage("test", "anchors", "same-time", stored));
+    assert(!stored.front().isRead && stored.front().timeSent == 2000 && stored.front().fileInfo == "newer-file");
+    history->chatMessages = {missing, outgoing};
+    MessageCache::PerformRequest(history);
+    stored.clear();
+    assert(MessageCache::GetOneMessage("test", "anchors", missing.id, stored) && stored.front().isRead);
+    stored.clear();
+    assert(MessageCache::GetOneMessage("test", "anchors", outgoing.id, stored) && !stored.front().isRead);
+    ChatMessage recoveredFile;
+    recoveredFile.id = "old"; recoveredFile.isOutgoing = false;
+    recoveredFile.fileInfo = "recovered-attachment-metadata";
+    MessageCache::PrepareHistoricalMessage("test", "anchors", recoveredFile);
+    assert(recoveredFile.fileInfo == "recovered-attachment-metadata");
+    history->chatMessages = {recoveredFile};
+    MessageCache::PerformRequest(history);
+    stored.clear();
+    assert(MessageCache::GetOneMessage("test", "anchors", recoveredFile.id, stored));
+    assert(stored.front().fileInfo == recoveredFile.fileInfo && stored.front().isRead);
+    writer << "DELETE FROM messages WHERE chatId='anchors' OR id='wrong-chat';";
+  }
+  std::cout << "production receipt recovery: verified alias deduplication and exact newer history anchor passed\n";
+  {
     sqlite::database reader(std::string(directory) + "/history/test/db.sqlite");
     reader << "BEGIN;";
     reader << "SELECT count(*) FROM messages;" >> count;

@@ -62,7 +62,7 @@ func TestPendingPollVotesReplayAndWithdrawal(t *testing.T) {
 	if _, err := client.DecryptPollVote(context.Background(), event); err == nil {
 		t.Fatal("early vote unexpectedly decrypted without original poll secret")
 	}
-	handler := &WmEventHandler{connID}
+	handler := &WmEventHandler{connId: connID}
 	handler.HandlePollUpdate(event.Info, event.Message)
 	// A decrypted withdrawal can also precede the UI's poll state.
 	queuePendingPollVote(connID, key, pendingTestEvent("withdraw", 2000), &waE2E.PollVoteMessage{})
