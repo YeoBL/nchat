@@ -3543,6 +3543,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     auto& localFile = animationFile->local_;
     auto& localPath = localFile->path_;
     FileInfo fileInfo;
+    fileInfo.fileType = animation->mime_type_;
     std::string id = animationFile->remote_->id_;
     fileInfo.fileId = id;
     if (!localPath.empty())
@@ -3569,6 +3570,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     if (p_Text.empty()) p_Text = fileName.empty() ? "[Audio]" : "[Audio] " + fileName;
     FileInfo fileInfo;
     fileInfo.fileId = id;
+    fileInfo.fileType = messageAudio.audio_->mime_type_;
     if (!path.empty())
     {
       fileInfo.filePath = path;
@@ -3617,6 +3619,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     if (p_Text.empty()) p_Text = fileName.empty() ? "[File]" : "[File] " + fileName;
     FileInfo fileInfo;
     fileInfo.fileId = id;
+    fileInfo.fileType = messageDocument.document_->mime_type_;
     if (!path.empty())
     {
       fileInfo.filePath = path;
@@ -3643,6 +3646,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
       auto& localFile = photoFile->local_;
       auto& localPath = localFile->path_;
       FileInfo fileInfo;
+      fileInfo.fileType = "image/jpeg";
       std::string id = photoFile->remote_->id_;
       fileInfo.fileId = id;
       if (!localPath.empty())
@@ -3717,6 +3721,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     auto& localFile = videoFile->local_;
     auto& localPath = localFile->path_;
     FileInfo fileInfo;
+    fileInfo.fileType = video->mime_type_;
     std::string id = videoFile->remote_->id_;
     fileInfo.fileId = id;
     if (!localPath.empty())
@@ -3742,6 +3747,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     auto& localFile = videoFile->local_;
     auto& localPath = localFile->path_;
     FileInfo fileInfo;
+    fileInfo.fileType = "video/mp4";
     std::string id = videoFile->remote_->id_;
     fileInfo.fileId = id;
     if (!localPath.empty())
@@ -3767,6 +3773,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     if (p_Text.empty()) p_Text = "[Voice note]";
     FileInfo fileInfo;
     fileInfo.fileId = id;
+    fileInfo.fileType = messageVoiceNote.voice_note_->mime_type_;
     if (!path.empty())
     {
       fileInfo.filePath = path;
@@ -3942,6 +3949,7 @@ void TgChat::Impl::DownloadFile(std::string p_ChatId, std::string p_MsgId, std::
         std::string path = file_->local_->path_;
 
         FileInfo fileInfo;
+        fileInfo.fileType = FileUtil::GetMimeType(path);
         fileInfo.fileStatus = FileStatusDownloaded;
         fileInfo.filePath = path;
         fileInfo.fileId = p_FileId;
