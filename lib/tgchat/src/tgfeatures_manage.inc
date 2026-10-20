@@ -237,7 +237,7 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
   }
 
 
-  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply")
+  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" || operation == "tg.send.voice" || operation == "tg.send.videoNote")
   {
     auto send = make_object<sendMessage>();
     send->chat_id_ = chatId;
@@ -277,6 +277,37 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
           return true;
         }
         send->options_->scheduling_state_ = make_object<messageSchedulingStateSendAtDate>(timestamp, 0);
+      }
+    }
+    else if (operation == "tg.send.voice" || operation == "tg.send.videoNote")
+    {
+      const auto path = FileUtil::ExpandPath(value("path"));
+      struct stat fileStat{};
+      double durationSeconds = 0;
+      if (path.empty() || stat(path.c_str(), &fileStat) != 0 || !S_ISREG(fileStat.st_mode) || fileStat.st_size == 0)
+      { fail("Choose an existing, nonempty media file."); return true; }
+      if (!TgManage::Decimal(value("duration", value("durationSec", "0")), durationSeconds) ||
+          durationSeconds < 0 || durationSeconds > INT32_MAX - 1)
+      { fail("Enter a valid recording duration in seconds."); return true; }
+      const int32_t duration = static_cast<int32_t>(std::ceil(durationSeconds));
+      if (operation == "tg.send.voice")
+      {
+        auto voice = make_object<inputMessageVoiceNote>();
+        voice->voice_note_ = make_object<inputFileLocal>(path);
+        voice->duration_ = duration;
+        send->input_message_content_ = std::move(voice);
+      }
+      else
+      {
+        if (duration > 60) { fail("Telegram video notes must be at most 60 seconds long."); return true; }
+        int64_t length = 0;
+        if (!TgManage::Integer(value("length", "384"), length) || length <= 0 || length > 640)
+        { fail("Video notes must be square and at most 640 pixels wide."); return true; }
+        auto video = make_object<inputMessageVideoNote>();
+        video->video_note_ = make_object<inputFileLocal>(path);
+        video->duration_ = duration;
+        video->length_ = static_cast<int32_t>(length);
+        send->input_message_content_ = std::move(video);
       }
     }
     SendQuery(std::move(send), [this, request, checked, finish, operation](Object object)
