@@ -131,6 +131,29 @@ enum MessageType
   VotePollRequestType,
   GetPollVotesRequestType,
   UpdateMembershipNotifyType,
+  ClientActionRequestType,
+};
+
+// Account tools use the same labelled lists/forms for both services. Operations
+// and parameters stay internal; the UI displays titles, details and field labels.
+struct ClientActionField
+{
+  std::string key, label, value;
+};
+
+struct ClientActionItem
+{
+  std::string title, detail, operation;
+  std::map<std::string, std::string> params;
+  std::vector<ClientActionField> fields;
+  bool confirm = false;
+};
+
+struct ClientActionResult
+{
+  bool success = true;
+  std::string title, text, filePath;
+  std::vector<ClientActionItem> items;
 };
 
 struct ContactInfo
@@ -230,6 +253,15 @@ class RequestMessage
 public:
   virtual ~RequestMessage() { }
   virtual MessageType GetMessageType() const { return RequestMessageType; }
+};
+
+class ClientActionRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return ClientActionRequestType; }
+  std::string operation;
+  std::map<std::string, std::string> params;
+  std::function<void(ClientActionResult)> onResult;
 };
 
 class GetContactsRequest : public RequestMessage
