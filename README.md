@@ -92,6 +92,7 @@ Interactive Commands for Selected Message:
     Ctrl-d      delete selected message
     Ctrl-r      download attached file
     Ctrl-v      open/view attached file
+    Alt-Shift-t transcribe selected audio (macOS, on-device)
     Alt-o       view poll voters / vote on selected poll (Enter toggles multiple choices)
     Ctrl-w      open link
     Ctrl-x      send reply to selected message
@@ -521,6 +522,15 @@ macOS: `open '%1' &`
 
 Note: Omit the trailing `&` for commands taking over the terminal, for
 example `w3m -o confirm_qq=false '%1'` and `see '%1'`.
+
+### transcribe_command
+
+Command for transcribing a selected audio attachment with Alt-Shift-t. `%1`
+is replaced by its local path. On macOS, run `sh utils/build-transcriber.sh`
+and set this to `'<build path>/nchat-transcribe.app/Contents/MacOS/nchat-transcribe' '%1'`.
+The helper requests Speech Recognition permission on first use and requires
+on-device recognition; it does not fall back to an online service. Audio is
+converted temporarily and the converted copy is removed after transcription.
 
 ### away_status_indication
 

@@ -78,6 +78,7 @@ void UiConfig::Init()
     { "top_show_version", "0" },
     { "thumbnail_command", "nchat-thumbnails" },
     { "transfer_send_caption", "1" },
+    { "transcribe_command", "" },
     { "typing_status_share", "1" },
     { "undo_clear_input", "1" },
     { "unread_indicator", "*" },

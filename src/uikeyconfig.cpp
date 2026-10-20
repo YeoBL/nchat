@@ -228,6 +228,7 @@ void UiKeyConfig::Init(bool p_MapKeys)
     { "message_info", "\\33\\155" }, // alt/opt-m
     { "poll", "\\33\\157" }, // alt/opt-o
     { "attachments", "\\33\\106" }, // alt/opt-shift-f
+    { "transcribe", "\\33\\124" }, // alt/opt-shift-t
     { "spell", "\\33\\44" }, // alt/opt-$
     { "jump_quoted", "\\33\\161" }, // alt/opt-q
     { "jump_pinned", "KEY_CTRLP" },

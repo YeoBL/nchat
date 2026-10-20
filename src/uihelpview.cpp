@@ -123,6 +123,7 @@ void UiHelpView::Draw()
     AppendHelpItem("delete_msg", "DelMsg", helpItems);
     AppendHelpItem("edit_msg", "EditMsg", helpItems);
     AppendHelpItem("open", "OpenFile", helpItems);
+    AppendHelpItem("transcribe", "Transcript", helpItems);
     AppendHelpItem("save", "SaveFile", helpItems);
     AppendHelpItem("open_link", "OpenLink", helpItems);
 
