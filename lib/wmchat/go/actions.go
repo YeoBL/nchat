@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"strconv"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -103,6 +105,7 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		r.Items = append(r.Items, action("Channels", "Browse followed channels and fetch their posts", "channel_list", nil, nil, false))
 		r.Items = append(r.Items, action("Communities", "Browse your communities and their groups", "community_list", nil, nil, false))
 		if p["chatId"] != "" {
+			r.Items = append(r.Items, action("Create poll", "Send a new poll to this chat", "create_poll", nil, []actionField{{"question", "Question", ""}, {"options", "Choices separated by |", ""}, {"maxChoices", "Maximum choices (0 = any)", "1"}}, true))
 		}
 		if p["msgId"] != "" {
 		}
@@ -130,8 +133,39 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 	}
 	_ = chat
 	switch op {
+	case "create_poll":
+		options, limit, err := validateNewPoll(p["question"], p["options"], p["maxChoices"])
+		if err != nil {
+			return actionError("Create poll", err)
+		}
+		return sendActionMessage(ctx, connID, cli, chat, cli.BuildPollCreation(strings.TrimSpace(p["question"]), options, limit), "Poll sent")
 	}
 	return actionError("WhatsApp", fmt.Errorf("unknown action"))
+}
+
+func validateNewPoll(question, rawOptions, rawLimit string) ([]string, int, error) {
+	if strings.TrimSpace(question) == "" || len([]rune(question)) > 255 {
+		return nil, 0, fmt.Errorf("question must contain 1–255 characters")
+	}
+	parts := strings.Split(rawOptions, "|")
+	options := make([]string, 0, len(parts))
+	seen := make(map[string]bool)
+	for _, part := range parts {
+		option := strings.TrimSpace(part)
+		if option == "" || seen[option] || len([]rune(option)) > 100 {
+			return nil, 0, fmt.Errorf("choices must be unique, nonempty and at most 100 characters")
+		}
+		seen[option] = true
+		options = append(options, option)
+	}
+	if len(options) < 2 || len(options) > 12 {
+		return nil, 0, fmt.Errorf("enter between 2 and 12 choices")
+	}
+	limit, err := strconv.Atoi(rawLimit)
+	if err != nil || limit < 0 || limit > len(options) {
+		return nil, 0, fmt.Errorf("maximum choices must be 0–%d", len(options))
+	}
+	return options, limit, nil
 }
 
 func sendActionMessage(ctx context.Context, connID int, cli *whatsmeow.Client, chat types.JID, msg *waE2E.Message, title string) actionResult {
