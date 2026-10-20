@@ -524,6 +524,110 @@ void TgChat::Impl::PerformClientAction(std::shared_ptr<ClientActionRequest> requ
     return;
   }
 
+  if (operation == "tg.message.link")
+  {
+    auto query = make_object<getMessageLink>(); query->chat_id_ = chat; query->message_id_ = message;
+    SendQuery(std::move(query), [request, params](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      const auto& link = static_cast<messageLink&>(*object).link_;
+      ClientActionResult result; result.title = "Message link"; result.text = link;
+      auto context = params; context["url"] = link;
+      result.items.push_back(TgFeatureItem("Open in Telegram", "openUrl", context));
+      request->onResult(std::move(result));
+    });
+    return;
+  }
 
+  if (operation == "tg.message" || operation == "tg.attachment" || operation == "tg.album")
+  {
+    if (!chat || !message) { finish("Message", "Select a message first.", false); return; }
+    SendQuery(make_object<getMessage>(chat, message),
+      [this, request, params, operation, showMessages, chat, message](Object object)
+    {
+      if (TgFeatureError(request, object)) return;
+      auto value = td::move_tl_object_as<td::td_api::message>(object);
+      if (operation == "tg.attachment" && (value->self_destruct_type_ || value->self_destruct_in_ > 0 ||
+                                           !value->can_be_saved_))
+      {
+        ClientActionResult result; result.success = false; result.title = "Attachment";
+        result.text = "This disappearing or protected attachment cannot be opened in an external viewer.";
+        request->onResult(std::move(result)); return;
+      }
+      if (operation == "tg.album")
+      {
+        if (!value->media_album_id_)
+        {
+          ClientActionResult result; result.title = "Album"; result.text = "This message is not part of an album.";
+          request->onResult(std::move(result)); return;
+        }
+        const auto album = value->media_album_id_;
+        SendQuery(make_object<getChatHistory>(chat, message, -10, 20, false),
+          [request, params, showMessages, album](Object pageObject)
+        {
+          if (TgFeatureError(request, pageObject)) return;
+          auto page = td::move_tl_object_as<messages>(pageObject);
+          std::vector<object_ptr<td::td_api::message>> values;
+          for (auto& item : page->messages_) if (item && item->media_album_id_ == album) values.push_back(std::move(item));
+          showMessages(std::move(values), "Media album", params, "", {});
+        });
+        return;
+      }
+      ChatMessage converted;
+      const auto date = value->date_;
+      TdMessageConvert(*value, converted);
+      if (operation == "tg.attachment")
+      {
+        const auto info = ProtocolUtil::FileInfoFromHex(converted.fileInfo);
+        if (info.fileId.empty())
+        { ClientActionResult result; result.success = false; result.title = "Attachment"; result.text = "No downloadable file in this message."; request->onResult(std::move(result)); return; }
+        if (info.fileStatus == FileStatusDownloaded && !info.filePath.empty())
+        { ClientActionResult result; result.title = "Attachment"; result.filePath = info.filePath; request->onResult(std::move(result)); return; }
+        SendQuery(make_object<getRemoteFile>(info.fileId, nullptr), [this, request](Object fileObject)
+        {
+          if (TgFeatureError(request, fileObject)) return;
+          auto file = td::move_tl_object_as<td::td_api::file>(fileObject);
+          auto download = make_object<downloadFile>(); download->file_id_ = file->id_; download->priority_ = 32; download->synchronous_ = true;
+          SendQuery(std::move(download), [request](Object downloaded)
+          {
+            if (TgFeatureError(request, downloaded)) return;
+            auto file = td::move_tl_object_as<td::td_api::file>(downloaded);
+            ClientActionResult result; result.title = "Attachment";
+            if (file->local_ && file->local_->is_downloading_completed_) result.filePath = file->local_->path_;
+            else { result.success = false; result.text = "The file is not downloaded yet; try again shortly."; }
+            request->onResult(std::move(result));
+          });
+        });
+        return;
+      }
+      ClientActionResult result;
+      result.title = GetContactName(StrUtil::NumFromHex<int64_t>(converted.senderId)) + " · " + TgFeatureTimestamp(date);
+      result.text = converted.text;
+      auto context = params;
+      if (value->topic_id_ && value->topic_id_->get_id() == messageTopicForum::ID)
+        context["topicId"] = std::to_string(static_cast<messageTopicForum&>(*value->topic_id_).forum_topic_id_);
+      if (value->topic_id_ && value->topic_id_->get_id() == messageTopicThread::ID)
+        context["threadId"] = std::to_string(static_cast<messageTopicThread&>(*value->topic_id_).message_thread_id_);
+      if (!converted.fileInfo.empty()) result.items.push_back(TgFeatureItem("Open attachment", "tg.attachment", context));
+      if (value->content_ && value->content_->get_id() == messageStory::ID)
+      {
+        const auto& story = static_cast<const messageStory&>(*value->content_);
+        auto storyContext = context;
+        storyContext["chatId"] = StrUtil::NumToHex(story.story_poster_chat_id_);
+        storyContext["storyId"] = std::to_string(story.story_id_);
+        result.items.push_back(TgFeatureItem("Open shared story", "tg.story.open", storyContext));
+      }
+      if (!TgFeatureParam(context, "topicId").empty() || !TgFeatureParam(context, "threadId").empty())
+        result.items.push_back(TgFeatureItem("Reply in this conversation", "tg.thread.send", context, {{"text", "Reply", ""}}, true));
+      result.items.push_back(TgFeatureItem("Open chat", "navigate", context));
+      result.items.push_back(TgFeatureItem("Comments / discussion", "tg.comments", context));
+      result.items.push_back(TgFeatureItem("Translate", "tg.translate", context, {{"language", "Language code", "en"}}));
+      result.items.push_back(TgFeatureItem("Bot buttons", "tg.buttons", context));
+      result.items.push_back(TgFeatureItem("Message link", "tg.message.link", context));
+      result.items.push_back(TgFeatureItem("Forward with original attribution", "tg.forward.pick", context));
+      request->onResult(std::move(result));
+    });
+    return;
+  }
   finish("Telegram tools", "This action is not available in the current build.", false);
 }
