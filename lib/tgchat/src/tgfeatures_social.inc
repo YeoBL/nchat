@@ -280,9 +280,306 @@ bool TgChat::Impl::HandleSocialAction(std::shared_ptr<ClientActionRequest> reque
     return true;
   }
 
+  if (op == "tg.secret.list")
+  {
+    // The chat/type maps belong to the TDLib response thread. Render after a
+    // local query callback rather than racing updateNewChat on the UI thread.
+    SendQuery(td::td_api::make_object<td::td_api::getChats>(nullptr, 1), [this, done, error](Object object)
+    {
+      if (error(object)) return;
+      ClientActionResult result;
+      result.title = "Secret Chats on this nchat device";
+      result.text = "Secret Chats are device-specific. Chats from your phone cannot be imported here. nchat stores message history in its own unencrypted local cache.";
+      for (const auto& entry : m_ChatTypes)
+      {
+        if (entry.second != ChatSecret) continue;
+        result.items.push_back(TgSocialItem(GetContactName(entry.first), "tg.secret.open",
+                                            {{"chatId", StrUtil::NumToHex(entry.first)}}));
+      }
+      result.items.push_back(TgSocialItem("Start a new Secret Chat", "tg.secret.new", {},
+        {{"contact", "Telegram @username or user ID (decimal)", ""}}, true));
+      done(std::move(result));
+    });
+    return true;
+  }
 
+  if (op == "tg.secret.new")
+  {
+    std::string contact = TgSocialParam(params, "contact");
+    if (!params.count("contact")) contact = TgSocialParam(params, "username");
+    StrUtil::Trim(contact);
+    if (contact.empty() && !chatId)
+    {
+      ClientActionResult result;
+      result.title = "Start a Secret Chat";
+      result.items.push_back(TgSocialItem("Choose contact", "tg.secret.new", {},
+        {{"contact", "Telegram @username or user ID (decimal)", ""}}, true));
+      done(std::move(result));
+      return true;
+    }
+    auto create = [this, done, error, fail](int64_t userId)
+    {
+      if (userId <= 0 || userId == m_SelfUserId)
+      {
+        fail("Choose another Telegram user to start a Secret Chat.");
+        return;
+      }
+      SendQuery(td::td_api::make_object<td::td_api::createNewSecretChat>(userId),
+        [this, done, error](Object object)
+      {
+        if (error(object)) return;
+        const auto& chat = static_cast<const td::td_api::chat&>(*object);
+        const std::string id = StrUtil::NumToHex(chat.id_);
+        ClientActionResult result;
+        result.title = "Secret Chat created";
+        result.text = "Waiting for the other person to accept the encrypted chat.";
+        result.items.push_back(TgSocialItem("Open Secret Chat", "tg.secret.open", {{"chatId", id}}));
+        result.items.push_back(TgSocialItem("Open in chat view", "navigate", {{"chatId", id}}));
+        CreateChat(std::move(object));
+        done(std::move(result));
+      });
+    };
+    if (contact.empty())
+    {
+      SendQuery(td::td_api::make_object<td::td_api::getChat>(chatId),
+        [create, error, fail](Object object)
+      {
+        if (error(object)) return;
+        const auto& chat = static_cast<const td::td_api::chat&>(*object);
+        if (!chat.type_ || chat.type_->get_id() != td::td_api::chatTypePrivate::ID)
+        {
+          fail("Start a Secret Chat from a private contact, or enter their @username.");
+          return;
+        }
+        create(static_cast<const td::td_api::chatTypePrivate&>(*chat.type_).user_id_);
+      });
+    }
+    else
+    {
+      int64_t userId = 0;
+      try
+      {
+        size_t consumed = 0;
+        userId = std::stoll(contact, &consumed);
+        if (consumed != contact.size()) userId = 0;
+      }
+      catch (...) { }
+      if (userId > 0) create(userId);
+      else
+      {
+        const std::string username = (contact[0] == '@') ? contact.substr(1) : contact;
+        SendQuery(td::td_api::make_object<td::td_api::searchPublicChat>(username),
+          [create, error, fail](Object object)
+        {
+          if (error(object)) return;
+          const auto& chat = static_cast<const td::td_api::chat&>(*object);
+          if (!chat.type_ || chat.type_->get_id() != td::td_api::chatTypePrivate::ID)
+          {
+            fail("Secret Chats require a person's account, not a group or channel.");
+            return;
+          }
+          create(static_cast<const td::td_api::chatTypePrivate&>(*chat.type_).user_id_);
+        });
+      }
+    }
+    return true;
+  }
 
+  if (op == "tg.secret.open" || op == "tg.secret.send" || op == "tg.secret.timer" || op == "tg.secret.close")
+  {
+    if (!chatId) { fail("Choose a Secret Chat first."); return true; }
+    SendQuery(td::td_api::make_object<td::td_api::getChat>(chatId),
+      [this, chatId, op, params, done, error, fail](Object object)
+    {
+      if (error(object)) return;
+      const auto& chat = static_cast<const td::td_api::chat&>(*object);
+      if (!chat.type_ || chat.type_->get_id() != td::td_api::chatTypeSecret::ID)
+      {
+        fail("This action requires a Secret Chat created on this nchat device.");
+        return;
+      }
+      const int32_t secretId = static_cast<const td::td_api::chatTypeSecret&>(*chat.type_).secret_chat_id_;
+      const std::string title = chat.title_;
+      if (op == "tg.secret.send")
+      {
+        const std::string text = TgSocialParam(params, "text");
+        if (text.empty()) { fail("Enter a message to send."); return; }
+        auto send = td::td_api::make_object<td::td_api::sendMessage>();
+        send->chat_id_ = chatId;
+        send->input_message_content_ = GetMessageText(text);
+        SendQuery(std::move(send), [chatId, done, error](Object sent)
+        {
+          if (error(sent)) return;
+          ClientActionResult result;
+          result.title = "Secret message sent";
+          result.items.push_back(TgSocialItem("Return to Secret Chat", "tg.secret.open",
+                                               {{"chatId", StrUtil::NumToHex(chatId)}}));
+          done(std::move(result));
+        });
+        return;
+      }
+      if (op == "tg.secret.close")
+      {
+        SendQuery(td::td_api::make_object<td::td_api::closeSecretChat>(secretId), [done, error](Object closed)
+        {
+          if (error(closed)) return;
+          ClientActionResult result;
+          result.title = "Secret Chat closed";
+          result.text = "This encrypted chat can no longer receive new messages.";
+          done(std::move(result));
+        });
+        return;
+      }
+      if (op == "tg.secret.timer")
+      {
+        int seconds = -1;
+        try
+        {
+          const auto value = TgSocialParam(params, "seconds");
+          size_t consumed = 0;
+          seconds = std::stoi(value, &consumed);
+          if (consumed != value.size()) seconds = -1;
+        }
+        catch (...) { }
+        if (seconds < 0 || seconds > 604800)
+        {
+          fail("Enter a self-destruct timer from 0 to 604800 seconds; 0 disables it.");
+          return;
+        }
+        SendQuery(td::td_api::make_object<td::td_api::setChatMessageAutoDeleteTime>(chatId, seconds),
+          [chatId, done, error](Object updated)
+        {
+          if (error(updated)) return;
+          ClientActionResult result;
+          result.title = "Secret Chat timer updated";
+          result.items.push_back(TgSocialItem("Return to Secret Chat", "tg.secret.open",
+                                               {{"chatId", StrUtil::NumToHex(chatId)}}));
+          done(std::move(result));
+        });
+        return;
+      }
+      const int timer = chat.message_auto_delete_time_;
+      SendQuery(td::td_api::make_object<td::td_api::getSecretChat>(secretId),
+        [this, chatId, title, params, timer, done, error](Object secretObject)
+      {
+        if (error(secretObject)) return;
+        const auto& secret = static_cast<const td::td_api::secretChat&>(*secretObject);
+        const bool ready = secret.state_ && secret.state_->get_id() == td::td_api::secretChatStateReady::ID;
+        ClientActionResult initial;
+        initial.title = title + " — Secret Chat";
+        initial.text = ready ? "Encrypted chat · Ready" :
+          (secret.state_ && secret.state_->get_id() == td::td_api::secretChatStatePending::ID ?
+           "Waiting for acceptance" : "Closed");
+        initial.text += "\nSelf-destruct timer: " + (timer ? std::to_string(timer) + " seconds" : "Off");
+        initial.text += "\nnchat also stores this history in its own unencrypted local cache.";
+        if (AppConfig::GetNum("message_delete") == MessageDeletePrefix)
+          initial.text += "\nYour nchat deletion setting retains deleted messages locally. Telegram's self-destruct timer does not erase those retained copies.";
+        if (!secret.key_hash_.empty()) initial.text += "\nKey fingerprint: " + StrUtil::StrToHex(secret.key_hash_);
+        initial.items.push_back(TgSocialItem("Open in chat view", "navigate", {{"chatId", StrUtil::NumToHex(chatId)}}));
+        if (ready)
+        {
+          initial.items.push_back(TgSocialItem("Write a message", "tg.secret.send",
+            {{"chatId", StrUtil::NumToHex(chatId)}}, {{"text", "Message", ""}}));
+          initial.items.push_back(TgSocialItem("Set self-destruct timer", "tg.secret.timer",
+            {{"chatId", StrUtil::NumToHex(chatId)}}, {{"seconds", "Seconds (0 disables)", std::to_string(timer)}}, true));
+          initial.items.push_back(TgSocialItem("Close this Secret Chat", "tg.secret.close",
+            {{"chatId", StrUtil::NumToHex(chatId)}}, {}, true));
+        }
+        int64_t from = StrUtil::NumFromHex<int64_t>(TgSocialParam(params, "from"));
+        // TDLib message IDs encode their type; retain a valid boundary ID and
+        // filter the inclusive boundary instead of subtracting from the ID.
+        SendQuery(td::td_api::make_object<td::td_api::getChatHistory>(chatId, from, 0, from ? 31 : 30, false),
+          [this, chatId, from, done, error, initial](Object history) mutable
+        {
+          if (error(history)) return;
+          auto& messages = static_cast<td::td_api::messages&>(*history);
+          int64_t oldest = 0;
+          for (auto& message : messages.messages_)
+          {
+            if (!message || message->id_ == from) continue;
+            oldest = message->id_;
+            ChatMessage converted;
+            TdMessageConvert(*message, converted);
+            const auto heading = TgSocialDate(message->date_) + " · " +
+              (message->is_outgoing_ ? "You" : GetContactName(StrUtil::NumFromHex<int64_t>(converted.senderId)));
+            initial.text += "\n\n" + heading + "\n" + converted.text;
+            auto item = TgSocialItem(heading,
+              "tg.secret.message", {{"chatId", StrUtil::NumToHex(chatId)}, {"msgId", StrUtil::NumToHex(message->id_)}});
+            item.detail = converted.text;
+            initial.items.push_back(std::move(item));
+          }
+          if (oldest && oldest != from)
+            initial.items.push_back(TgSocialItem("Older messages", "tg.secret.open",
+              {{"chatId", StrUtil::NumToHex(chatId)}, {"from", StrUtil::NumToHex(oldest)}}));
+          done(std::move(initial));
+        });
+      });
+    });
+    return true;
+  }
 
+  if (op == "tg.secret.message" || op == "tg.secret.file")
+  {
+    const int64_t msgId = StrUtil::NumFromHex<int64_t>(TgSocialParam(params, "msgId"));
+    if (!chatId || !msgId) { fail("Choose a message first."); return true; }
+    SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+      [this, chatId, msgId, op, done, error, fail](Object object)
+    {
+      if (error(object)) return;
+      auto& message = static_cast<td::td_api::message&>(*object);
+      const bool disappearing = (message.self_destruct_type_ != nullptr || message.self_destruct_in_ > 0);
+      ChatMessage converted;
+      TdMessageConvert(message, converted);
+      ClientActionResult result;
+      result.title = (message.is_outgoing_ ? "You" : GetContactName(StrUtil::NumFromHex<int64_t>(converted.senderId))) +
+                     " · " + TgSocialDate(message.date_);
+      result.text = converted.text;
+      if (converted.fileInfo.empty()) { done(std::move(result)); return; }
+      if (disappearing)
+      {
+        result.text += "\nTimed attachments cannot be opened in an external viewer because their expiry cannot be enforced there.";
+        done(std::move(result));
+        return;
+      }
+      if (op == "tg.secret.message")
+      {
+        result.items.push_back(TgSocialItem("Open attachment", "tg.secret.file",
+          {{"chatId", StrUtil::NumToHex(chatId)}, {"msgId", StrUtil::NumToHex(msgId)}}));
+        done(std::move(result));
+        return;
+      }
+      const auto info = ProtocolUtil::FileInfoFromHex(converted.fileInfo);
+      if (info.fileStatus == FileStatusDownloaded && !info.filePath.empty() && FileUtil::Exists(info.filePath))
+      {
+        result.filePath = info.filePath;
+        done(std::move(result));
+        return;
+      }
+      auto remote = td::td_api::make_object<td::td_api::getRemoteFile>();
+      remote->remote_file_id_ = info.fileId;
+      SendQuery(std::move(remote), [this, done, error, fail, result](Object remoteObject) mutable
+      {
+        if (error(remoteObject)) return;
+        auto download = td::td_api::make_object<td::td_api::downloadFile>();
+        download->file_id_ = static_cast<const td::td_api::file&>(*remoteObject).id_;
+        download->priority_ = 32;
+        download->synchronous_ = true;
+        SendQuery(std::move(download), [done, error, fail, result](Object fileObject) mutable
+        {
+          if (error(fileObject)) return;
+          const auto& file = static_cast<const td::td_api::file&>(*fileObject);
+          if (!file.local_ || !file.local_->is_downloading_completed_ || file.local_->path_.empty())
+          {
+            fail("The attachment has not finished downloading. Try again shortly.");
+            return;
+          }
+          result.filePath = file.local_->path_;
+          done(std::move(result));
+        });
+      });
+    });
+    return true;
+  }
 
   fail("This Telegram action is not supported.");
   return true;
