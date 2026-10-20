@@ -161,10 +161,6 @@ func messageActionEntry(connID int, chatID, msgID string) (storedActionMessage, 
 	return entry, msg
 }
 
-func forwardableMessage(msg *waE2E.Message) bool {
-	return msg.Conversation != nil || msg.ExtendedTextMessage != nil || msg.ImageMessage != nil || msg.VideoMessage != nil || msg.AudioMessage != nil || msg.PtvMessage != nil || msg.DocumentMessage != nil || msg.StickerMessage != nil || msg.ContactMessage != nil || msg.ContactsArrayMessage != nil || msg.LocationMessage != nil || msg.LiveLocationMessage != nil || msg.PollCreationMessage != nil || msg.PollCreationMessageV2 != nil || msg.PollCreationMessageV3 != nil || msg.ButtonsMessage != nil || msg.ListMessage != nil || msg.InteractiveMessage != nil
-}
-
 func contactCardText(contact *waE2E.ContactMessage) string {
 	if contact == nil {
 		return ""
@@ -444,6 +440,10 @@ func recordingSeconds(raw string) (uint32, error) {
 		return 0, fmt.Errorf("invalid recording duration")
 	}
 	return uint32(math.Ceil(duration)), nil
+}
+
+func forwardableMessage(msg *waE2E.Message) bool {
+	return msg.Conversation != nil || msg.ExtendedTextMessage != nil || msg.ImageMessage != nil || msg.VideoMessage != nil || msg.AudioMessage != nil || msg.PtvMessage != nil || msg.DocumentMessage != nil || msg.StickerMessage != nil || msg.ContactMessage != nil || msg.ContactsArrayMessage != nil || msg.LocationMessage != nil || msg.LiveLocationMessage != nil || msg.PollCreationMessage != nil || msg.PollCreationMessageV2 != nil || msg.PollCreationMessageV3 != nil || msg.ButtonsMessage != nil || msg.ListMessage != nil || msg.InteractiveMessage != nil
 }
 
 func forwardedMessage(original *waE2E.Message) (*waE2E.Message, error) {

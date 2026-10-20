@@ -46,7 +46,6 @@ func action(title, detail, operation string, params map[string]string, fields []
 func actionOK(title, text string) actionResult {
 	return actionResult{Success: true, Title: title, Text: text}
 }
-
 func actionError(title string, err error) actionResult {
 	return actionResult{Title: title, Text: err.Error()}
 }
@@ -88,38 +87,32 @@ func actionContactName(connID int, id string) string {
 	return id
 }
 
-func actionContactName(connID int, id string) string {
-	if name := GetContactName(connID, id); name != "" && name != id {
-		return name
-	}
-	jid, err := types.ParseJID(id)
-	if err == nil && jid.Server == types.DefaultUserServer {
-		return "+" + jid.User
-	}
-	return id
-}
-
 func wmClientAction(ctx context.Context, connID int, op string, p map[string]string) actionResult {
 	if op == "menu" {
 		r := actionOK("WhatsApp tools", "Choose an account or chat action.")
-		r.Items = append(r.Items, action("Status updates", "Browse updates received by this device", "status_list", nil, nil, false))
-		r.Items = append(r.Items, action("Channels", "Browse followed channels and fetch their posts", "channel_list", nil, nil, false))
-		r.Items = append(r.Items, action("Communities", "Browse your communities and their groups", "community_list", nil, nil, false))
+		r.Items = []actionItem{
+			action("Status updates", "Browse updates received by this device", "status_list", nil, nil, false),
+			action("Channels", "Browse followed channels and fetch their posts", "channel_list", nil, nil, false),
+			action("Communities", "Browse your communities and their groups", "community_list", nil, nil, false),
+		}
 		if p["chatId"] != "" {
-			r.Items = append(r.Items, action("Create poll", "Send a new poll to this chat", "create_poll", nil, []actionField{{"question", "Question", ""}, {"options", "Choices separated by |", ""}, {"maxChoices", "Maximum choices (0 = any)", "1"}}, true))
-			r.Items = append(r.Items, action("Mute chat", "Mute indefinitely on your linked devices", "mute_chat", map[string]string{"muted": "true"}, nil, true))
-			r.Items = append(r.Items, action("Unmute chat", "Restore notifications", "mute_chat", map[string]string{"muted": "false"}, nil, true))
-			r.Items = append(r.Items, action("Mark unread on WhatsApp", "Set WhatsApp's chat marker; nchat keeps read messages read", "mark_unread", nil, nil, true))
-			r.Items = append(r.Items, action("Send contact", "Share a contact card", "send_contact", nil, []actionField{{"name", "Full name", ""}, {"phone", "Phone number with country code", ""}}, true))
-			r.Items = append(r.Items, action("Send location", "Share a fixed location", "send_location", nil, []actionField{{"latitude", "Latitude", ""}, {"longitude", "Longitude", ""}, {"name", "Place name", ""}, {"address", "Address", ""}}, true))
+			r.Items = append(r.Items,
+				action("Create poll", "Send a new poll to this chat", "create_poll", nil, []actionField{{"question", "Question", ""}, {"options", "Choices separated by |", ""}, {"maxChoices", "Maximum choices (0 = any)", "1"}}, true),
+				action("Mute chat", "Mute indefinitely on your linked devices", "mute_chat", map[string]string{"muted": "true"}, nil, true),
+				action("Unmute chat", "Restore notifications", "mute_chat", map[string]string{"muted": "false"}, nil, true),
+				action("Mark unread on WhatsApp", "Set WhatsApp's chat marker; nchat keeps read messages read", "mark_unread", nil, nil, true),
+				action("Send contact", "Share a contact card", "send_contact", nil, []actionField{{"name", "Full name", ""}, {"phone", "Phone number with country code", ""}}, true),
+				action("Send location", "Share a fixed location", "send_location", nil, []actionField{{"latitude", "Latitude", ""}, {"longitude", "Longitude", ""}, {"name", "Place name", ""}, {"address", "Address", ""}}, true))
 			if strings.HasSuffix(p["chatId"], "@g.us") {
 				r.Items = append(r.Items, action("Group information", "Members, settings and invitations", "group_info", nil, nil, false))
 			}
 		}
 		if p["msgId"] != "" {
-			r.Items = append(r.Items, action("Star message", "Save in WhatsApp starred messages", "star_message", map[string]string{"starred": "true"}, nil, true))
-			r.Items = append(r.Items, action("Unstar message", "Remove from starred messages", "star_message", map[string]string{"starred": "false"}, nil, true))
-			r.Items = append(r.Items, action("Message details and buttons", "Locations, contact cards and business replies", "message_details", nil, nil, false))
+			r.Items = append(r.Items,
+				action("Message details and buttons", "Locations, contact cards and business replies", "message_details", nil, nil, false),
+				action("Star message", "Save in WhatsApp starred messages", "star_message", map[string]string{"starred": "true"}, nil, true),
+				action("Unstar message", "Remove from starred messages", "star_message", map[string]string{"starred": "false"}, nil, true),
+				action("Request earlier history", "Ask your phone for up to 50 earlier messages and supplied receipts/votes", "history_request", nil, nil, true))
 		}
 		return r
 	}
@@ -143,7 +136,6 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 	if chat.Server == types.NewsletterServer && op != "history_request" {
 		return actionError("WhatsApp channel", fmt.Errorf("use Channel tools for this channel"))
 	}
-	_ = chat
 	switch op {
 	case "create_poll":
 		options, limit, err := validateNewPoll(p["question"], p["options"], p["maxChoices"])
@@ -185,6 +177,16 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 			return actionError("Send location", err)
 		}
 		return sendActionMessage(ctx, connID, cli, chat, &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: &lat, DegreesLongitude: &lon, Name: proto.String(p["name"]), Address: proto.String(p["address"])}}, "Location sent")
+	case "history_request":
+		stamp, err := strconv.ParseInt(p["timeSent"], 10, 64)
+		if err != nil || stamp <= 0 || p["msgId"] == "" {
+			return actionError("Earlier history", fmt.Errorf("select a dated message as the history anchor"))
+		}
+		info := types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, IsFromMe: actionBool(p["isOutgoing"]) || actionBool(p["fromMe"])}, ID: p["msgId"], Timestamp: time.Unix(stamp, 0)}
+		if _, err = cli.SendPeerMessage(ctx, cli.BuildHistorySyncRequest(&info, 50)); err != nil {
+			return actionError("Earlier history", err)
+		}
+		return actionOK("History requested", "Your phone was asked for up to 50 messages before the selected message. Supplied receipts and poll votes are merged automatically. WhatsApp does not provide an API to retrieve a guaranteed complete historical receipt or voter list.")
 	case "group_info", "group_invite", "group_name", "group_description", "group_announce", "group_locked", "group_member", "group_leave":
 		return wmGroupAction(ctx, connID, cli, op, p, chat)
 	}

@@ -1129,6 +1129,7 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 			}
 
 			handler.HandleMessage(*messageInfo, message, isSyncRead)
+			handler.RecoverHistoricalPollVotes(*messageInfo, webMessageInfo)
 			hasMessages = true
 
 			messageTime := int(messageInfo.Timestamp.Unix())
