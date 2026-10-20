@@ -229,6 +229,7 @@ void UiKeyConfig::Init(bool p_MapKeys)
     { "poll", "\\33\\157" }, // alt/opt-o
     { "attachments", "\\33\\106" }, // alt/opt-shift-f
     { "client_actions", "KEY_F2" },
+    { "global_search", "KEY_F3" },
     { "transcribe", "\\33\\124" }, // alt/opt-shift-t
     { "spell", "\\33\\44" }, // alt/opt-$
     { "jump_quoted", "\\33\\161" }, // alt/opt-q

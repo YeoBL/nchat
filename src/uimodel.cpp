@@ -4707,6 +4707,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyPoll = UiKeyConfig::GetKey("poll");
   static wint_t keyAttachments = UiKeyConfig::GetKey("attachments");
   static wint_t keyClientActions = UiKeyConfig::GetKey("client_actions");
+  static wint_t keyGlobalSearch = UiKeyConfig::GetKey("global_search");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4908,6 +4909,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   {
     OnKeyClientActions();
   }
+  else if (p_Key == keyGlobalSearch) OnKeyClientActions("local.search");
   else if (p_Key == keyReact)
   {
     OnKeyReact();
@@ -5750,9 +5752,49 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     if (operation == "local.menu")
     {
       page.title = "Tools · " + GetProfileDisplayName(chat.first);
+      makeItem(page, "Search messages across chats", "local.search", {}, "Search cached history without marking it read");
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
       if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
+    }
+    else if (operation == "local.search")
+    {
+      page.title = "Search cached messages";
+      page.text = "This searches history already stored by nchat. Use Account tools for Telegram's server search.";
+      makeItem(page, "Search all chats", "local.search.run", {}, "Blank fields mean no restriction.",
+        {{"query", "Message contains", ""}, {"sender", "Sender name, number or ID (optional)", ""},
+         {"type", "Type: all, text, image, video, audio, file, poll, link, deleted", "all"},
+         {"from", "From date YYYY-MM-DD (optional)", ""}, {"to", "Through date YYYY-MM-DD (optional)", ""}});
+      makeItem(page, "Search this chat", "local.search.run", {{"scope", "chat"}}, "Blank query shows recent cached messages.",
+        {{"query", "Message contains", ""}, {"sender", "Sender (optional)", ""},
+         {"type", "Message type (all, image, audio, file, poll, link, deleted)", "all"},
+         {"from", "From date YYYY-MM-DD (optional)", ""}, {"to", "Through date YYYY-MM-DD (optional)", ""}});
+    }
+    else if (operation == "local.search.run")
+    {
+      MessageCache::SearchQuery query;
+      query.text = Value(values, "query"); query.sender = Value(values, "sender");
+      query.type = Value(values, "type").empty() ? "all" : StrUtil::ToLower(Value(values, "type"));
+      if (Value(values, "scope") == "chat") { query.profileId = chat.first; query.chatId = chat.second; }
+      const std::set<std::string> types = {"all", "text", "attachment", "image", "video", "audio", "file", "poll", "link", "deleted"};
+      if (!types.count(query.type) || !FeatureUtil::DateBound(Value(values, "from"), false, query.fromTime) ||
+          !FeatureUtil::DateBound(Value(values, "to"), true, query.toTime) ||
+          (query.fromTime && query.toTime && query.fromTime > query.toTime))
+      {
+        page.success = false; page.text = "Check the message type and dates (YYYY-MM-DD, with From before Through).";
+      }
+      else
+      {
+        const auto results = MessageCache::SearchMessages(query);
+        page.title = "Search results · " + std::to_string(results.size());
+        page.text = results.size() == static_cast<size_t>(query.limit) ? "Showing the newest 200 matches. Narrow the search for more." : "Select a message to read its full cached text.";
+        for (const auto& result : results)
+          makeItem(page, result.chatName + " · " + result.senderName, "local.message",
+            {{"profile", result.profileId}, {"chatId", result.chatId}, {"msgId", result.message.id},
+             {"text", result.message.text}, {"timeSent", std::to_string(result.message.timeSent)},
+             {"fileInfo", result.message.fileInfo}},
+            TimeUtil::GetTimeString(result.message.timeSent, true) + " · " + result.message.text);
+      }
     }
     else if (operation == "local.message")
     {

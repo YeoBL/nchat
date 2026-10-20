@@ -94,6 +94,7 @@ void UiHelpView::Draw()
     AppendHelpItem("find", "Find", helpItems);
     AppendHelpItem("find_next", "FindNext", helpItems);
     AppendHelpItem("attachments", "Files", helpItems);
+    AppendHelpItem("global_search", "SearchAll", helpItems);
     AppendHelpItem("select_contact", "AddrBook", helpItems);
     AppendHelpItem("select_mention", "Mention", helpItems);
     AppendHelpItem("spell", "ExtSpell", helpItems);
