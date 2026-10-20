@@ -1,0 +1,13 @@
+#!/bin/sh
+# Read-only conversation picker. Use --confdir PATH or NCHAT_CONFIG_DIR for a custom cache.
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+viewer="$script_dir/nchat-peek-view.py"
+if [ ! -f "$viewer" ]; then
+  viewer="$script_dir/../lib/nchat-peek-view.py"
+fi
+if [ ! -f "$viewer" ]; then
+  printf '%s\n' 'nchat-peek-view.py is missing; install it beside nchat-peek or in ../lib.' >&2
+  exit 1
+fi
+exec "${NCHAT_PYTHON:-python3}" "$viewer" --pick "$@"

@@ -1119,6 +1119,16 @@ void WmNewMessageFileNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p
     fileInfo.fileStatus = static_cast<FileStatus>(p_FileStatus);
     fileInfo.filePath = std::string(p_FilePath);
 
+    // Preserve the remote reference so a failed/evicted cache download can be retried.
+    std::vector<ChatMessage> cachedMessages;
+    if (MessageCache::GetOneMessage(instance->GetProfileId(), p_ChatId, p_MsgId, cachedMessages) &&
+        !cachedMessages.empty())
+    {
+      const FileInfo cached = ProtocolUtil::FileInfoFromHex(cachedMessages.front().fileInfo);
+      fileInfo.fileId = cached.fileId;
+      fileInfo.fileType = cached.fileType;
+    }
+
     std::shared_ptr<NewMessageFileNotify> newMessageFileNotify =
       std::make_shared<NewMessageFileNotify>(instance->GetProfileId());
     newMessageFileNotify->chatId = std::string(p_ChatId);

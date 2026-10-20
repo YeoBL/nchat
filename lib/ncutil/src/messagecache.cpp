@@ -310,6 +310,9 @@ void MessageCache::AddProfile(const std::string& p_ProfileId, bool p_CheckSequen
 
   try
   {
+    // Read-only tools (peek/menu bar) briefly hold shared locks. SQLite's
+    // default zero wait can abort nchat during COMMIT while they are reading.
+    *m_Dbs[p_ProfileId] << "PRAGMA busy_timeout = 5000";
     *m_Dbs[p_ProfileId] << "PRAGMA synchronous = FULL";
     *m_Dbs[p_ProfileId] << "PRAGMA journal_mode = DELETE";
     *m_Dbs[p_ProfileId] << "CREATE TABLE IF NOT EXISTS message_receipts ("

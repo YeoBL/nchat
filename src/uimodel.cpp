@@ -2026,12 +2026,16 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           mit->second.fileInfo = fileInfoStr;
         }
 
+        // MessageCache receives this notification separately. Avoid any UI
+        // redraw that could mark a currently selected message as read.
+        if (downloadFileAction == DownloadFileActionCacheOnly) break;
+
         if (downloadFileAction == DownloadFileActionOpen)
         {
           FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(fileInfoStr);
-          if (!fileInfo.filePath.empty())
+          if (UiModel::Impl::IsAttachmentDownloaded(fileInfo))
           {
-            OnKeyOpenAttachment(fileInfo.filePath);
+            OpenAttachment(fileInfo.filePath);
           }
         }
         else if (downloadFileAction == DownloadFileActionSave)
