@@ -187,6 +187,62 @@ func wmChannelAction(ctx context.Context, connId int, cli *whatsmeow.Client, op 
 		result.Items = append(result.Items, action("View channel", "Load its latest posts", "channel_messages", map[string]string{"channelId": meta.ID.String()}, nil, false))
 		return result, true
 
+	case "community_list":
+		groups, err := cli.GetJoinedGroups(ctx)
+		if err != nil {
+			return actionError("WhatsApp communities", err), true
+		}
+		groups = slices.DeleteFunc(groups, func(group *types.GroupInfo) bool { return group == nil })
+		sort.SliceStable(groups, func(i, j int) bool { return strings.ToLower(groups[i].Name) < strings.ToLower(groups[j].Name) })
+		result := actionOK("WhatsApp communities", "Choose a community to browse its groups.")
+		for _, group := range groups {
+			if group.IsParent {
+				result.Items = append(result.Items, action(group.Name, group.Topic, "community_groups", map[string]string{"communityId": group.JID.String()}, nil, false))
+			}
+		}
+		if len(result.Items) == 0 {
+			result.Text = "No joined communities were returned by WhatsApp. Ordinary joined groups remain in the chat list."
+		}
+		return result, true
+
+	case "community_groups":
+		jid, err := channelJID(p["communityId"], types.GroupServer)
+		if err != nil {
+			return actionError("Community groups", err), true
+		}
+		groups, err := cli.GetSubGroups(ctx, jid)
+		if err != nil {
+			return actionError("Community groups", err), true
+		}
+		groups = slices.DeleteFunc(groups, func(group *types.GroupLinkTarget) bool { return group == nil })
+		joined, err := cli.GetJoinedGroups(ctx)
+		if err != nil {
+			return actionError("Community groups", err), true
+		}
+		membership := make(map[types.JID]bool, len(joined))
+		for _, group := range joined {
+			if group != nil {
+				membership[group.JID] = true
+			}
+		}
+		sort.SliceStable(groups, func(i, j int) bool { return strings.ToLower(groups[i].Name) < strings.ToLower(groups[j].Name) })
+		result := actionOK("Community groups", "Open a joined group. Groups you have not joined are listed for reference; join requests and community administration are not available here.")
+		for _, group := range groups {
+			detail := "Joined group"
+			if group.IsDefaultSubGroup {
+				detail = "Announcement group"
+			}
+			operation := "open_chat"
+			if !membership[group.JID] {
+				detail = "Not joined"
+				operation = ""
+			} else {
+				CWmNewContactsNotify(connId, group.JID.String(), group.Name, "", 0, 0, NotifyDirect)
+				AddContactName(connId, group.JID.String(), group.Name)
+			}
+			result.Items = append(result.Items, action(group.Name, detail, operation, map[string]string{"chatId": group.JID.String()}, nil, false))
+		}
+		return result, true
 	}
 	return actionResult{}, false
 }

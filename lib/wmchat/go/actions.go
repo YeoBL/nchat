@@ -101,6 +101,7 @@ func wmClientAction(ctx context.Context, connID int, op string, p map[string]str
 		r := actionOK("WhatsApp tools", "Choose an account or chat action.")
 		r.Items = append(r.Items, action("Status updates", "Browse updates received by this device", "status_list", nil, nil, false))
 		r.Items = append(r.Items, action("Channels", "Browse followed channels and fetch their posts", "channel_list", nil, nil, false))
+		r.Items = append(r.Items, action("Communities", "Browse your communities and their groups", "community_list", nil, nil, false))
 		if p["chatId"] != "" {
 		}
 		if p["msgId"] != "" {
