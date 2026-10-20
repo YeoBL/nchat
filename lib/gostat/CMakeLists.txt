@@ -66,8 +66,9 @@ set(SRCS
   ${SG_GO_DIR}/gosg.go ${SG_GO_DIR}/cgosg.go ${SG_GO_DIR}/go.mod ${SG_GO_DIR}/go.sum
   ${CMAKE_CURRENT_SOURCE_DIR}/assemble.sh)
 file(GLOB_RECURSE WM_EXT_SRCS ${WM_GO_DIR}/ext/*.go)
+file(GLOB WM_ACTION_SRCS CONFIGURE_DEPENDS ${WM_GO_DIR}/actions*.go)
 file(GLOB_RECURSE SG_EXT_SRCS ${SG_GO_DIR}/ext/*.go)
-list(APPEND SRCS ${WM_EXT_SRCS} ${SG_EXT_SRCS})
+list(APPEND SRCS ${WM_EXT_SRCS} ${WM_ACTION_SRCS} ${SG_EXT_SRCS})
 
 set(HEADERS ${OUTPUT_DIR}/libcgowm.h ${OUTPUT_DIR}/libcgosg.h)
 add_custom_command(OUTPUT ${OUTPUT_DIR}/${LIB} ${HEADERS}

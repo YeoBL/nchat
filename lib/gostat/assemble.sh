@@ -48,6 +48,10 @@ mkdir -p "$STAGE/wmchat" "$STAGE/signal" "$OUT"
 
 sed 's/^package main$/package wmchat/' "$WM_DIR/gowm.go"  > "$STAGE/wmchat/gowm.go"
 sed 's/^package main$/package wmchat/' "$WM_DIR/cgowm.go" > "$STAGE/wmchat/cgowm.go"
+for action_source in "$WM_DIR"/actions*.go; do
+  [[ "$action_source" == *_test.go ]] && continue
+  sed 's/^package main$/package wmchat/' "$action_source" > "$STAGE/wmchat/${action_source##*/}"
+done
 sed 's/^package main$/package signal/' "$SG_DIR/gosg.go"  > "$STAGE/signal/gosg.go"
 sed 's/^package main$/package signal/' "$SG_DIR/cgosg.go" > "$STAGE/signal/cgosg.go"
 

@@ -217,6 +217,7 @@ func AddConn(conn *whatsmeow.Client, path string, sendType int) int {
 }
 
 func RemoveConn(connId int) {
+	closeActionMessages(GetPath(connId))
 	mx.Lock()
 	SaveMap(GetContactsStorePath(paths[connId]), contacts[connId])
 	SaveMap(GetSendersStorePath(paths[connId]), senders[connId])
@@ -1673,6 +1674,20 @@ func GetContacts(connId int) {
 }
 
 func (handler *WmEventHandler) HandleMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
+	msg = unwrapActionMessage(msg)
+	if msg == nil {
+		return
+	}
+	recordStatusMessage(handler.connId, messageInfo, msg)
+	if messageInfo.Chat == types.StatusBroadcastJID && msg.GetProtocolMessage() == nil {
+		handler.ProcessMessageInfo(messageInfo)
+		return // Statuses belong in their expiring browser, not the unread chat list.
+	}
+	recordActionMessage(handler.connId, messageInfo, msg)
+	if text := structuredMessageText(msg); text != "" {
+		handler.HandleTextMessage(messageInfo, &waE2E.Message{Conversation: &text}, isSyncRead)
+		return
+	}
 	switch {
 	case msg.Conversation != nil || msg.ExtendedTextMessage != nil:
 		handler.HandleTextMessage(messageInfo, msg, isSyncRead)

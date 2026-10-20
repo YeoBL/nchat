@@ -8,6 +8,11 @@
 #include "wmchat.h"
 
 #include <iostream>
+#include <sstream>
+
+#include <cereal/external/rapidjson/document.h>
+#include <cereal/external/rapidjson/stringbuffer.h>
+#include <cereal/external/rapidjson/writer.h>
 
 #include <sys/stat.h>
 
@@ -32,6 +37,66 @@ enum NotifyType
 
 std::mutex WmChat::s_ConnIdMapMutex;
 std::map<int, WmChat*> WmChat::s_ConnIdMap;
+
+static std::string ActionParamsJson(const std::map<std::string, std::string>& p_Params)
+{
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  writer.StartObject();
+  for (const auto& param : p_Params)
+  {
+    writer.Key(param.first.data(), static_cast<rapidjson::SizeType>(param.first.size()));
+    writer.String(param.second.data(), static_cast<rapidjson::SizeType>(param.second.size()));
+  }
+  writer.EndObject();
+  return std::string(buffer.GetString(), buffer.GetSize());
+}
+
+static ClientActionResult ParseActionResult(const char* p_Data)
+{
+  ClientActionResult result;
+  result.success = false;
+  result.title = "WhatsApp";
+  result.text = "Could not read account tools.";
+  rapidjson::Document data;
+  if (!p_Data || data.Parse(p_Data).HasParseError() || !data.IsObject()) return result;
+  auto getString = [](const rapidjson::Value& object, const char* key) -> std::string
+  {
+    return object.HasMember(key) && object[key].IsString()
+      ? std::string(object[key].GetString(), object[key].GetStringLength()) : "";
+  };
+  result.success = data.HasMember("success") && data["success"].IsBool() && data["success"].GetBool();
+  result.title = getString(data, "title");
+  result.text = getString(data, "text");
+  result.filePath = getString(data, "filePath");
+  if (data.HasMember("items") && data["items"].IsArray())
+  {
+    for (const auto& source : data["items"].GetArray())
+    {
+      if (!source.IsObject()) continue;
+      ClientActionItem item;
+      item.title = getString(source, "title");
+      item.detail = getString(source, "detail");
+      item.operation = getString(source, "operation");
+      item.confirm = source.HasMember("confirm") && source["confirm"].IsBool() && source["confirm"].GetBool();
+      if (source.HasMember("params") && source["params"].IsObject())
+      {
+        for (const auto& param : source["params"].GetObject())
+          if (param.value.IsString())
+            item.params.emplace(std::string(param.name.GetString(), param.name.GetStringLength()),
+              std::string(param.value.GetString(), param.value.GetStringLength()));
+      }
+      if (source.HasMember("fields") && source["fields"].IsArray())
+      {
+        for (const auto& field : source["fields"].GetArray())
+          if (field.IsObject()) item.fields.push_back({getString(field, "key"),
+            getString(field, "label"), getString(field, "value")});
+      }
+      result.items.push_back(std::move(item));
+    }
+  }
+  return result;
+}
 
 extern "C" WmChat* CreateWmChat()
 {
@@ -733,6 +798,19 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
           info.note = "Voters from live updates and phone history supplied to nchat. History may be incomplete.";
         }
         request->onResult(std::move(info));
+      }
+      break;
+
+    case ClientActionRequestType:
+      {
+        auto request = std::static_pointer_cast<ClientActionRequest>(p_RequestMessage);
+        if (!request->onResult) break;
+        const auto params = ActionParamsJson(request->params);
+        char* raw = CWmClientAction(m_ConnId, const_cast<char*>(request->operation.c_str()),
+          const_cast<char*>(params.c_str()));
+        auto result = ParseActionResult(raw);
+        free(raw);
+        request->onResult(std::move(result));
       }
       break;
 

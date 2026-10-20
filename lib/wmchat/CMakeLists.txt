@@ -41,6 +41,7 @@ endif()
 # Headers
 target_include_directories(wmchat PRIVATE "../common/src")
 target_include_directories(wmchat PRIVATE "../ncutil/src")
+target_include_directories(wmchat SYSTEM PRIVATE "../ncutil/ext/cereal/include")
 
 # Compiler flags
 set_target_properties(wmchat PROPERTIES COMPILE_FLAGS

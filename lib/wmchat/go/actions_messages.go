@@ -1,0 +1,135 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+
+	"fmt"
+
+	"os"
+	"path/filepath"
+
+	"sync"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
+)
+
+type storedActionMessage struct {
+	ChatID   string
+	SenderID string
+	ID       string
+	Data     []byte
+}
+
+var actionMessageMu sync.Mutex
+var actionMessageDBs = map[string]*sql.DB{}
+
+// Caller holds actionMessageMu. These payloads preserve native forwarding and structured controls.
+func actionMessagesDB(path string) (*sql.DB, error) {
+	if db := actionMessageDBs[path]; db != nil {
+		return db, nil
+	}
+	if path == "" {
+		return nil, fmt.Errorf("account storage is unavailable")
+	}
+	db, err := sql.Open("sqlite3", filepath.Join(path, "message-payloads.db")+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	if err != nil {
+		return nil, err
+	}
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS payloads (chat TEXT NOT NULL,id TEXT NOT NULL,sender TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(chat,id))`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	_ = os.Chmod(filepath.Join(path, "message-payloads.db"), 0600)
+	actionMessageDBs[path] = db
+	return db, nil
+}
+
+func closeActionMessages(path string) {
+	actionMessageMu.Lock()
+	defer actionMessageMu.Unlock()
+	if db := actionMessageDBs[path]; db != nil {
+		db.Close()
+		delete(actionMessageDBs, path)
+	}
+}
+
+func unwrapActionMessage(msg *waE2E.Message) *waE2E.Message {
+	for depth := 0; msg != nil && depth < 12; depth++ {
+		var inner *waE2E.Message
+		switch {
+		case msg.GetEphemeralMessage() != nil:
+			inner = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetDocumentWithCaptionMessage() != nil:
+			inner = msg.GetDocumentWithCaptionMessage().GetMessage()
+		case msg.GetDeviceSentMessage() != nil:
+			inner = msg.GetDeviceSentMessage().GetMessage()
+		}
+		if inner == nil {
+			break
+		}
+		msg = inner
+	}
+	if msg == nil {
+		return nil
+	}
+	return msg
+}
+
+func recordActionMessage(connID int, info types.MessageInfo, msg *waE2E.Message) {
+	if msg == nil || info.ID == "" || !forwardableMessage(msg) {
+		return
+	}
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return
+	}
+	client := GetClient(connID)
+	entry := storedActionMessage{ChatID: GetChatId(client, &info.Chat, &info.Sender), SenderID: info.Sender.String(), ID: info.ID, Data: data}
+	path := GetPath(connID)
+	actionMessageMu.Lock()
+	defer actionMessageMu.Unlock()
+	db, err := actionMessagesDB(path)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO payloads(chat,id,sender,payload) VALUES(?,?,?,?) ON CONFLICT(chat,id) DO UPDATE SET sender=excluded.sender,payload=excluded.payload`, entry.ChatID, entry.ID, entry.SenderID, entry.Data)
+	}
+	if err != nil {
+		LOG_WARNING(fmt.Sprintf("store structured message: %v", err))
+	}
+}
+
+func messageActionEntry(connID int, chatID, msgID string) (storedActionMessage, *waE2E.Message) {
+	path := GetPath(connID)
+	actionMessageMu.Lock()
+	entry := storedActionMessage{ChatID: chatID, ID: msgID}
+	db, err := actionMessagesDB(path)
+	if err == nil {
+		err = db.QueryRow(`SELECT sender,payload FROM payloads WHERE chat=? AND id=?`, chatID, msgID).Scan(&entry.SenderID, &entry.Data)
+	}
+	actionMessageMu.Unlock()
+	msg := &waE2E.Message{}
+	if err != nil || proto.Unmarshal(entry.Data, msg) != nil || len(entry.Data) == 0 {
+		return entry, nil
+	}
+	return entry, msg
+}
+
+func forwardableMessage(msg *waE2E.Message) bool {
+	return msg.Conversation != nil || msg.ExtendedTextMessage != nil || msg.ImageMessage != nil || msg.VideoMessage != nil || msg.AudioMessage != nil || msg.PtvMessage != nil || msg.DocumentMessage != nil || msg.StickerMessage != nil || msg.ContactMessage != nil || msg.ContactsArrayMessage != nil || msg.LocationMessage != nil || msg.LiveLocationMessage != nil || msg.PollCreationMessage != nil || msg.PollCreationMessageV2 != nil || msg.PollCreationMessageV3 != nil || msg.ButtonsMessage != nil || msg.ListMessage != nil || msg.InteractiveMessage != nil
+}
+
+func structuredMessageText(msg *waE2E.Message) string {
+	switch {
+	}
+	return ""
+}
+
+func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op string, p map[string]string) (actionResult, bool) {
+	if op != "message_details" {
+		return actionResult{}, false
+	}
+	return actionResult{}, false
+}

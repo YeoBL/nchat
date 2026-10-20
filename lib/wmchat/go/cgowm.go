@@ -149,6 +149,11 @@ func CWmGetPollVotes(connId int, chatId *C.char, msgId *C.char) *C.char {
 	return C.CString(WmGetPollVotes(connId, C.GoString(chatId), C.GoString(msgId)))
 }
 
+//export CWmClientAction
+func CWmClientAction(connId int, operation *C.char, params *C.char) *C.char {
+	return C.CString(WmClientAction(connId, C.GoString(operation), C.GoString(params)))
+}
+
 func CWmNewContactsNotify(connId int, chatId string, name string, phone string, isSelf int, isAlias int, notify int) {
 	C.WmNewContactsNotify(C.int(connId), C.CString(chatId), C.CString(name), C.CString(phone), C.int(isSelf), C.int(isAlias), C.int(notify))
 }
