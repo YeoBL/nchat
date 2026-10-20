@@ -10,16 +10,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/beeper/argo-go/codec"
 	"github.com/beeper/argo-go/pkg/buf"
+	"github.com/elliotchance/orderedmap/v3"
 
 	"go.mau.fi/whatsmeow/argo"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waWa6"
-	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -131,14 +130,14 @@ const (
 	queryNewsletterSubscribersDesktop  = "25403502652570342"
 	mutationMuteNewsletterDesktop      = "5971669009605755" // variables -> {newsletter_id, updates->{description, settings}}, output: xwa2_newsletter_update -> NewsletterMetadata without viewer meta
 	mutationUnmuteNewsletterDesktop    = "6104029483058502"
-	mutationUpdateNewsletterDesktop    = "7839742399440946"
+	mutationUpdateNewsletterDesktop    = "8580212968761751"
 	mutationCreateNewsletterDesktop    = "27527996220149684"
-	mutationUnfollowNewsletterDesktop  = "8782612271820087"
-	mutationFollowNewsletterDesktop    = "8621797084555037"
+	mutationUnfollowNewsletterDesktop  = "6548204731885183"
+	mutationFollowNewsletterDesktop    = "6742622672428529"
 )
 
 func convertQueryID(cli *Client, queryID string) string {
-	if payload := cli.Store.GetClientPayload(); payload.GetUserAgent().Platform == waWa6.ClientPayload_UserAgent_MACOS.Enum() || payload.GetWebInfo() == nil {
+	if payload := cli.Store.GetClientPayload(); payload.GetUserAgent().GetPlatform() == waWa6.ClientPayload_UserAgent_MACOS || payload.GetWebInfo() == nil {
 		switch queryID {
 		case queryFetchNewsletter:
 			return queryFetchNewsletterDesktop
@@ -169,9 +168,6 @@ func convertQueryID(cli *Client, queryID string) string {
 }
 
 func (cli *Client) sendMexIQ(ctx context.Context, queryID string, variables any) (json.RawMessage, error) {
-	if store.BaseClientPayload.GetUserAgent().GetPlatform() == waWa6.ClientPayload_UserAgent_MACOS {
-		return nil, fmt.Errorf("argo decoding is currently broken")
-	}
 	queryID = convertQueryID(cli, queryID)
 	payload, err := json.Marshal(map[string]any{
 		"variables": variables,
@@ -202,11 +198,21 @@ func (cli *Client) sendMexIQ(ctx context.Context, queryID string, variables any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected content type %T in mex response", result.Content)
 	}
-	if result.AttrGetter().OptionalString("format") == "argo" {
-		if true {
-			return nil, fmt.Errorf("argo decoding is currently broken")
+	return decodeMexResponse(queryID, result.AttrGetter().OptionalString("format"), resultContent)
+}
+
+func decodeMexResponse(queryID, format string, content []byte) (data json.RawMessage, err error) {
+	// Unsupported/corrupt service responses must become action errors, never process exits.
+	defer func() {
+		if failure := recover(); failure != nil {
+			data, err = nil, fmt.Errorf("invalid channel response: %v", failure)
 		}
-		store, err := argo.GetStore()
+	}()
+	if len(content) == 0 || len(content) > 2*1024*1024 {
+		return nil, fmt.Errorf("channel response is empty or exceeds the 2 MB limit")
+	}
+	if format == "argo" {
+		typesByName, err := argo.GetStore()
 		if err != nil {
 			return nil, err
 		}
@@ -214,31 +220,96 @@ func (cli *Client) sendMexIQ(ctx context.Context, queryID string, variables any)
 		if err != nil {
 			return nil, err
 		}
-		wt := store[queryIDMap[queryID]]
-
-		decoder, err := codec.NewArgoDecoder(buf.NewBufReadonly(resultContent))
+		name := queryIDMap[queryID]
+		// Web and desktop queries describe the same channel metadata. A mismatched
+		// future schema fails validation rather than producing invented metadata.
+		if name == "" {
+			switch queryID {
+			case queryFetchNewsletter:
+				name = "NewsletterMetadata"
+			case querySubscribedNewsletters:
+				name = "NewsletterSubscribed"
+			case mutationMuteNewsletter:
+				name = "NewsletterMute"
+			case mutationUnmuteNewsletter:
+				name = "NewsletterUnmute"
+			case mutationFollowNewsletter:
+				name = "NewsletterJoin"
+			case mutationUnfollowNewsletter:
+				name = "NewsletterLeave"
+			}
+		}
+		wt := typesByName[name]
+		if wt == nil {
+			return nil, fmt.Errorf("unsupported Argo channel schema for query %s", queryID)
+		}
+		if err := argo.ValidateTypedFrame(content, wt); err != nil {
+			return nil, fmt.Errorf("unsupported or invalid Argo channel response: %w", err)
+		}
+		decoder, err := codec.NewArgoDecoder(buf.NewBufReadonly(content))
 		if err != nil {
 			return nil, err
 		}
-		data, err := decoder.ArgoToMap(wt)
+		decoded, err := decoder.ArgoToMap(wt)
 		if err != nil {
-			log.Fatalf("argo to map error: %v", err)
+			return nil, fmt.Errorf("could not decode Argo channel response: %w", err)
 		}
-		b, err := json.Marshal(data)
+		content, err = json.Marshal(normalizeMexValue(decoded))
 		if err != nil {
 			return nil, err
 		}
-		return b, nil
-	} else {
-		var gqlResp types.GraphQLResponse
-		err = json.Unmarshal(resultContent, &gqlResp)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal graphql response: %w", err)
-		} else if len(gqlResp.Errors) > 0 {
-			return gqlResp.Data, fmt.Errorf("graphql error: %w", gqlResp.Errors)
-		}
-		return gqlResp.Data, nil
+	} else if format != "" && format != "json" {
+		return nil, fmt.Errorf("unsupported channel response format %q", format)
 	}
+	var response types.GraphQLResponse
+	if err := json.Unmarshal(content, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal graphql response: %w", err)
+	}
+	if len(response.Errors) > 0 {
+		return response.Data, fmt.Errorf("graphql error: %w", response.Errors)
+	}
+	if len(response.Data) == 0 {
+		return nil, fmt.Errorf("channel response has no GraphQL data")
+	}
+	return response.Data, nil
+}
+
+func normalizeMexValue(value any) any {
+	switch typed := value.(type) {
+	case *orderedmap.OrderedMap[string, any]:
+		result := make(map[string]any, typed.Len())
+		for element := typed.Front(); element != nil; element = element.Next() {
+			result[element.Key] = normalizeMexValue(element.Value)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, element := range typed {
+			result[index] = normalizeMexValue(element)
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func validateNewsletterMutation(data json.RawMessage, channel types.JID, fields ...string) error {
+	if channel.IsEmpty() || channel.Server != types.NewsletterServer {
+		return fmt.Errorf("invalid channel-operation target")
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(data, &response); err != nil {
+		return fmt.Errorf("WhatsApp returned an invalid channel-operation confirmation: %w", err)
+	}
+	for _, field := range fields {
+		var confirmation struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(response[field], &confirmation) == nil && confirmation.ID == channel.String() {
+			return nil
+		}
+	}
+	return fmt.Errorf("WhatsApp did not confirm this operation for the requested channel")
 }
 
 type respGetNewsletterInfo struct {
@@ -259,15 +330,22 @@ func (cli *Client) getNewsletterInfo(ctx context.Context, input map[string]any, 
 			err = jsonErr
 		}
 	}
+	if err == nil && (respData.Newsletter == nil || respData.Newsletter.ID.IsEmpty() || respData.Newsletter.ID.Server != types.NewsletterServer) {
+		err = fmt.Errorf("WhatsApp returned no channel metadata")
+	}
 	return respData.Newsletter, err
 }
 
 // GetNewsletterInfo gets the info of a newsletter that you're joined to.
 func (cli *Client) GetNewsletterInfo(ctx context.Context, jid types.JID) (*types.NewsletterMetadata, error) {
-	return cli.getNewsletterInfo(ctx, map[string]any{
+	metadata, err := cli.getNewsletterInfo(ctx, map[string]any{
 		"key":  jid.String(),
 		"type": types.NewsletterKeyTypeJID,
 	}, true)
+	if err == nil && metadata.ID != jid {
+		return nil, fmt.Errorf("WhatsApp returned metadata for a different channel")
+	}
+	return metadata, err
 }
 
 // GetNewsletterInfoWithInvite gets the info of a newsletter with an invite link.
@@ -295,6 +373,9 @@ func (cli *Client) GetSubscribedNewsletters(ctx context.Context) ([]*types.Newsl
 		if err == nil && jsonErr != nil {
 			err = jsonErr
 		}
+	}
+	if err == nil && respData.Newsletters == nil {
+		err = fmt.Errorf("WhatsApp returned no followed-channel list")
 	}
 	return respData.Newsletters, err
 }
@@ -352,26 +433,39 @@ func (cli *Client) NewsletterToggleMute(ctx context.Context, jid types.JID, mute
 	if mute {
 		query = mutationMuteNewsletter
 	}
-	_, err := cli.sendMexIQ(ctx, query, map[string]any{
+	data, err := cli.sendMexIQ(ctx, query, map[string]any{
 		"newsletter_id": jid.String(),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	field := "xwa2_newsletter_unmute_v2"
+	if mute {
+		field = "xwa2_newsletter_mute_v2"
+	}
+	return validateNewsletterMutation(data, jid, field)
 }
 
 // FollowNewsletter makes the user follow (join) a WhatsApp channel.
 func (cli *Client) FollowNewsletter(ctx context.Context, jid types.JID) error {
-	_, err := cli.sendMexIQ(ctx, mutationFollowNewsletter, map[string]any{
+	data, err := cli.sendMexIQ(ctx, mutationFollowNewsletter, map[string]any{
 		"newsletter_id": jid.String(),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return validateNewsletterMutation(data, jid, "xwa2_newsletter_join_v2", "xwa2_newsletter_follow")
 }
 
 // UnfollowNewsletter makes the user unfollow (leave) a WhatsApp channel.
 func (cli *Client) UnfollowNewsletter(ctx context.Context, jid types.JID) error {
-	_, err := cli.sendMexIQ(ctx, mutationUnfollowNewsletter, map[string]any{
+	data, err := cli.sendMexIQ(ctx, mutationUnfollowNewsletter, map[string]any{
 		"newsletter_id": jid.String(),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return validateNewsletterMutation(data, jid, "xwa2_newsletter_leave_v2", "xwa2_newsletter_unfollow")
 }
 
 type GetNewsletterMessagesParams struct {

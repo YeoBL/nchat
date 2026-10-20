@@ -147,6 +147,42 @@ type NewsletterText struct {
 	UpdateTime jsontime.UnixMicroString `json:"update_time"`
 }
 
+func (text *NewsletterText) UnmarshalJSON(data []byte) error {
+	type plain NewsletterText
+	var value struct {
+		*plain
+		UpdateTime json.RawMessage `json:"update_time"`
+	}
+	value.plain = (*plain)(text)
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if bytes.Equal(value.UpdateTime, []byte("null")) {
+		text.UpdateTime = jsontime.UnixMicroString{}
+	} else if len(value.UpdateTime) > 0 {
+		return json.Unmarshal(value.UpdateTime, &text.UpdateTime)
+	}
+	return nil
+}
+
+func (metadata *NewsletterThreadMetadata) UnmarshalJSON(data []byte) error {
+	type plain NewsletterThreadMetadata
+	var value struct {
+		*plain
+		CreationTime json.RawMessage `json:"creation_time"`
+	}
+	value.plain = (*plain)(metadata)
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if bytes.Equal(value.CreationTime, []byte("null")) {
+		metadata.CreationTime = jsontime.UnixString{}
+	} else if len(value.CreationTime) > 0 {
+		return json.Unmarshal(value.CreationTime, &metadata.CreationTime)
+	}
+	return nil
+}
+
 type NewsletterMessage struct {
 	MessageServerID MessageServerID
 	MessageID       MessageID
