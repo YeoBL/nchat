@@ -41,9 +41,7 @@ func messageDate(_ milliseconds: Int64) -> Date {
 // Shared by the badge and expanded rows: a filtered event must not reappear on expansion.
 let unreadCandidatePredicate = """
     m.isOutgoing = 0 AND m.isRead = 0 AND COALESCE(m.isDeleted, 0) = 0
-
-    AND COALESCE(ch.isMuted, 0) = 0
-    AND COALESCE(ch.isArchived, 0) = 0
+    AND COALESCE(ch.isArchived, 0) = 0 AND COALESCE(ch.isMuted, 0) = 0
     AND m.chatId != 'status@broadcast'
     AND COALESCE(m.text, '') NOT IN ('[Joined]', '[Left]')
     AND COALESCE(m.text, '') NOT GLOB '[[]Added *]'
@@ -141,7 +139,7 @@ final class Cache {
                 FROM messages m
                 LEFT JOIN chats2 ch ON ch.id = m.chatId
                 LEFT JOIN contacts2 c ON c.id = m.chatId
-                WHERE \(unreadCandidatePredicate)
+                WHERE \(unreadCandidatePredicate)\(knownSettingsPredicate)\(membershipPredicate)
             ), progress AS (
                 SELECT chatId, MAX(timeSent) AS time FROM messages
                 WHERE isOutgoing = 0 AND isRead = 1
