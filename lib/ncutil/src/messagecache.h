@@ -268,6 +268,8 @@ public:
                               const std::string& p_MsgId, const bool p_Sync);
   static bool GetOneMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                             const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages);
+  static std::vector<std::string> GetUnreadMessageIds(const std::string& p_ProfileId,
+                                                    const std::string& p_ChatId);
   static std::vector<std::string> GetUnreadChatIds(const std::string& p_ProfileId);
   static void UpdateMembership(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsMember);
   static void FindMessage(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_FromMsgId,

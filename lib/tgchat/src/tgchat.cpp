@@ -33,6 +33,7 @@
 #include "cacheutil.h"
 #include "config.h"
 #include "fileutil.h"
+#include "forumreadstate.h"
 #include "tgmembership.h"
 #include "log.h"
 #include "messagecache.h"
@@ -218,6 +219,9 @@ private:
   int64_t GetDummyUserId(const std::string& p_Name);
   void UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId);
   void UpdateLastReadInboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId);
+  bool TrackForumMessage(const td::td_api::message& p_Message);
+  void UpdateForumReadInbox(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId);
+  void ReconcileForumReads(int64_t p_ChatId);
 
 private:
   std::thread m_ServiceThread;
@@ -240,6 +244,8 @@ private:
   std::map<int64_t, int64_t> m_LastReadOutboxMessage;
   std::map<int64_t, std::set<int64_t>> m_UnreadInboxMessages;
   std::map<int64_t, std::set<int64_t>> m_UnreadOutboxMessages;
+  ForumReadState m_ForumReads;
+  std::set<ForumReadState::Key> m_RequestedForumReads;
   std::map<int64_t, int64_t> m_SupergroupChats, m_BasicGroupChats;
   std::map<int64_t, ContactInfo> m_ContactInfos;
   std::map<int64_t, ChatType> m_ChatTypes;
@@ -797,6 +803,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
             UpdateLastReadOutboxMessage(tchat->id_, tchat->last_read_outbox_message_id_);
             UpdateLastReadInboxMessage(tchat->id_, tchat->last_read_inbox_message_id_);
+            ReconcileForumReads(tchat->id_);
           });
         }
       }
@@ -2068,6 +2075,10 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
     LOG_TRACE("chat read inbox update");
 
     UpdateLastReadInboxMessage(chat_read_inbox.chat_id_, chat_read_inbox.last_read_inbox_message_id_);
+  },
+  [this](td::td_api::updateForumTopic& topic)
+  {
+    UpdateForumReadInbox(topic.chat_id_, topic.forum_topic_id_, topic.last_read_inbox_message_id_);
   },
   [this](td::td_api::updateDeleteMessages& delete_messages)
   {
@@ -3644,6 +3655,8 @@ void TgChat::Impl::TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessag
       p_ChatMessage.isRead = !p_TdMessage.contains_unread_mention_;
     }
 
+    if (!p_ChatMessage.isRead && TrackForumMessage(p_TdMessage)) p_ChatMessage.isRead = true;
+
     if (!p_ChatMessage.isRead)
     {
       m_UnreadInboxMessages[p_TdMessage.chat_id_].insert(p_TdMessage.id_);
@@ -4161,6 +4174,71 @@ void TgChat::Impl::UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastR
         it = std::next(it);
       }
     }
+  }
+}
+
+bool TgChat::Impl::TrackForumMessage(const td::td_api::message& p_Message)
+{
+  if (p_Message.is_outgoing_ || !p_Message.topic_id_ ||
+      p_Message.topic_id_->get_id() != td::td_api::messageTopicForum::ID) return false;
+  const auto& topic = static_cast<const td::td_api::messageTopicForum&>(*p_Message.topic_id_);
+  const ForumReadState::Key key{p_Message.chat_id_, topic.forum_topic_id_};
+  const bool read = m_ForumReads.Track(key, p_Message.id_);
+  if (m_RequestedForumReads.insert(key).second)
+  {
+    SendQuery(td::td_api::make_object<td::td_api::getForumTopic>(key.first, key.second),
+      [this, key](Object object)
+      {
+        if (object->get_id() != td::td_api::forumTopic::ID)
+        {
+          m_RequestedForumReads.erase(key);
+          return;
+        }
+        auto topic = td::move_tl_object_as<td::td_api::forumTopic>(object);
+        UpdateForumReadInbox(key.first, key.second, topic->last_read_inbox_message_id_);
+      });
+  }
+  return read;
+}
+
+void TgChat::Impl::UpdateForumReadInbox(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId)
+{
+  for (int64_t id : m_ForumReads.Read({p_ChatId, p_TopicId}, p_LastReadMsgId))
+  {
+    auto notify = std::make_shared<NewMessageStatusNotify>(m_ProfileId);
+    notify->chatId = StrUtil::NumToHex(p_ChatId);
+    notify->msgId = StrUtil::NumToHex(id);
+    notify->isRead = true;
+    CallMessageHandler(notify);
+    m_UnreadInboxMessages[p_ChatId].erase(id);
+  }
+}
+
+void TgChat::Impl::ReconcileForumReads(int64_t p_ChatId)
+{
+  // Recover topic membership for unread cache entries after a restart. Neither
+  // getMessages nor getForumTopic opens/views messages or sends read receipts.
+  const auto ids = MessageCache::GetUnreadMessageIds(m_ProfileId, StrUtil::NumToHex(p_ChatId));
+  for (size_t offset = 0; offset < ids.size(); offset += 100)
+  {
+    std::vector<int64_t> batch;
+    for (size_t i = offset; i < std::min(ids.size(), offset + 100); ++i)
+      batch.push_back(StrUtil::NumFromHex<int64_t>(ids[i]));
+    SendQuery(td::td_api::make_object<td::td_api::getMessages>(p_ChatId, std::move(batch)),
+      [this](Object object)
+      {
+        if (object->get_id() != td::td_api::messages::ID) return;
+        auto messages = td::move_tl_object_as<td::td_api::messages>(object);
+        for (const auto& message : messages->messages_)
+        {
+          if (!message || !TrackForumMessage(*message)) continue;
+          auto notify = std::make_shared<NewMessageStatusNotify>(m_ProfileId);
+          notify->chatId = StrUtil::NumToHex(message->chat_id_);
+          notify->msgId = StrUtil::NumToHex(message->id_);
+          notify->isRead = true;
+          CallMessageHandler(notify);
+        }
+      });
   }
 }
 
