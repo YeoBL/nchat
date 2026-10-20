@@ -5830,7 +5830,12 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     }
     if (operation == "local.transcribe")
     {
-      FeatureMedia::Transcribe(values, done);
+      done(FeatureMedia::StartTranscription(values));
+      return true;
+    }
+    if (operation == "local.transcription.status")
+    {
+      done(FeatureMedia::TranscriptionStatus(values));
       return true;
     }
     if (operation == "local.preview")
@@ -5861,6 +5866,7 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       makeItem(page, "Saved messages / bookmarks", "local.bookmarks", {}, "Local bookmarks; nothing is sent to the service");
       makeItem(page, "Search saved audio transcripts", "local.transcripts", {{"_quickForm", "1"}}, "Search on-device transcripts without uploading audio",
         {{"query", "Transcript contains (blank shows recent transcripts)", ""}});
+      makeItem(page, "Transcription status", "local.transcription.status", {}, "Check running jobs, completed transcripts and errors");
       makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
       if (!chat.second.empty())
       {
