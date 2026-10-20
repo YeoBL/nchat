@@ -3590,7 +3590,14 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageContact::ID)
   {
+    const auto& content = static_cast<const td::td_api::messageContact&>(p_TdMessageContent);
     p_Text = "[Contact]";
+    if (content.contact_)
+    {
+      p_Text += " " + content.contact_->first_name_;
+      if (!content.contact_->last_name_.empty()) p_Text += " " + content.contact_->last_name_;
+      if (!content.contact_->phone_number_.empty()) p_Text += "\n" + content.contact_->phone_number_;
+    }
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageLocation::ID)
   {
