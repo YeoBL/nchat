@@ -34,6 +34,7 @@
 #include "config.h"
 #include "fileutil.h"
 #include "forumreadstate.h"
+#include "tgfeatures_util.h"
 #include "tgmembership.h"
 #include "log.h"
 #include "messagecache.h"
@@ -639,6 +640,75 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         SendQuery(td::td_api::make_object<td::td_api::getChats>(nullptr, limit), receiveChats);
         SendQuery(td::td_api::make_object<td::td_api::getChats>(
                     td::td_api::make_object<td::td_api::chatListArchive>(), limit), receiveChats);
+      }
+      break;
+
+    case GetPollVotesRequestType:
+      {
+        auto request = std::static_pointer_cast<GetPollVotesRequest>(p_RequestMessage);
+        if (!request->onResult) break;
+        const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
+        const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
+        SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+          [this, request, chatId, msgId](Object object)
+        {
+          PollVoteInfo info;
+          if (object->get_id() != td::td_api::message::ID)
+          {
+            info.note = "Could not load this poll.";
+            request->onResult(std::move(info));
+            return;
+          }
+          auto message = td::move_tl_object_as<td::td_api::message>(object);
+          if (!message->content_ || message->content_->get_id() != td::td_api::messagePoll::ID)
+          {
+            info.note = "This message is not a poll.";
+            request->onResult(std::move(info));
+            return;
+          }
+          const auto& poll = static_cast<td::td_api::messagePoll&>(*message->content_).poll_;
+          if (!poll || !poll->can_get_voters_)
+          {
+            info.note = "Telegram does not disclose voter names for this poll.";
+            request->onResult(std::move(info));
+            return;
+          }
+          const int optionCount = static_cast<int>(poll->options_.size());
+          auto result = std::make_shared<PollVoteInfo>();
+          auto fetch = std::make_shared<std::function<void(int, int)>>();
+          *fetch = [this, request, result, fetch, chatId, msgId, optionCount](int option, int offset)
+          {
+            if (option >= optionCount)
+            {
+              request->onResult(*result);
+              *fetch = nullptr;
+              return;
+            }
+            SendQuery(td::td_api::make_object<td::td_api::getPollVoters>(chatId, msgId, option, offset, 50),
+              [this, request, result, fetch, option, offset](Object pageObject)
+            {
+              if (pageObject->get_id() != td::td_api::pollVoters::ID)
+              {
+                result->note = "Some voter names are unavailable from Telegram.";
+                (*fetch)(option + 1, 0);
+                return;
+              }
+              auto page = td::move_tl_object_as<td::td_api::pollVoters>(pageObject);
+              for (auto& voter : page->voters_)
+                result->votes.push_back({option, StrUtil::NumToHex(GetSenderId(std::move(voter->voter_id_)))});
+              const int next = offset + static_cast<int>(page->voters_.size());
+              if (TgFeaturePollPageHasMore(offset, static_cast<int>(page->voters_.size()), page->total_count_))
+                (*fetch)(option, next);
+              else
+              {
+                if (next < page->total_count_)
+                  result->note = "Telegram did not return every voter; reopen to retry.";
+                (*fetch)(option + 1, 0);
+              }
+            });
+          };
+          (*fetch)(0, 0);
+        });
       }
       break;
 

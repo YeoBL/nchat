@@ -3981,3 +3981,39 @@ func WmVotePoll(connId int, chatID, msgID, optionIndexes string) int {
 	return 0
 }
 
+func WmGetPollVotes(connId int, chatID, msgID string) string {
+	mx.Lock()
+	defer mx.Unlock()
+	state := pollStates[connId][pollStateKey(chatID, msgID)]
+	if state == nil {
+		return "missing\n"
+	}
+	if state.HiddenVoters {
+		return "hidden\n"
+	}
+	normalizeRecordedPollVoters(state, func(raw string) string { return canonicalPollVoterID(clients[connId], raw) })
+	hashes := make(map[string]int, len(state.Options))
+	for i, option := range state.Options {
+		hashes[fmt.Sprintf("%x", whatsmeow.HashPollOptions([]string{option})[0])] = i
+	}
+	var output strings.Builder
+	output.WriteString("available\n")
+	voters := make([]string, 0, len(state.Votes))
+	for voter := range state.Votes {
+		voters = append(voters, voter)
+	}
+	sort.Strings(voters)
+	for _, voter := range voters {
+		choices := state.Votes[voter]
+		displayID := voter
+		if client := clients[connId]; IsSelfUser(client, voter) {
+			displayID = "You"
+		}
+		for _, choice := range choices {
+			if option, ok := hashes[choice]; ok {
+				fmt.Fprintf(&output, "%d\t%s\n", option, displayID)
+			}
+		}
+	}
+	return output.String()
+}
