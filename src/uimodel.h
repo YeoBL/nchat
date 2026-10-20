@@ -266,6 +266,9 @@ private:
     static const std::pair<std::string, std::string> s_ChatNone;
 
     std::string m_EditMessageId;
+    std::pair<std::string, std::string> m_EditMessageChat;
+    std::wstring m_EditDraft;
+    int m_EditDraftPos = 0;
     std::string m_ProtocolUiControl;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> m_MessageVec;

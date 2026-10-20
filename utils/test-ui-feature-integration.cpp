@@ -3,6 +3,7 @@
 // all models, dialogs, rendering, local state and cache queries are production.
 #include <cassert>
 #include <chrono>
+#include <clocale>
 #include <cstdio>
 #include <deque>
 #include <fstream>
@@ -17,6 +18,7 @@
 #include "localfeatures.h"
 #include "messagecache.h"
 #include "protocolutil.h"
+#include "strutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uicontroller.h"
@@ -59,6 +61,9 @@ void Choose(const std::string& screen, const std::string& filter)
 {
   // Filter the real list, then End selects the item's final wrapped detail row.
   input.push_back({screen, 0});
+  // Restored pages retain their last list filter, including after canceling a
+  // field editor. Clear it before choosing a different action on that page.
+  for (int i = 0; i < 100; ++i) Key("", "backspace");
   Text(filter);
   Key("", "end");
   Key("", "ok");
@@ -102,6 +107,35 @@ struct FakeProtocol : Protocol
       assert(type != SendMessageRequestType && type != MarkMessageReadRequestType &&
              type != DeleteMessageRequestType && type != ClientActionRequestType);
   }
+};
+
+struct EditingProtocol : FakeProtocol
+{
+  explicit EditingProtocol(std::string id = Profile) : profile(std::move(id)) {}
+  std::string GetProfileId() const override { return profile; }
+  bool HasFeature(ProtocolFeature feature) const override { return feature == FeatureEditMessagesWithinTwoDays; }
+  void SendRequest(std::shared_ptr<RequestMessage> request) override
+  {
+    if (request->GetMessageType() == EditMessageRequestType)
+      edits.push_back(std::static_pointer_cast<EditMessageRequest>(request));
+    if (request->GetMessageType() == ClientActionRequestType && !composeTarget.empty())
+    {
+      requests.push_back(request->GetMessageType());
+      auto action = std::static_pointer_cast<ClientActionRequest>(request);
+      ClientActionResult page;
+      page.title = "Offline cloud draft";
+      ClientActionItem item;
+      item.title = "Load into textbox";
+      item.operation = "local.compose";
+      item.params = {{"profile", profile}, {"chatId", composeTarget}, {"text", composeText}};
+      page.items.push_back(item);
+      action->onResult(page);
+      return;
+    }
+    FakeProtocol::SendRequest(request);
+  }
+  std::string profile, composeTarget, composeText;
+  std::vector<std::shared_ptr<EditMessageRequest>> edits;
 };
 
 void Populate(UiModel& model, const std::shared_ptr<FakeProtocol>& protocol)
@@ -177,6 +211,7 @@ wint_t UiController::GetKey(int)
 
 int main()
 {
+  std::setlocale(LC_ALL, ""); // Match Ui::Init(), including multibyte emoji conversion.
   char temp[] = "/tmp/nchat-ui-features.XXXXXX";
   const auto root = mkdtemp(temp);
   assert(root);
@@ -333,6 +368,163 @@ int main()
     model.Cleanup();
   }
   protocol->AssertNoMutations();
+
+  // Editing a sent message is a temporary composer mode. Cancel, save, cloud
+  // draft loading, navigation and disappearing history must never turn its
+  // contents into a new chat's edit or destroy the original unsent draft.
+  {
+    auto editing = std::make_shared<EditingProtocol>();
+    auto other = std::make_shared<EditingProtocol>("WhatsAppMd_offline_edit_test");
+    UiModel model;
+    Populate(model, editing);
+    model.AddProtocol(other);
+    auto& impl = model.GetImpl();
+    auto originalMessage = impl.GetMessages(Profile, "alpha").at("loaded-message");
+    originalMessage.isOutgoing = true;
+    originalMessage.timeSent = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+    impl.GetMessages(Profile, "alpha")[originalMessage.id] = originalMessage;
+    const std::string originalDraft = "Unsent Unicode draft Ω\nSecond line";
+    const int originalCursor = 7;
+    impl.ReplaceDraft(originalDraft);
+    impl.GetEntryPos() = originalCursor;
+    const auto beginEdit = [&]() {
+      impl.SetSelectMessageActive(true);
+      impl.GetMessageOffset(Profile, "alpha") = 0;
+      model.KeyHandler(UiKeyConfig::GetKey("edit_msg"));
+      assert(impl.GetEditMessageActive());
+      assert(Entry(model) == StrUtil::ToWString(originalMessage.text));
+    };
+    const auto restored = [&]() {
+      assert(!impl.GetEditMessageActive());
+      assert(Entry(model) == StrUtil::ToWString(originalDraft));
+      assert(impl.GetEntryPos() == originalCursor);
+      assert(impl.GetLocalFeatures().GetDraft({Profile, "alpha"}) == originalDraft);
+    };
+
+    beginEdit();
+    Type(model, L" changed then cancelled");
+    model.KeyHandler(UiKeyConfig::GetKey("cancel"));
+    restored();
+    assert(impl.GetLocalFeatures().Flush());
+    { LocalFeatures disk; assert(disk.GetDraft({Profile, "alpha"}) == originalDraft); }
+
+    beginEdit();
+    Type(model, L" amended");
+    const auto editedText = StrUtil::ToString(Entry(model));
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    assert(editing->edits.size() == 1);
+    assert(editing->edits.back()->chatId == "alpha" && editing->edits.back()->msgId == originalMessage.id);
+    assert(editing->edits.back()->chatMessage.text == editedText);
+    restored();
+
+    beginEdit();
+    impl.GetMessages(Profile, "alpha").erase(originalMessage.id);
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    restored();
+    assert(editing->edits.size() == 1);
+    impl.GetMessages(Profile, "alpha")[originalMessage.id] = originalMessage;
+    beginEdit();
+    impl.GetMessages(Profile, "alpha")[originalMessage.id].isDeleted = true;
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    restored();
+    assert(editing->edits.size() == 1);
+    impl.GetMessages(Profile, "alpha")[originalMessage.id] = originalMessage;
+
+    // Emoji display is global. Toggling it during an edit must transform the
+    // suspended draft too, preserving its logical cursor through both formats.
+    if (!impl.GetEmojiEnabled()) model.KeyHandler(UiKeyConfig::GetKey("toggle_emoji"));
+    const std::string textDraft = "Before :smile: after";
+    const auto emojiDraft = StrUtil::ToWString(StrUtil::Emojize(textDraft, true));
+    assert(emojiDraft != StrUtil::ToWString(textDraft));
+    const int emojiCursor = static_cast<int>(StrUtil::ToWString(StrUtil::Emojize("Before :smile:", true)).size());
+    impl.ReplaceDraft(StrUtil::ToString(emojiDraft));
+    impl.GetEntryPos() = emojiCursor;
+    beginEdit();
+    model.KeyHandler(UiKeyConfig::GetKey("toggle_emoji"));
+    model.KeyHandler(UiKeyConfig::GetKey("cancel"));
+    assert(!impl.GetEmojiEnabled() && !impl.GetEditMessageActive());
+    assert(Entry(model) == StrUtil::ToWString(textDraft));
+    assert(impl.GetEntryPos() == static_cast<int>(std::string("Before :smile:").size()));
+    beginEdit();
+    model.KeyHandler(UiKeyConfig::GetKey("toggle_emoji"));
+    model.KeyHandler(UiKeyConfig::GetKey("cancel"));
+    assert(impl.GetEmojiEnabled() && !impl.GetEditMessageActive());
+    assert(Entry(model) == emojiDraft && impl.GetEntryPos() == emojiCursor);
+    // Saving after a display-mode change also restores the converted draft.
+    beginEdit();
+    model.KeyHandler(UiKeyConfig::GetKey("toggle_emoji"));
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    assert(editing->edits.size() == 2 && !impl.GetEditMessageActive());
+    assert(Entry(model) == StrUtil::ToWString(textDraft));
+    assert(impl.GetEntryPos() == static_cast<int>(std::string("Before :smile:").size()));
+    model.KeyHandler(UiKeyConfig::GetKey("toggle_emoji"));
+    impl.ReplaceDraft(originalDraft);
+    impl.GetEntryPos() = originalCursor;
+    restored();
+
+    impl.GotoChat({Profile, "beta"});
+    impl.ReplaceDraft("Unchanged beta draft");
+    impl.GetEntryPos() = 3;
+    impl.GotoChat({Profile, "alpha"});
+    restored();
+    assert(impl.GetLocalFeatures().SetFolder({Profile, "beta"}, "Edit navigation target", true));
+    beginEdit();
+    Choose("Chat folders", "Edit navigation target");
+    Choose("Edit navigation target", "Test beta");
+    Run(model, "folders");
+    assert(Chat(model) == "beta" && !impl.GetEditMessageActive());
+    assert(Entry(model) == L"Unchanged beta draft" && impl.GetEntryPos() == 3);
+    impl.SaveEditMessage(); // No stale ID lookup or outgoing request after navigation.
+    assert(editing->edits.size() == 2);
+    impl.GotoChat({Profile, "alpha"});
+    restored();
+
+    assert(impl.GetLocalFeatures().SetDraft({other->profile, "other-chat"}, "Other account draft"));
+    beginEdit();
+    impl.GotoChat({other->profile, "other-chat"}, true);
+    assert(!impl.GetEditMessageActive() && Entry(model) == L"Other account draft");
+    impl.GotoChat({Profile, "alpha"});
+    restored();
+
+    // Compose replacement is reviewed before navigation. A cancelled review
+    // preserves the current editing session as well as both chats' drafts.
+    editing->composeTarget = "beta";
+    editing->composeText = "Cloud replacement";
+    const auto compose = [&](bool review, bool accept) {
+      Choose("Search messages across chats", "Account tools");
+      Choose("Offline cloud draft", "Load into textbox");
+      if (review) Key("This chat already has an unsent draft.", accept ? "ok" : "cancel");
+      Run(model, "client_actions");
+    };
+    beginEdit();
+    const auto editingEntry = Entry(model);
+    compose(true, false);
+    assert(Chat(model) == "alpha" && impl.GetEditMessageActive() && Entry(model) == editingEntry);
+    assert(impl.GetLocalFeatures().GetDraft({Profile, "beta"}) == "Unchanged beta draft");
+    compose(true, true);
+    assert(Chat(model) == "beta" && !impl.GetEditMessageActive() && Entry(model) == L"Cloud replacement");
+    impl.GetEntryPos() = 2;
+    compose(false, false); // Identical text: neither prompt nor cursor jump.
+    assert(Chat(model) == "beta" && Entry(model) == L"Cloud replacement" && impl.GetEntryPos() == 2);
+    editing->composeTarget = "empty-new-chat";
+    editing->composeText = "First draft";
+    compose(false, false); // Empty destination: no destructive replacement.
+    assert(Chat(model) == "empty-new-chat" && Entry(model) == L"First draft");
+
+    impl.GotoChat({Profile, "alpha"});
+    restored();
+    beginEdit();
+    impl.ReplaceDraft(originalDraft); // Same-chat compose also exits edit safely.
+    restored();
+    beginEdit();
+    model.Cleanup(); // Shutdown while editing preserves the ordinary draft.
+    restored();
+    { LocalFeatures disk; assert(disk.GetDraft({Profile, "alpha"}) == originalDraft); }
+    assert(editing->edits.size() == 2);
+    for (const auto type : editing->requests)
+      assert(type != SendMessageRequestType && type != DeleteMessageRequestType && type != MarkMessageReadRequestType);
+  }
   UiKeyConfig::Cleanup();
   UiColorConfig::Cleanup();
   endwin();
@@ -343,5 +535,5 @@ int main()
   UiConfig::Cleanup();
   AppConfig::Cleanup();
   FileUtil::RmDir(root);
-  std::cout << "PASS: F2 cancel, F3 cached full preview/no read receipt, F4 folder membership, F5 bookmark preview, F6 canceled deletion, per-chat drafts across model reload, deferred transcription source/defer/consume; no service mutations or device access\n";
+  std::cout << "PASS: F2-F6 workflows, persistent drafts, edit cancel/save/navigation/missing-message safety, reviewed cloud-draft replacement and transcription origin; fake protocols only, no real service mutations or device access\n";
 }

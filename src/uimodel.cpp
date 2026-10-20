@@ -77,10 +77,10 @@ void UiModel::Impl::Init()
 
 void UiModel::Impl::Cleanup()
 {
+  SetEditMessageActive(false);
   for (const auto& profile : m_EntryStr)
     for (const auto& chat : profile.second)
     {
-      if (m_EditMessageActive && std::make_pair(profile.first, chat.first) == m_CurrentChat) continue;
       m_LocalFeatures.SetDraft({profile.first, chat.first}, StrUtil::ToString(chat.second), false);
     }
   if (!m_LocalFeatures.Flush()) LOG_WARNING("draft save failed: %s", m_LocalFeatures.GetError().c_str());
@@ -89,6 +89,9 @@ void UiModel::Impl::Cleanup()
 
 void UiModel::Impl::EnsureDraft()
 {
+  // Every composer/chat-navigation path passes here. A sent-message edit belongs
+  // to its original chat, never to whichever chat a tool opens afterwards.
+  if (m_EditMessageActive && m_EditMessageChat != m_CurrentChat) SetEditMessageActive(false);
   if (m_CurrentChat == s_ChatNone || !m_LoadedDrafts.insert(m_CurrentChat).second) return;
   std::wstring& entry = m_EntryStr[m_CurrentChat.first][m_CurrentChat.second];
   if (entry.empty()) entry = StrUtil::ToWString(m_LocalFeatures.GetDraft(m_CurrentChat));
@@ -1487,10 +1490,15 @@ void UiModel::Impl::InsertText(const std::wstring& p_Text)
 
 void UiModel::Impl::ReplaceDraft(const std::string& p_Text)
 {
+  SetEditMessageActive(false);
   std::string text = p_Text;
   SanitizeEntryStr(text);
-  GetEntryStr() = StrUtil::ToWString(text);
-  GetEntryPos() = static_cast<int>(GetEntryStr().size());
+  const auto entry = StrUtil::ToWString(text);
+  if (GetEntryStr() != entry)
+  {
+    GetEntryStr() = entry;
+    GetEntryPos() = static_cast<int>(entry.size());
+  }
   UpdateEntry();
 }
 
@@ -3344,10 +3352,18 @@ bool UiModel::Impl::GetEditMessageActive()
 
 void UiModel::Impl::SetEditMessageActive(bool p_EditMessageActive)
 {
+  if (!p_EditMessageActive && m_EditMessageActive)
+  {
+    m_EntryStr[m_EditMessageChat.first][m_EditMessageChat.second] = std::move(m_EditDraft);
+    m_EntryPos[m_EditMessageChat.first][m_EditMessageChat.second] = m_EditDraftPos;
+  }
   m_EditMessageActive = p_EditMessageActive;
   if (!m_EditMessageActive)
   {
     m_EditMessageId.clear();
+    m_EditMessageChat = s_ChatNone;
+    m_EditDraft.clear();
+    m_EditDraftPos = 0;
   }
 
   SetHelpOffset(0);
@@ -3752,16 +3768,21 @@ bool UiModel::Impl::PreEditMsg(std::string& p_ProfileId, std::string& p_ChatId, 
   p_ChatId = m_CurrentChat.second;
   const std::vector<std::string>& messageVec = m_MessageVec[p_ProfileId][p_ChatId];
   const int messageOffset = m_MessageOffset[p_ProfileId][p_ChatId];
-  auto it = std::next(messageVec.begin(), messageOffset);
-  if (it == messageVec.end())
+  if (messageOffset < 0 || messageOffset >= static_cast<int>(messageVec.size()))
   {
     LOG_WARNING("error finding message id");
     return false;
   }
 
-  p_MsgId = *it;
+  p_MsgId = messageVec[messageOffset];
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[p_ProfileId][p_ChatId];
-  const ChatMessage& chatMessage = messages.at(p_MsgId);
+  const auto message = messages.find(p_MsgId);
+  if (message == messages.end() || message->second.isDeleted)
+  {
+    p_MsgDialogText = "This message is no longer available to edit.";
+    return false;
+  }
+  const ChatMessage& chatMessage = message->second;
   if (!chatMessage.isOutgoing)
   {
     p_MsgDialogText = "Received messages cannot be edited.";
@@ -3794,11 +3815,18 @@ void UiModel::Impl::StartEditMsg(const std::string& p_ProfileId, const std::stri
                                  const std::string& p_MsgId)
 {
   AnyUserKeyInput();
-
+  if (GetEditMessageActive() || m_CurrentChat != std::make_pair(p_ProfileId, p_ChatId)) return;
+  const auto& messages = m_Messages[p_ProfileId][p_ChatId];
+  const auto message = messages.find(p_MsgId);
+  if (message == messages.end() || message->second.isDeleted || !message->second.isOutgoing) return;
+  EnsureDraft();
+  m_EditMessageChat = m_CurrentChat;
+  m_EditDraft = m_EntryStr[p_ProfileId][p_ChatId];
+  m_EditDraftPos = m_EntryPos[p_ProfileId][p_ChatId];
   m_EditMessageId = p_MsgId;
   SetEditMessageActive(true);
 
-  std::string text = GetSelectedMessageText();
+  std::string text = message->second.text;
   text = StrUtil::Textize(text);
   if (m_View->GetEmojiEnabled())
   {
@@ -3819,11 +3847,27 @@ void UiModel::Impl::SaveEditMessage()
 {
   if (!GetEditMessageActive()) return;
 
+  if (m_CurrentChat != m_EditMessageChat)
+  {
+    LOG_WARNING("discard edit after chat changed");
+    SetEditMessageActive(false);
+    UpdateEntry();
+    return;
+  }
+
   std::string profileId = m_CurrentChat.first;
   std::string chatId = m_CurrentChat.second;
   std::wstring& entryStr = m_EntryStr[profileId][chatId];
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
-  const ChatMessage& chatMessage = messages.at(m_EditMessageId);
+  const auto message = messages.find(m_EditMessageId);
+  if (message == messages.end() || message->second.isDeleted || !message->second.isOutgoing)
+  {
+    LOG_WARNING("discard edit for unavailable message %s", m_EditMessageId.c_str());
+    SetEditMessageActive(false);
+    UpdateEntry();
+    return;
+  }
+  const ChatMessage& chatMessage = message->second;
 
   if (entryStr.empty()) return;
 
@@ -3850,21 +3894,20 @@ void UiModel::Impl::SaveEditMessage()
   SendProtocolRequest(profileId, editMessageRequest);
 
   SetEditMessageActive(false);
-
-  Clear(false /*p_AllowUndo*/);
+  UpdateEntry();
 }
 
 void UiModel::Impl::OnKeyCancel()
 {
   AnyUserKeyInput();
-  bool editMessageActive = GetEditMessageActive();
-  bool allowUndo = !editMessageActive;
-  if (editMessageActive)
+  if (GetEditMessageActive())
   {
     SetEditMessageActive(false);
+    UpdateEntry();
+    return;
   }
 
-  Clear(allowUndo);
+  Clear(true /*p_AllowUndo*/);
 }
 
 std::string UiModel::Impl::EntryStrToSendStr(const std::wstring& p_EntryStr)
@@ -4122,26 +4165,24 @@ void UiModel::Impl::Quit()
 void UiModel::Impl::EntryConvertEmojiEnabled()
 {
   const bool emojiEnabled = GetEmojiEnabled();
-  std::string profileId = m_CurrentChat.first;
-  std::string chatId = m_CurrentChat.second;
-  int& entryPos = m_EntryPos[profileId][chatId];
-  std::wstring& entryStr = m_EntryStr[profileId][chatId];
-
-  if (!entryStr.empty())
+  const auto convert = [emojiEnabled](std::wstring text)
   {
     if (!emojiEnabled)
     {
-      std::wstring wstr = entryStr;
-      wstr.erase(std::remove(wstr.begin(), wstr.end(), EMOJI_PAD), wstr.end());
-      entryStr = StrUtil::ToWString(StrUtil::Textize(StrUtil::ToString(wstr)));
+      text.erase(std::remove(text.begin(), text.end(), EMOJI_PAD), text.end());
+      return StrUtil::ToWString(StrUtil::Textize(StrUtil::ToString(text)));
     }
-    else
-    {
-      entryStr = StrUtil::ToWString(StrUtil::Emojize(StrUtil::ToString(entryStr), true));
-    }
-
-    entryPos = entryStr.size();
-  }
+    return StrUtil::ToWString(StrUtil::Emojize(StrUtil::ToString(text), true));
+  };
+  const auto convertEntry = [&convert](std::wstring& text, int& pos)
+  {
+    const auto prefix = convert(text.substr(0, NumUtil::Bound(0, pos, static_cast<int>(text.size()))));
+    text = convert(text);
+    pos = static_cast<int>(std::min(prefix.size(), text.size()));
+  };
+  convertEntry(m_EntryStr[m_CurrentChat.first][m_CurrentChat.second],
+    m_EntryPos[m_CurrentChat.first][m_CurrentChat.second]);
+  if (m_EditMessageActive) convertEntry(m_EditDraft, m_EditDraftPos);
 }
 
 void UiModel::Impl::SetProtocolUiControl(const std::string& p_ProfileId, bool& p_IsTakeControl)
@@ -6056,9 +6097,21 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       const auto destinationProfile = profile.empty() ? chat.first : profile;
       if (!GetProtocols().count(destinationProfile))
       { MessageDialog("Draft", "This account is not loaded.", 0.65, 5); return true; }
+      const LocalFeatures::Chat destination{destinationProfile, id.empty() ? chat.second : id};
+      std::string text = FeatureUtil::Value(item.params, "text");
+      Impl::SanitizeEntryStr(text);
+      std::string existing;
+      {
+        std::unique_lock<owned_mutex> lock(m_ModelMutex);
+        existing = GetImpl().GetLocalFeatures().GetDraft(destination);
+      }
+      if (!existing.empty() && existing != text &&
+          !MessageDialog("Replace draft?", "This chat already has an unsent draft.\n"
+            "Replace it with the selected draft?\n\nEnter: replace | Ctrl-C: keep existing draft", 0.8, 8))
+        return true;
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
-      GetImpl().GotoChat({destinationProfile, id.empty() ? chat.second : id}, true);
-      GetImpl().ReplaceDraft(FeatureUtil::Value(item.params, "text"));
+      GetImpl().GotoChat(destination, true);
+      GetImpl().ReplaceDraft(text);
       return true;
     }
     if (item.operation == "openUrl" || item.operation == "open_url")
