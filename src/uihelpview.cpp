@@ -81,6 +81,7 @@ void UiHelpView::Draw()
     AppendHelpItem("select_emoji", "AddEmoji", helpItems);
     AppendHelpItem("goto_chat", "GotoChat", helpItems);
     AppendHelpItem("transfer", "SendFile", helpItems);
+    AppendHelpItem("client_actions", "Tools", helpItems);
 
     return helpItems;
   }();

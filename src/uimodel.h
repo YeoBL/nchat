@@ -18,6 +18,7 @@
 #include "owned_mutex.h"
 #include "notificationstate.h"
 #include "protocol.h"
+#include "localfeatures.h"
 
 class UiView;
 
@@ -32,6 +33,7 @@ private:
 
     void Init();
     void Cleanup();
+    LocalFeatures& GetLocalFeatures() { return m_LocalFeatures; }
 
     void AnyUserKeyInput();
     void TerminalResize();
@@ -183,7 +185,7 @@ private:
     std::string PreExtCall();
     void StartExtCall(const std::string& p_Phone);
 
-    void GotoChat(const std::pair<std::string, std::string>& p_Chat);
+    void GotoChat(const std::pair<std::string, std::string>& p_Chat, bool p_AllowNew = false);
     bool PreReact(std::string& p_ProfileId, std::string& p_ChatId, std::string& p_SenderId,
                   std::string& p_MsgId, std::string& p_SelfEmoji, bool& p_HasLimitedReactions);
     void SetReact(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_SenderId,
@@ -275,6 +277,7 @@ private:
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStr;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPos;
+    LocalFeatures m_LocalFeatures;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStrCleared;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPosCleared;
@@ -410,6 +413,8 @@ private:
   void OnKeyViewReactions();
   void OnKeyPoll();
   void OnKeyAttachments();
+  void OnKeyClientActions(const std::string& p_Operation = "local.menu",
+                          std::map<std::string, std::string> p_Params = {});
   void OnKeyMessageInfo();
   void OnKeyFind();
   void OnKeyFindNext();

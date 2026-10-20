@@ -9,6 +9,10 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <ctime>
+#include <sstream>
+#include <iomanip>
+#include <thread>
 
 #include <ncurses.h>
 #include <sys/ioctl.h>
@@ -30,6 +34,8 @@
 #include "timeutil.h"
 #include "uidialog.h"
 #include "uiattachmentlistdialog.h"
+#include "uiclientactiondialog.h"
+#include "featureutil.h"
 #include "uichatlistdialog.h"
 #include "uiconfig.h"
 #include "uicontactlistdialog.h"
@@ -4398,8 +4404,14 @@ bool UiModel::Impl::IsChatForceMuted(const std::string& p_ChatId)
   return statusBroadcastMuted && (p_ChatId == "status@broadcast");
 }
 
-void UiModel::Impl::GotoChat(const std::pair<std::string, std::string>& p_Chat)
+void UiModel::Impl::GotoChat(const std::pair<std::string, std::string>& p_Chat, bool p_AllowNew)
 {
+  if (p_AllowNew && std::find(m_ChatVec.begin(), m_ChatVec.end(), p_Chat) == m_ChatVec.end())
+  {
+    m_ChatVec.push_back(p_Chat);
+    m_ChatSet[p_Chat.first].insert(p_Chat.second);
+    m_ChatInfos[p_Chat.first][p_Chat.second].id = p_Chat.second;
+  }
   // switch current chat
   bool found = false;
   for (size_t i = 0; i < m_ChatVec.size(); ++i)
@@ -4648,6 +4660,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyMessageInfo = UiKeyConfig::GetKey("message_info");
   static wint_t keyPoll = UiKeyConfig::GetKey("poll");
   static wint_t keyAttachments = UiKeyConfig::GetKey("attachments");
+  static wint_t keyClientActions = UiKeyConfig::GetKey("client_actions");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4844,6 +4857,10 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyAttachments)
   {
     OnKeyAttachments();
+  }
+  else if (p_Key == keyClientActions)
+  {
+    OnKeyClientActions();
   }
   else if (p_Key == keyReact)
   {
@@ -5594,6 +5611,154 @@ void UiModel::OnKeyAttachments()
       file.fileId, DownloadFileActionOpen);
   }
   else MessageDialog("Attachment", "This file is no longer available to download.", 0.6, 5);
+}
+
+void UiModel::OnKeyClientActions(const std::string& p_Operation,
+                                std::map<std::string, std::string> p_Params)
+{
+  using Params = std::map<std::string, std::string>;
+  using FeatureUtil::Value;
+  LocalFeatures::Chat chat;
+  std::shared_ptr<Protocol> protocol;
+  std::vector<ChatMessage> bulkMessages;
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    auto& model = GetImpl();
+    chat = model.GetCurrentChat();
+    const auto profiles = model.GetProtocols();
+    if (!Value(p_Params, "profile").empty()) chat.first = Value(p_Params, "profile");
+    if (!Value(p_Params, "chatId").empty()) chat.second = Value(p_Params, "chatId");
+    auto found = profiles.find(chat.first);
+    if (found == profiles.end() && !profiles.empty()) found = profiles.begin();
+    if (found != profiles.end()) { protocol = found->second; chat.first = found->first; }
+    p_Params["profile"] = chat.first;
+    p_Params["chatId"] = chat.second;
+    p_Params["chatName"] = model.GetContactListName(chat.first, chat.second, true, true) + " · " +
+      model.GetProfileDisplayName(chat.first);
+    p_Params["draft"] = chat == model.GetCurrentChat() ? StrUtil::ToString(model.GetEntryStr()) : "";
+    auto& messages = model.GetMessages(chat.first, chat.second);
+    const auto& ids = model.GetMessageVec(chat.first, chat.second);
+    int selected = chat == model.GetCurrentChat() && model.GetSelectMessageActive() ?
+      model.GetMessageOffset(chat.first, chat.second) : -1;
+    if (!Value(p_Params, "msgId").empty())
+    {
+      const auto foundId = std::find(ids.begin(), ids.end(), Value(p_Params, "msgId"));
+      selected = foundId == ids.end() ? -1 : static_cast<int>(std::distance(ids.begin(), foundId));
+    }
+    for (const auto& id : ids)
+    {
+      const auto message = messages.find(id);
+      if (message != messages.end()) bulkMessages.push_back(message->second);
+    }
+    if (selected >= 0 && selected < static_cast<int>(ids.size()))
+    {
+      const auto message = messages.find(ids[selected]);
+      if (message != messages.end())
+      {
+        p_Params["msgId"] = message->second.id;
+        p_Params["senderId"] = message->second.senderId;
+        p_Params["timeSent"] = std::to_string(message->second.timeSent);
+        p_Params["isOutgoing"] = message->second.isOutgoing ? "1" : "0";
+        p_Params["text"] = message->second.text;
+        p_Params["fileInfo"] = message->second.fileInfo;
+      }
+    }
+  }
+  if (!protocol) { MessageDialog("Tools", "Connect an account before opening tools.", 0.7, 5); return; }
+  const Params context = p_Params;
+  auto selected = std::make_shared<std::set<std::string>>();
+  const auto makeItem = [context](ClientActionResult& page, const std::string& title,
+    const std::string& operation, const Params& values = Params(), const std::string& detail = "",
+    const std::vector<ClientActionField>& fields = std::vector<ClientActionField>(), bool confirm = false)
+  {
+    ClientActionItem item;
+    item.title = title; item.operation = operation; item.params = context;
+    for (const auto& value : values) item.params[value.first] = value.second;
+    if (operation == "local.bulk.toggle" || operation == "local.bulk.all" || operation == "local.bulk.none" ||
+        operation == "local.bulk.delete" || operation == "local.folder.toggle") item.params["_replacePage"] = "1";
+    item.detail = detail; item.fields = fields; item.confirm = confirm;
+    page.items.push_back(std::move(item));
+  };
+  auto dispatch = [this, context, chat, protocol, bulkMessages, selected, makeItem](
+    const std::string& operation, const Params& values, std::function<void(ClientActionResult)> done) -> bool
+  {
+    if (operation == "local.preview")
+    {
+      ClientActionResult result;
+      result.title = "Preview";
+      const auto path = Value(values, "path");
+      result.success = !path.empty() && FileUtil::Exists(path);
+      if (result.success)
+      {
+        std::unique_lock<owned_mutex> lock(m_ModelMutex);
+        GetImpl().OpenAttachment(path);
+        result.text = "Use Back to return to your recording or transcript.";
+      }
+      else result.text = "The file is no longer available on this computer.";
+      done(std::move(result));
+      return true;
+    }
+    if (operation.rfind("local.", 0) != 0) return false;
+    ClientActionResult page;
+    page.title = "Tools";
+    if (operation == "local.menu")
+    {
+      page.title = "Tools · " + GetProfileDisplayName(chat.first);
+      makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
+    }
+    else if (operation == "local.message")
+    {
+      page.title = "Message preview"; page.text = Value(values, "text");
+      if (!Value(values, "profile").empty() && !Value(values, "chatId").empty())
+        makeItem(page, "Open chat", "navigate", values, "Opening the chat uses your normal mark-as-read setting.");
+      makeItem(page, "Copy message", "local.copy", values);
+      if (!Value(values, "path").empty() && FileUtil::Exists(Value(values, "path"))) page.filePath = Value(values, "path");
+      if (!Value(values, "fileInfo").empty())
+      {
+        const auto file = ProtocolUtil::FileInfoFromHex(Value(values, "fileInfo"));
+        if (IsAttachmentDownloaded(file)) page.filePath = file.filePath;
+      }
+    }
+    else if (operation == "local.copy")
+    {
+      Clipboard::SetText(Value(values, "text")); page.title = "Copied"; page.text = "Text copied to the clipboard.";
+    }
+    else { page.success = false; page.text = "This action is not available."; }
+    done(std::move(page));
+    return true;
+  };
+  const auto openFile = [this](const std::string& path)
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    GetImpl().OpenAttachment(path);
+  };
+  const auto openAction = [this, chat](const ClientActionItem& item) -> bool
+  {
+    if (item.operation == "navigate" || item.operation == "open_chat")
+    {
+      const auto profile = FeatureUtil::Value(item.params, "profile");
+      const auto id = FeatureUtil::Value(item.params, "chatId");
+      if (id.empty()) return false;
+      const auto destinationProfile = profile.empty() ? chat.first : profile;
+      if (!GetProtocols().count(destinationProfile))
+      { MessageDialog("Chat", "This account is not loaded. The cached preview is still available.", 0.75, 5); return true; }
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      GetImpl().GotoChat({destinationProfile, id}, true);
+      return true;
+    }
+    if (item.operation == "openUrl" || item.operation == "open_url")
+    {
+      const auto url = FeatureUtil::Value(item.params, "url");
+      if (!FeatureUtil::SafeUrl(url)) { MessageDialog("Link", "Only web and Telegram links can be opened here.", 0.7, 5); return true; }
+      std::unique_lock<owned_mutex> lock(m_ModelMutex);
+      GetImpl().OpenLink(url);
+      return true;
+    }
+    return false;
+  };
+  UiClientActionDialog::RunActions(this, protocol, "nchat tools", p_Operation, p_Params, openFile, dispatch, openAction);
 }
 
 void UiModel::OnKeyReact()
