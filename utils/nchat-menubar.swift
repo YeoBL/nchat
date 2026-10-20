@@ -38,6 +38,55 @@ func messageDate(_ milliseconds: Int64) -> Date {
     Date(timeIntervalSince1970: Double(milliseconds) / 1000)
 }
 
+func decodedFileField(_ info: String, index: Int) -> String? {
+    let parts = info.split(separator: ",", omittingEmptySubsequences: false)
+    guard parts.indices.contains(index), parts[index].count <= 32768, parts[index].count % 2 == 0 else { return nil }
+    let hex = Array(parts[index].utf8)
+    var bytes: [UInt8] = []
+    for i in stride(from: 0, to: hex.count, by: 2) {
+        guard let byte = UInt8(String(decoding: hex[i...i+1], as: UTF8.self), radix: 16) else { return nil }
+        bytes.append(byte)
+    }
+    return String(bytes: bytes, encoding: .utf8)
+}
+
+func decodedFilePath(_ info: String) -> String? {
+    guard let path = decodedFileField(info, index: 2), path.hasPrefix("/"), !path.contains("\0") else { return nil }
+    return path
+}
+
+func isImageReference(_ info: String) -> Bool {
+    let name = (decodedFileField(info, index: 2) ?? "").lowercased()
+    let mime = decodedFileField(info, index: 3) ?? ""
+    return ["[photo]", "[sticker]"].contains(name) || mime.hasPrefix("image/") ||
+        ["jpg", "jpeg", "png", "webp", "gif", "heic", "avif", "tiff", "bmp"].contains((name as NSString).pathExtension)
+}
+
+func cachedImageURL(_ fileURL: URL, cacheRoot: String) -> URL? {
+    guard fileURL.isFileURL else { return nil }
+    let url = fileURL.resolvingSymlinksInPath()
+    let root = URL(fileURLWithPath: cacheRoot).resolvingSymlinksInPath().path + "/"
+    // Only nchat-owned local files; never fetch a URL or follow an outside symlink.
+    guard url.path.hasPrefix(root),
+          let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+          values.isRegularFile == true, (values.fileSize ?? Int.max) <= 50_000_000,
+          let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+          CGImageSourceGetCount(source) > 0 else { return nil }
+    return url
+}
+
+func cachedThumbnail(_ info: String, cacheRoot: String) -> NSImage? {
+    guard let path = decodedFilePath(info),
+          let url = cachedImageURL(URL(fileURLWithPath: path), cacheRoot: cacheRoot),
+          let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+          let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 640
+          ] as CFDictionary) else { return nil }
+    return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+}
+
 // Shared by the badge and expanded rows: a filtered event must not reappear on expansion.
 let unreadCandidatePredicate = """
     m.isOutgoing = 0 AND m.isRead = 0 AND COALESCE(m.isDeleted, 0) = 0
@@ -210,7 +259,20 @@ final class Cache {
             guard step == SQLITE_DONE else { throw CacheError(description: String(cString: sqlite3_errmsg(db))) }
             return messages.reversed()
         }
-        return records.map { $0.0 }
+        let cacheRoot = URL(fileURLWithPath: path).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
+        // ponytail: cap thumbnail decoding at 20 per expansion; remaining attachments stay labelled.
+        var images = 0
+        return records.map { message, info in
+            var result = message
+            if images < 20, let image = cachedThumbnail(info, cacheRoot: cacheRoot) {
+                result.image = image
+                result.imageURL = decodedFilePath(info).map { URL(fileURLWithPath: $0) }
+                images += 1
+            }
+            let local = decodedFilePath(info).map { FileManager.default.fileExists(atPath: $0) } ?? false
+            result.needsDownload = !local && isImageReference(info) && !(decodedFileField(info, index: 1) ?? "").isEmpty
+            return result
+        }
     }
 }
 
@@ -265,6 +327,33 @@ func menuLines(_ snapshot: Snapshot) -> [String] {
 }
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
+
+final class ImageButton: NSButton {
+    var imageURL: URL?
+    var cacheRoot = ""
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+}
+
+func imageOpenError(_ detail: String) {
+    let alert = NSAlert()
+    alert.messageText = "Couldn't open image in Preview"
+    alert.informativeText = detail
+    alert.runModal()
+}
+
+func openFullImageInPreview(_ url: URL) {
+    guard let preview = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") else {
+        imageOpenError("macOS Preview could not be found.")
+        return
+    }
+    // Open the original cache file, never the resized widget thumbnail.
+    NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+        if let error = error { DispatchQueue.main.async { imageOpenError(error.localizedDescription) } }
+    }
+}
 
 final class MessageCard: NSView {
     override func draw(_ dirtyRect: NSRect) {
@@ -328,6 +417,8 @@ final class UnreadPopoverController: NSViewController {
     var onCollapse: (() -> Void)?
     var onQuit: (() -> Void)?
     var onResize: ((NSSize) -> Void)?
+    var onOpenImage: (URL) -> Void = openFullImageInPreview
+    var onImageOpenError: (String) -> Void = imageOpenError
     var maxHeight: CGFloat = 760
     var width: CGFloat = 454
     var targetContentSize = NSSize(width: 454, height: 100)
@@ -503,7 +594,28 @@ final class UnreadPopoverController: NSViewController {
                             y += label(message.text, x: 60, y: y, width: width - 86,
                                        lines: 3) + 5
                         }
-                        if message.attachment {
+                        if let image = message.image {
+                            let scale = min((width - 86) / image.size.width, 200 / image.size.height, 1)
+                            let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+                            let photo = ImageButton(frame: NSRect(origin: NSPoint(x: 60, y: y + 3), size: size))
+                            photo.title = ""
+                            photo.isBordered = false
+                            photo.imagePosition = .imageOnly
+                            photo.imageURL = message.imageURL
+                            photo.cacheRoot = URL(fileURLWithPath: chat.cachePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
+                            photo.isEnabled = message.imageURL != nil
+                            photo.target = self
+                            photo.action = #selector(openImage(_:))
+                            photo.image = image
+                            photo.imageScaling = .scaleProportionallyUpOrDown
+                            photo.wantsLayer = true
+                            photo.layer?.cornerRadius = 6
+                            photo.layer?.masksToBounds = true
+                            photo.toolTip = "Open full image in Preview"
+                            photo.setAccessibilityLabel("Open full image in Preview")
+                            document.addSubview(photo)
+                            y += size.height + 9
+                        } else if message.attachment {
                             y += label(message.attachmentStatus ?? "Attachment · preview not cached or unsupported", x: 60, y: y, width: width - 86, size: 12, secondary: true, lines: 2) + 5
                         }
                         y += 12
@@ -535,6 +647,15 @@ final class UnreadPopoverController: NSViewController {
 
     @objc func toggle(_ sender: ChatButton) {
         if let chat = sender.chat { onToggle?(chat) }
+    }
+    @objc func openImage(_ sender: ImageButton) {
+        // Recheck at click time in case the cache was cleared or the file replaced.
+        guard let original = sender.imageURL,
+              let url = cachedImageURL(original, cacheRoot: sender.cacheRoot) else {
+            onImageOpenError("The cached image is no longer available. Close and reopen this chat's preview to reload it.")
+            return
+        }
+        onOpenImage(url)
     }
     @objc func quitApp() { onQuit?() }
 
@@ -755,7 +876,19 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             DispatchQueue.main.async {
                 guard let self = self, self.previewRequests[chat.key] == request,
                       self.content.expanded.contains(chat.key) else { return }
-                self.content.previews[chat.key] = messages
+                var prepared = messages
+                if prepared != nil {
+                    for index in prepared!.indices where prepared![index].needsDownload {
+                        let id = prepared![index].id
+                        if !(self.imageRequests[chat.key] ?? []).contains(id), (self.imageRequests[chat.key]?.count ?? 0) < 20,
+                           WidgetReplyBridge.queueImage(cachePath: chat.cachePath, chatID: chat.id, messageID: id) {
+                            self.imageRequests[chat.key, default: []].insert(id)
+                        }
+                        prepared![index].attachmentStatus = (self.imageRequests[chat.key] ?? []).contains(id) ?
+                            "Photo requested — waiting for nchat to cache it" : "Photo not cached — keep nchat running and reopen this preview"
+                    }
+                }
+                self.content.previews[chat.key] = prepared
                 self.content.errors[chat.key] = issue
                 self.content.rebuild()
             }
