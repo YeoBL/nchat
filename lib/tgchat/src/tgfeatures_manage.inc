@@ -237,7 +237,7 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
   }
 
 
-  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" || operation == "tg.send.voice" || operation == "tg.send.videoNote")
+  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply" || operation == "tg.send.voice" || operation == "tg.send.videoNote" || operation == "tg.poll.create")
   {
     auto send = make_object<sendMessage>();
     send->chat_id_ = chatId;
@@ -309,6 +309,49 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
         video->length_ = static_cast<int32_t>(length);
         send->input_message_content_ = std::move(video);
       }
+    }
+    else if (operation == "tg.poll.create")
+    {
+      const auto options = TgManage::Options(value("options"));
+      if (TgManage::Trim(value("question")).empty() || options.size() < 2 || options.size() > 12 ||
+          std::any_of(options.begin(), options.end(), [](const std::string& option) { return option.empty(); }))
+      {
+        fail("Enter a question and 2–12 nonempty answers separated by |.");
+        return true;
+      }
+      if (std::set<std::string>(options.begin(), options.end()).size() != options.size())
+      {
+        fail("Poll answers must be distinct.");
+        return true;
+      }
+      if (!TgManage::Boolean(value("multi")) || !TgManage::Boolean(value("quiz")) || !TgManage::Boolean(value("anonymous")))
+      {
+        fail("Answer yes or no for multiple answers, anonymous votes and quiz.");
+        return true;
+      }
+      auto poll = make_object<inputMessagePoll>();
+      poll->question_ = GetFormattedText(value("question"));
+      poll->is_anonymous_ = TgManage::Yes(value("anonymous"));
+      poll->allows_multiple_answers_ = TgManage::Yes(value("multi"));
+      poll->allows_revoting_ = true;
+      for (const auto& option : options)
+        poll->options_.push_back(make_object<inputPollOption>(GetFormattedText(option), nullptr));
+      if (TgManage::Yes(value("quiz")))
+      {
+        int64_t correct = 0;
+        if (!TgManage::Integer(value("correct", "1"), correct) || correct < 1 || correct > static_cast<int64_t>(options.size()))
+        {
+          fail("Choose the correct quiz answer by its number, starting at 1.");
+          return true;
+        }
+        if (poll->allows_multiple_answers_) { fail("This quiz form accepts one correct answer; choose no for multiple answers."); return true; }
+        auto quiz = make_object<inputPollTypeQuiz>();
+        quiz->correct_option_ids_.push_back(static_cast<int32_t>(correct - 1));
+        poll->type_ = std::move(quiz);
+        poll->allows_revoting_ = false;
+      }
+      else poll->type_ = make_object<inputPollTypeRegular>(false);
+      send->input_message_content_ = std::move(poll);
     }
     SendQuery(std::move(send), [this, request, checked, finish, operation](Object object)
     {
