@@ -545,6 +545,103 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
     return true;
   }
 
+  if (operation == "tg.forward.pick" || operation == "tg.chat.add.pick")
+  {
+    ClientActionResult result;
+    result.title = operation == "tg.forward.pick" ? "Forward to" : "Add contact to group";
+    if (operation == "tg.forward.pick" && !msgId) { fail("Select a message to forward."); return true; }
+    for (const auto& contact : m_ContactInfos)
+    {
+      if (operation == "tg.chat.add.pick" && (contact.first <= 0 || contact.first == m_SelfUserId)) continue;
+      auto action = item(contact.second.name.empty() ? contact.second.phone : contact.second.name,
+                         operation == "tg.forward.pick" ? "tg.forward" : "tg.chat.add", "", true);
+      action.params[operation == "tg.forward.pick" ? "target" : "userId"] = StrUtil::NumToHex(contact.first);
+      result.items.push_back(std::move(action));
+    }
+    if (result.items.empty()) result.text = "No cached contacts available yet.";
+    finish(std::move(result));
+    return true;
+  }
+  if (operation == "tg.forward" || operation == "forward_messages")
+  {
+    int64_t target = 0;
+    int64_t source = chatId;
+    std::vector<int64_t> messages;
+    if (operation == "forward_messages")
+    {
+      target = chatId;
+      if (!TgManage::HexId(value("sourceChatId"), source))
+      { fail("Select a source chat for these messages."); return true; }
+      std::istringstream input(value("messageIds"));
+      std::string line;
+      std::set<int64_t> seen;
+      while (std::getline(input, line))
+      {
+        int64_t id = 0;
+        if (!TgManage::HexId(TgManage::Trim(line), id) || id <= 0)
+        { fail("The message selection contains an invalid ID."); return true; }
+        if (seen.insert(id).second) messages.push_back(id);
+      }
+      if (messages.empty() || messages.size() > 100)
+      { fail("Select between 1 and 100 messages to forward."); return true; }
+      std::sort(messages.begin(), messages.end());
+    }
+    else
+    {
+      if (!msgId || !TgManage::HexId(value("target"), target)) { fail("Select a message and destination chat."); return true; }
+      messages.push_back(msgId);
+    }
+    int64_t destinationTopic = 0;
+    if (!value("destinationThreadId").empty())
+    { fail("Telegram cannot natively forward messages into comment threads. Choose a chat or forum topic."); return true; }
+    if (!value("destinationTopicId").empty() &&
+        (!TgManage::Integer(value("destinationTopicId"), destinationTopic) || destinationTopic <= 0 || destinationTopic > INT32_MAX))
+    { fail("Choose a valid destination topic."); return true; }
+    auto submit = [this, source, target, messages, destinationTopic, checked, finish](bool copy)
+    {
+      auto forward = make_object<forwardMessages>();
+      forward->chat_id_ = target;
+      forward->from_chat_id_ = source;
+      forward->message_ids_ = messages;
+      forward->send_copy_ = copy;
+      forward->remove_caption_ = false;
+      if (destinationTopic) forward->topic_id_ = make_object<messageTopicForum>(static_cast<int32_t>(destinationTopic));
+      SendQuery(std::move(forward), [checked, finish, requestedCount = messages.size(), copy](Object object)
+      {
+        if (!checked(object)) return;
+        const auto& forwarded = static_cast<const td::td_api::messages&>(*object);
+        const auto count = static_cast<size_t>(std::count_if(forwarded.messages_.begin(), forwarded.messages_.end(),
+          [](const object_ptr<td::td_api::message>& entry) { return bool(entry); }));
+        ClientActionResult result;
+        result.title = "Forward";
+        result.success = count == requestedCount;
+        if (count == 0) result.text = "Telegram could not forward the selection. The source may restrict forwarding.";
+        else
+        {
+          result.text = std::to_string(count) + " of " + std::to_string(requestedCount) +
+            (copy ? " messages submitted as copies to the Secret Chat." : " messages submitted with original attribution.");
+          if (count != requestedCount) result.text += " Some messages could not be forwarded.";
+        }
+        finish(std::move(result));
+      });
+    };
+    const auto destinationReady = [checked, submit](Object object)
+    {
+      if (!checked(object)) return;
+      const auto& destination = static_cast<const td::td_api::chat&>(*object);
+      submit(destination.type_ && destination.type_->get_id() == chatTypeSecret::ID);
+    };
+    SendQuery(make_object<getChat>(target), [this, target, destinationReady](Object object)
+    {
+      const auto type = m_ChatTypes.find(target);
+      const bool knownUser = target > 0 && m_ContactInfos.count(target) &&
+        (type == m_ChatTypes.end() || type->second == ChatPrivate);
+      if (object && object->get_id() == error::ID && knownUser)
+        SendQuery(make_object<createPrivateChat>(target, false), destinationReady);
+      else destinationReady(std::move(object));
+    });
+    return true;
+  }
 
 
 
