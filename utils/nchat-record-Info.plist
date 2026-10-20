@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>io.nchat.record.local</string>
+  <key>CFBundleName</key><string>nchat Recorder</string>
+  <key>CFBundleExecutable</key><string>nchat-record</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Record voice and video notes you explicitly choose to record and send in nchat.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Record video notes you explicitly choose to record and send in nchat.</string>
+</dict></plist>
