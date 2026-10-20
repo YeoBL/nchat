@@ -3909,6 +3909,28 @@ void TgChat::Impl::TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessag
   const int64_t senderId = GetSenderId(td::move_tl_object_as<td::td_api::MessageSender>(p_TdMessage.sender_id_));
   TdMessageContentConvert(*p_TdMessage.content_, senderId, p_ChatMessage.text, p_ChatMessage.fileInfo);
 
+  if (p_TdMessage.forward_info_ && p_TdMessage.forward_info_->origin_)
+  {
+    const auto& origin = *p_TdMessage.forward_info_->origin_;
+    std::string name;
+    switch (origin.get_id())
+    {
+      case td::td_api::messageOriginUser::ID:
+        name = GetContactName(static_cast<const td::td_api::messageOriginUser&>(origin).sender_user_id_); break;
+      case td::td_api::messageOriginHiddenUser::ID:
+        name = static_cast<const td::td_api::messageOriginHiddenUser&>(origin).sender_name_; break;
+      case td::td_api::messageOriginChat::ID:
+        name = GetContactName(static_cast<const td::td_api::messageOriginChat&>(origin).sender_chat_id_); break;
+      case td::td_api::messageOriginChannel::ID:
+        name = GetContactName(static_cast<const td::td_api::messageOriginChannel&>(origin).chat_id_); break;
+      default: break;
+    }
+    const auto label = "[Forwarded" + (name.empty() ? std::string() : " from " + name) + "]";
+    if (p_TdMessage.content_->get_id() == td::td_api::messagePoll::ID)
+      p_ChatMessage.text += "\n" + label;
+    else p_ChatMessage.text = label + "\n" + p_ChatMessage.text;
+  }
+
   p_ChatMessage.id = StrUtil::NumToHex(p_TdMessage.id_);
   p_ChatMessage.senderId = StrUtil::NumToHex(senderId);
   p_ChatMessage.isOutgoing = p_TdMessage.is_outgoing_;
