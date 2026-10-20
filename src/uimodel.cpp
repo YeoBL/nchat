@@ -5963,7 +5963,8 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       {
         const auto results = MessageCache::SearchMessages(query);
         page.title = "Search results · " + std::to_string(results.size());
-        page.text = results.size() == static_cast<size_t>(query.limit) ? "Showing the newest 200 matches. Narrow the search for more." : "Select a message to read its full cached text.";
+        page.text = "Search: " + query.text + "\n" +
+          (results.size() == static_cast<size_t>(query.limit) ? "Showing the newest 200 matches. Narrow the search for more." : "Select a message to read its full cached text.");
         for (const auto& result : results)
           makeItem(page, result.chatName + " · " + result.senderName, "local.message",
             {{"profile", result.profileId}, {"chatId", result.chatId}, {"msgId", result.message.id},
