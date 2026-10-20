@@ -881,6 +881,15 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
 		handler.HandleHistorySync(evt)
 
+	case *events.NewsletterJoin:
+		name := evt.ThreadMeta.Name.Text
+		CWmNewContactsNotify(handler.connId, evt.ID.String(), name, "", 0, 0, NotifyDirect)
+		AddContactName(handler.connId, evt.ID.String(), name)
+	case *events.NewsletterLeave:
+		CWmUpdateMuteNotify(handler.connId, evt.ID.String(), 1)
+	case *events.NewsletterMuteChange:
+		CWmUpdateMuteNotify(handler.connId, evt.ID.String(), BoolToInt(evt.Mute == types.NewsletterMuteOn))
+
 	case *events.AppState:
 		LOG_TRACE(fmt.Sprintf("%#v - %#v / %#v", evt, evt.Index, evt.SyncActionValue))
 
@@ -3085,6 +3094,13 @@ func WmSendMessage(connId int, chatId string, text string, quotedId string, quot
 	if jidErr != nil {
 		LOG_WARNING(fmt.Sprintf("jid err %#v", jidErr))
 		return -1
+	}
+	if chatJid.Server == types.NewsletterServer {
+		metadata, err := client.GetNewsletterInfo(context.Background(), chatJid)
+		if err != nil || metadata == nil || metadata.ViewerMeta == nil || (metadata.ViewerMeta.Role != types.NewsletterRoleAdmin && metadata.ViewerMeta.Role != types.NewsletterRoleOwner) {
+			LOG_WARNING("channel posting requires verified channel administrator permission")
+			return -1
+		}
 	}
 
 	isSend := false
