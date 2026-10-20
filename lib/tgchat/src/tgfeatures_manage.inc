@@ -237,6 +237,67 @@ bool TgChat::Impl::HandleManageAction(std::shared_ptr<ClientActionRequest> reque
   }
 
 
+  if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply")
+  {
+    auto send = make_object<sendMessage>();
+    send->chat_id_ = chatId;
+    send->options_ = make_object<messageSendOptions>();
+    int64_t topic = 0;
+    if (!value("topicId").empty())
+    {
+      if (!TgManage::Integer(value("topicId"), topic) || topic <= 0 || topic > INT32_MAX)
+      { fail("Invalid topic. Reopen the topic before sending."); return true; }
+      send->topic_id_ = make_object<messageTopicForum>(static_cast<int32_t>(topic));
+    }
+    else if (!value("threadId").empty())
+    {
+      if (!TgManage::Integer(value("threadId"), topic) || topic <= 0)
+      { fail("Invalid comment thread. Reopen the thread before sending."); return true; }
+      send->topic_id_ = make_object<messageTopicThread>(topic);
+    }
+    if (operation == "tg.send.silent" || operation == "tg.send.scheduled" || operation == "tg.button.reply")
+    {
+      const auto text = value(operation == "tg.button.reply" ? "buttonText" : "sendText");
+      if (TgManage::Trim(text).empty()) { fail("Enter a message to send."); return true; }
+      if (operation == "tg.button.reply")
+      {
+        auto content = make_object<inputMessageText>();
+        content->text_ = make_object<formattedText>();
+        content->text_->text_ = text;
+        send->input_message_content_ = std::move(content);
+      }
+      else send->input_message_content_ = GetMessageText(text);
+      if (operation == "tg.send.silent") send->options_->disable_notification_ = true;
+      else if (operation == "tg.send.scheduled")
+      {
+        int32_t timestamp = 0;
+        if (!TgManage::ScheduledTime(value("time"), timestamp))
+        {
+          fail("Enter a valid future local date/time as YYYY-MM-DD HH:MM.");
+          return true;
+        }
+        send->options_->scheduling_state_ = make_object<messageSchedulingStateSendAtDate>(timestamp, 0);
+      }
+    }
+    SendQuery(std::move(send), [this, request, checked, finish, operation](Object object)
+    {
+      if (!checked(object)) return;
+      auto message = move_object_as<td::td_api::message>(object);
+      if (message->scheduling_state_ == nullptr)
+      {
+        auto notify = std::make_shared<SendMessageNotify>(m_ProfileId);
+        notify->success = true;
+        notify->chatId = StrUtil::NumToHex(message->chat_id_);
+        TdMessageConvert(*message, notify->chatMessage);
+        CallMessageHandler(notify);
+      }
+      ClientActionResult result;
+      result.title = "Telegram";
+      result.text = operation == "tg.send.scheduled" ? "Message scheduled in Telegram." : "Submitted to Telegram.";
+      finish(std::move(result));
+    });
+    return true;
+  }
 
 
 
