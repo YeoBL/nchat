@@ -98,6 +98,7 @@ Interactive Commands for Selected Message:
     Alt-q       jump to quoted/replied message
     Alt-r       forward selected message
     Alt-s       add/remove reaction on selected message
+    Alt-Shift-s view who reacted to selected message
     Alt-w       external message viewer
 
 Interactive Commands for Text Input:
@@ -922,6 +923,7 @@ This configuration file holds user interface key bindings. Default content:
     prev_page=KEY_PPAGE
     quit=KEY_CTRLQ
     react=\33\163
+    view_reactions=\33\123
     right=KEY_RIGHT
     save=KEY_CTRLR
     select_contact=\33\156

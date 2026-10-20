@@ -224,6 +224,7 @@ void UiKeyConfig::Init(bool p_MapKeys)
     { "ext_call", "\\33\\164" }, // alt/opt-t
     { "ext_edit", "\\33\\145" }, // alt/opt-e
     { "react", "\\33\\163" }, // alt/opt-s
+    { "view_reactions", "\\33\\123" }, // alt/opt-shift-s
     { "message_info", "\\33\\155" }, // alt/opt-m
     { "spell", "\\33\\44" }, // alt/opt-$
     { "jump_quoted", "\\33\\161" }, // alt/opt-q

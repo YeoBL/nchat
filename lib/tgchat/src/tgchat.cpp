@@ -642,6 +642,54 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
       }
       break;
 
+    case GetMessageReactionsRequestType:
+      {
+        auto request = std::static_pointer_cast<GetMessageReactionsRequest>(p_RequestMessage);
+        if (!request->onResult) break;
+        const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
+        const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
+        auto result = std::make_shared<MessageReactorInfo>();
+        auto fetch = std::make_shared<std::function<void(std::string)>>();
+        *fetch = [this, request, result, fetch, chatId, msgId](std::string offset)
+        {
+          SendQuery(td::td_api::make_object<td::td_api::getMessageAddedReactions>(
+            chatId, msgId, nullptr, offset, 100),
+            [this, request, result, fetch](Object object)
+          {
+            if (object->get_id() == td::td_api::error::ID)
+            {
+              result->note = "Telegram cannot show reactor names for this message (chat or privacy restrictions).";
+              request->onResult(*result);
+              *fetch = nullptr;
+              return;
+            }
+            auto page = td::move_tl_object_as<td::td_api::addedReactions>(object);
+            for (auto& reaction : page->reactions_)
+            {
+              std::string emoji = "Reaction";
+              if (reaction->type_ && reaction->type_->get_id() == td::td_api::reactionTypeEmoji::ID)
+                emoji = static_cast<td::td_api::reactionTypeEmoji&>(*reaction->type_).emoji_;
+              else if (reaction->type_ && reaction->type_->get_id() == td::td_api::reactionTypeCustomEmoji::ID)
+                emoji = "Custom emoji";
+              else if (reaction->type_ && reaction->type_->get_id() == td::td_api::reactionTypePaid::ID)
+                emoji = "Paid reaction";
+              auto senderId = GetSenderId(std::move(reaction->sender_id_));
+              result->reactors.push_back({reaction->is_outgoing_ ? s_ReactionsSelfId :
+                StrUtil::NumToHex(senderId), emoji});
+            }
+            if (!page->next_offset_.empty() && !page->reactions_.empty())
+              (*fetch)(page->next_offset_);
+            else
+            {
+              request->onResult(*result);
+              *fetch = nullptr;
+            }
+          });
+        };
+        (*fetch)("");
+      }
+      break;
+
     case GetMessageReceiptsRequestType:
       {
         auto request = std::static_pointer_cast<GetMessageReceiptsRequest>(p_RequestMessage);

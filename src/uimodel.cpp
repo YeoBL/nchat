@@ -40,6 +40,7 @@
 #include "uikeyinput.h"
 #include "uimessagedialog.h"
 #include "uimessageinfodialog.h"
+#include "uireactioninfodialog.h"
 #include "uitextinputdialog.h"
 #include "uiview.h"
 
@@ -4637,6 +4638,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyPaste = UiKeyConfig::GetKey("paste");
 
   static wint_t keyReact = UiKeyConfig::GetKey("react");
+  static wint_t keyViewReactions = UiKeyConfig::GetKey("view_reactions");
   static wint_t keyMessageInfo = UiKeyConfig::GetKey("message_info");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
@@ -4830,6 +4832,10 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyReact)
   {
     OnKeyReact();
+  }
+  else if (p_Key == keyViewReactions)
+  {
+    OnKeyViewReactions();
   }
   else if (p_Key == keySpell)
   {
@@ -5480,6 +5486,37 @@ void UiModel::OnKeyMessageInfo()
   if (!protocol) return;
   UiDialogParams params(this, "Message Info", 0.85, 0.75);
   UiMessageInfoDialog dialog(params, profile, protocol, request);
+  dialog.Run();
+}
+
+void UiModel::OnKeyViewReactions()
+{
+  auto request = std::make_shared<GetMessageReactionsRequest>();
+  std::shared_ptr<Protocol> protocol;
+  std::string profile;
+  Reactions reactions;
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    auto& model = GetImpl();
+    if (!model.GetSelectMessageActive() || model.GetEditMessageActive()) return;
+    auto chat = model.GetCurrentChat();
+    auto& ids = model.GetMessageVec(chat.first, chat.second);
+    int offset = model.GetMessageOffset(chat.first, chat.second);
+    if (offset < 0 || offset >= (int)ids.size()) return;
+    auto& messages = model.GetMessages(chat.first, chat.second);
+    auto it = messages.find(ids[offset]);
+    if (it == messages.end() || it->second.isDeleted) return;
+    profile = chat.first;
+    reactions = it->second.reactions;
+    request->chatId = chat.second;
+    request->msgId = it->second.id;
+    auto protocols = model.GetProtocols();
+    auto found = protocols.find(profile);
+    if (found != protocols.end()) protocol = found->second;
+  }
+  if (!protocol) return;
+  UiDialogParams params(this, "Reactions", 0.75, 0.65);
+  UiReactionInfoDialog dialog(params, profile, reactions, protocol, request);
   dialog.Run();
 }
 
