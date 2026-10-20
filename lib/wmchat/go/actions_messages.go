@@ -18,6 +18,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 type storedActionMessage struct {
@@ -194,6 +195,9 @@ func structuredMessageText(msg *waE2E.Message) string {
 }
 
 func wmMessageAction(ctx context.Context, connID int, cli *whatsmeow.Client, op string, p map[string]string) (actionResult, bool) {
+	if op == "forward_messages" {
+		return forwardMessagesAction(ctx, connID, cli, p), true
+	}
 	if op != "message_details" && op != "business_reply" {
 		return actionResult{}, false
 	}
@@ -331,4 +335,91 @@ func contactActions(contact *waE2E.ContactMessage) []actionItem {
 		items = append(items, action("Chat with "+contact.GetDisplayName(), phone, "open_chat", map[string]string{"chatId": digits + "@s.whatsapp.net"}, nil, false))
 	}
 	return items
+}
+
+func forwardedMessage(original *waE2E.Message) (*waE2E.Message, error) {
+	if !forwardableMessage(original) {
+		return nil, fmt.Errorf("this message type cannot be forwarded")
+	}
+	if original.GetImageMessage().GetViewOnce() || original.GetVideoMessage().GetViewOnce() || original.GetAudioMessage().GetViewOnce() || original.GetPtvMessage().GetViewOnce() {
+		return nil, fmt.Errorf("view-once messages cannot be forwarded")
+	}
+	msg := proto.Clone(original).(*waE2E.Message)
+	if msg.Conversation != nil {
+		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: msg.Conversation}}
+	}
+	root := msg.ProtoReflect()
+	root.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if field.Kind() != protoreflect.MessageKind || field.IsList() || field.IsMap() {
+			return true
+		}
+		child := value.Message()
+		contextField := child.Descriptor().Fields().ByName("contextInfo")
+		if contextField == nil {
+			return true
+		}
+		ci := &waE2E.ContextInfo{}
+		if child.Has(contextField) {
+			if existing, ok := child.Get(contextField).Message().Interface().(*waE2E.ContextInfo); ok {
+				ci = proto.Clone(existing).(*waE2E.ContextInfo)
+			}
+		}
+		ci.StanzaID = nil
+		ci.Participant = nil
+		ci.QuotedMessage = nil
+		ci.RemoteJID = nil
+		ci.ForwardingScore = proto.Uint32(ci.GetForwardingScore() + 1)
+		ci.IsForwarded = proto.Bool(true)
+		child.Set(contextField, protoreflect.ValueOfMessage(ci.ProtoReflect()))
+		return true
+	})
+	return msg, nil
+}
+
+func forwardMessagesAction(ctx context.Context, connID int, cli *whatsmeow.Client, p map[string]string) actionResult {
+	chat, err := actionChat(p)
+	if err != nil {
+		return actionError("Forward messages", err)
+	}
+	if chat.Server == types.NewsletterServer || chat.Server == types.BroadcastServer {
+		return actionError("Forward messages", fmt.Errorf("choose a direct or group destination"))
+	}
+	ids := strings.Fields(p["messageIds"])
+	if len(ids) == 0 || len(ids) > 100 {
+		return actionError("Forward messages", fmt.Errorf("select 1–100 messages"))
+	}
+	messages := make([]*waE2E.Message, 0, len(ids))
+	for _, id := range ids {
+		_, original := messageActionEntry(connID, p["sourceChatId"], id)
+		if original == nil {
+			return actionError("Forward messages", fmt.Errorf("message %s has no native payload yet; load its phone history before forwarding", id))
+		}
+		msg, err := forwardedMessage(original)
+		if err != nil {
+			return actionError("Forward messages", err)
+		}
+		poll := original.GetPollCreationMessage()
+		if poll == nil {
+			poll = original.GetPollCreationMessageV2()
+		}
+		if poll == nil {
+			poll = original.GetPollCreationMessageV3()
+		}
+		if poll != nil {
+			options := []string{}
+			for _, option := range poll.GetOptions() {
+				options = append(options, option.GetOptionName())
+			}
+			msg = cli.BuildPollCreation(poll.GetName(), options, int(poll.GetSelectableOptionsCount()))
+		}
+		messages = append(messages, msg)
+	}
+	for index, msg := range messages {
+		r := sendActionMessage(ctx, connID, cli, chat, msg, "Forward messages")
+		if !r.Success {
+			r.Text = fmt.Sprintf("Forwarded %d of %d messages. %s", index, len(messages), r.Text)
+			return r
+		}
+	}
+	return actionOK("Messages forwarded", fmt.Sprintf("Forwarded %d messages.", len(messages)))
 }
