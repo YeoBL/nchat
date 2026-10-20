@@ -4148,4 +4148,13 @@ void TgChat::Impl::UpdateLastReadInboxMessage(int64_t p_ChatId, int64_t p_LastRe
       }
     }
   }
+
+  // The chat-level marker is authoritative even when an individual message
+  // was not retained in m_UnreadInboxMessages.
+  std::shared_ptr<NewMessageStatusNotify> newMessageStatusNotify =
+    std::make_shared<NewMessageStatusNotify>(m_ProfileId);
+  newMessageStatusNotify->chatId = StrUtil::NumToHex(p_ChatId);
+  newMessageStatusNotify->readThroughId = StrUtil::NumToHex(p_LastReadMsgId);
+  newMessageStatusNotify->isRead = true;
+  CallMessageHandler(newMessageStatusNotify);
 }

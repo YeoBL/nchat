@@ -128,6 +128,7 @@ void MessageCache::AddFromServiceMessage(const std::string& p_ProfileId,
       {
         std::shared_ptr<MarkMessageReadNotify> markMessageReadNotify =
           std::static_pointer_cast<MarkMessageReadNotify>(p_ServiceMessage);
+        if (!markMessageReadNotify->success) break;
         MessageCache::UpdateMessageIsRead(p_ProfileId, markMessageReadNotify->chatId,
                                           markMessageReadNotify->msgId, true);
       }
@@ -160,7 +161,8 @@ void MessageCache::AddFromServiceMessage(const std::string& p_ProfileId,
         std::shared_ptr<NewMessageStatusNotify> newMessageStatusNotify =
           std::static_pointer_cast<NewMessageStatusNotify>(p_ServiceMessage);
         MessageCache::UpdateMessageIsRead(p_ProfileId, newMessageStatusNotify->chatId,
-                                          newMessageStatusNotify->msgId, newMessageStatusNotify->isRead);
+                                          newMessageStatusNotify->msgId, newMessageStatusNotify->isRead,
+                                          newMessageStatusNotify->readThroughId);
       }
       break;
 
@@ -792,7 +794,8 @@ void MessageCache::UpdateMessageIsPinned(const std::string& p_ProfileId, const s
 }
 
 void MessageCache::UpdateMessageIsRead(const std::string& p_ProfileId, const std::string& p_ChatId,
-                                       const std::string& p_MsgId, bool p_IsRead)
+                                       const std::string& p_MsgId, bool p_IsRead,
+                                       const std::string& p_ReadThroughId)
 {
   if (!m_CacheEnabled) return;
 
@@ -800,6 +803,7 @@ void MessageCache::UpdateMessageIsRead(const std::string& p_ProfileId, const std
   updateIsReadRequest->profileId = p_ProfileId;
   updateIsReadRequest->chatId = p_ChatId;
   updateIsReadRequest->msgId = p_MsgId;
+  updateIsReadRequest->readThroughId = p_ReadThroughId;
   updateIsReadRequest->isRead = p_IsRead;
   EnqueueRequest(updateIsReadRequest);
 }
@@ -1759,8 +1763,24 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
 
         try
         {
-          *m_Dbs[profileId] << "UPDATE " + s_TableMessages + " SET isRead = ? WHERE chatId = ? AND id = ?;" <<
-            (int)isRead << chatId << msgId;
+          const std::string& through = updateIsReadRequest->readThroughId;
+          if (!through.empty())
+          {
+            *m_Dbs[profileId] << "UPDATE " + s_TableMessages +
+              " SET isRead = ? WHERE chatId = ? AND isOutgoing = 0 AND "
+              "(length(id) < length(?) OR (length(id) = length(?) AND id <= ?));" <<
+              (int)isRead << chatId << through << through << through;
+          }
+          else if (msgId.empty())
+          {
+            *m_Dbs[profileId] << "UPDATE " + s_TableMessages +
+              " SET isRead = ? WHERE chatId = ? AND isOutgoing = 0;" << (int)isRead << chatId;
+          }
+          else
+          {
+            *m_Dbs[profileId] << "UPDATE " + s_TableMessages + " SET isRead = ? WHERE chatId = ? AND id = ?;" <<
+              (int)isRead << chatId << msgId;
+          }
         }
         catch (const sqlite::sqlite_exception& ex)
         {

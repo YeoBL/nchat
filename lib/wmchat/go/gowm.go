@@ -818,6 +818,15 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 	case *events.AppState:
 		LOG_TRACE(fmt.Sprintf("%#v - %#v / %#v", evt, evt.Index, evt.SyncActionValue))
 
+	case *events.MarkChatAsRead:
+		LOG_TRACE(fmt.Sprintf("%#v", evt))
+		if evt.Action != nil && evt.Action.GetRead() {
+			client := GetClient(handler.connId)
+			if client != nil {
+				CWmNewMessageStatusNotify(handler.connId, GetChatId(client, &evt.JID, nil), "", BoolToInt(true))
+			}
+		}
+
 	case *events.LoggedOut:
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
 		handler.HandleLoggedOut()
@@ -3308,9 +3317,6 @@ func WmMarkMessageRead(connId int, chatId string, senderId string, msgId string)
 	ctx := context.TODO()
 	err := client.MarkRead(ctx, msgIds, timeRead, chatJid, senderJid)
 
-	// store time
-	SetTimeRead(connId, chatId, timeRead)
-
 	// log any error
 	if err != nil {
 		LOG_WARNING(fmt.Sprintf("mark message read error %#v", err))
@@ -3318,6 +3324,8 @@ func WmMarkMessageRead(connId int, chatId string, senderId string, msgId string)
 	} else {
 		LOG_TRACE(fmt.Sprintf("mark message read ok %#v", msgId))
 	}
+	// Advance local read progress only after the receipt was sent successfully.
+	SetTimeRead(connId, chatId, timeRead)
 
 	return 0
 }

@@ -862,6 +862,7 @@ void UiModel::Impl::MarkRead(const std::string& p_ProfileId, const std::string& 
     if (p_WasUnread)
     {
       mit->second.isRead = true;
+      m_Notifications.Read({p_ProfileId, p_ChatId}, p_MsgId);
     }
     senderId = mit->second.senderId;
   }
@@ -1870,6 +1871,8 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         std::shared_ptr<MarkMessageReadNotify> markMessageReadNotify = std::static_pointer_cast<MarkMessageReadNotify>(
           p_ServiceMessage);
         LOG_TRACE(markMessageReadNotify->success ? "mark read ok" : "mark read failed");
+        if (markMessageReadNotify->success)
+          m_Notifications.Read({profileId, markMessageReadNotify->chatId}, markMessageReadNotify->msgId);
       }
       break;
 
@@ -1940,11 +1943,35 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         std::string msgId = newMessageStatusNotify->msgId;
         bool isRead = newMessageStatusNotify->isRead;
         LOG_TRACE("new read status %s is %s", msgId.c_str(), (isRead ? "read" : "unread"));
-        std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
-        auto mit = messages.find(msgId);
-        if (mit != messages.end())
+        const auto terminalBellChat = std::make_pair(profileId, chatId);
+        const std::string& readThroughId = newMessageStatusNotify->readThroughId;
+        if (isRead)
         {
-          mit->second.isRead = isRead;
+          m_Notifications.Read(terminalBellChat, msgId, readThroughId);
+          LOG_DEBUG("notification read: pending chats %zu", m_Notifications.PendingChats());
+        }
+        std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
+        if (msgId.empty())
+        {
+          for (auto& messageEntry : messages)
+          {
+            ChatMessage& message = messageEntry.second;
+            if (!message.isOutgoing && (readThroughId.empty() ||
+                message.id.size() < readThroughId.size() ||
+                (message.id.size() == readThroughId.size() && message.id <= readThroughId)))
+            {
+              message.isRead = isRead;
+              if (isRead) m_Notifications.Read({profileId, chatId}, message.id);
+            }
+          }
+        }
+        else
+        {
+          auto mit = messages.find(msgId);
+          if (mit != messages.end())
+          {
+            mit->second.isRead = isRead;
+          }
         }
 
         UpdateChatInfoIsUnread(profileId, chatId);

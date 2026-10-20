@@ -157,6 +157,7 @@ private:
     std::string profileId;
     std::string chatId;
     std::string msgId;
+    std::string readThroughId;
     bool isRead = false;
   };
 
@@ -265,7 +266,7 @@ public:
   static void DeleteChat(const std::string& p_ProfileId, const std::string& p_ChatId);
   static void UpdateMessageIsRead(const std::string& p_ProfileId, const std::string& p_ChatId,
                                   const std::string& p_MsgId,
-                                  bool p_IsRead);
+                                  bool p_IsRead, const std::string& p_ReadThroughId = "");
   static void UpdateMessageIsPinned(const std::string& p_ProfileId, const std::string& p_ChatId,
                                     const std::string& p_MsgId,
                                     bool p_IsPinned);
