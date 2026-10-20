@@ -685,6 +685,24 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
       }
       break;
 
+    case VotePollRequestType:
+      {
+        auto request = std::static_pointer_cast<VotePollRequest>(p_RequestMessage);
+        std::string selected;
+        for (int index : request->optionIndexes)
+        {
+          if (!selected.empty()) selected += ",";
+          selected += std::to_string(index);
+        }
+        const int result = CWmVotePoll(m_ConnId,
+          const_cast<char*>(request->chatId.c_str()),
+          const_cast<char*>(request->msgId.c_str()),
+          const_cast<char*>(selected.c_str()));
+        if (request->onResult)
+          request->onResult(result == 0, result == 0 ? "Vote sent." : "WhatsApp rejected the vote.");
+      }
+      break;
+
     case GetMessageReceiptsRequestType:
       {
         auto request = std::static_pointer_cast<GetMessageReceiptsRequest>(p_RequestMessage);

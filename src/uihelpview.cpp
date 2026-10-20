@@ -129,6 +129,7 @@ void UiHelpView::Draw()
     AppendHelpItem("react", "AddReact", helpItems);
     AppendHelpItem("view_reactions", "WhoReacted", helpItems);
     AppendHelpItem("message_info", "MsgInfo", helpItems);
+    AppendHelpItem("poll", "VotePoll", helpItems);
     AppendHelpItem("open_msg", "ExtView", helpItems);
     AppendHelpItem("forward_msg", "FwdMsg", helpItems);
 

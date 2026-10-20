@@ -91,6 +91,7 @@ Interactive Commands for Selected Message:
     Ctrl-d      delete selected message
     Ctrl-r      download attached file
     Ctrl-v      open/view attached file
+    Alt-o       view poll voters / vote on selected poll (Enter toggles multiple choices)
     Ctrl-w      open link
     Ctrl-x      send reply to selected message
     Ctrl-z      edit selected message

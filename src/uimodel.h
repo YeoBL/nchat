@@ -408,6 +408,7 @@ private:
   void OnKeySelectContact();
   void OnKeyReact();
   void OnKeyViewReactions();
+  void OnKeyPoll();
   void OnKeyMessageInfo();
   void OnKeyFind();
   void OnKeyFindNext();

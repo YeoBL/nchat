@@ -40,6 +40,7 @@
 #include "uikeyinput.h"
 #include "uimessagedialog.h"
 #include "uimessageinfodialog.h"
+#include "uipolldialog.h"
 #include "uireactioninfodialog.h"
 #include "uitextinputdialog.h"
 #include "uiview.h"
@@ -4640,6 +4641,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyReact = UiKeyConfig::GetKey("react");
   static wint_t keyViewReactions = UiKeyConfig::GetKey("view_reactions");
   static wint_t keyMessageInfo = UiKeyConfig::GetKey("message_info");
+  static wint_t keyPoll = UiKeyConfig::GetKey("poll");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
@@ -4828,6 +4830,10 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyMessageInfo)
   {
     OnKeyMessageInfo();
+  }
+  else if (p_Key == keyPoll)
+  {
+    OnKeyPoll();
   }
   else if (p_Key == keyReact)
   {
@@ -5517,6 +5523,45 @@ void UiModel::OnKeyViewReactions()
   if (!protocol) return;
   UiDialogParams params(this, "Reactions", 0.75, 0.65);
   UiReactionInfoDialog dialog(params, profile, reactions, protocol, request);
+  dialog.Run();
+}
+
+void UiModel::OnKeyPoll()
+{
+  auto request = std::make_shared<VotePollRequest>();
+  std::shared_ptr<Protocol> protocol;
+  std::string profile;
+  std::string text;
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    auto& model = GetImpl();
+    if (!model.GetSelectMessageActive() || model.GetEditMessageActive()) return;
+    const auto chat = model.GetCurrentChat();
+    profile = chat.first;
+    auto& ids = model.GetMessageVec(chat.first, chat.second);
+    const int offset = model.GetMessageOffset(chat.first, chat.second);
+    if (offset < 0 || offset >= static_cast<int>(ids.size())) return;
+    auto& messages = model.GetMessages(chat.first, chat.second);
+    const auto foundMessage = messages.find(ids[offset]);
+    if (foundMessage == messages.end() || foundMessage->second.isDeleted) return;
+    const auto& message = foundMessage->second;
+    text = message.text;
+    request->chatId = chat.second;
+    request->msgId = message.id;
+    request->senderId = message.senderId;
+    request->isOutgoing = message.isOutgoing;
+    auto protocols = model.GetProtocols();
+    auto foundProtocol = protocols.find(chat.first);
+    if (foundProtocol != protocols.end()) protocol = foundProtocol->second;
+  }
+  if (text.rfind("[Poll] ", 0) != 0 || text.find("\n• ") == std::string::npos)
+  {
+    MessageDialog("Poll", "Select a poll message to vote.", 0.6, 5);
+    return;
+  }
+  if (!protocol) return;
+  UiDialogParams params(this, "Poll", 0.75, 0.5);
+  UiPollDialog dialog(params, protocol, request, profile, text);
   dialog.Run();
 }
 

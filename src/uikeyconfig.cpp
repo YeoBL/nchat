@@ -226,6 +226,7 @@ void UiKeyConfig::Init(bool p_MapKeys)
     { "react", "\\33\\163" }, // alt/opt-s
     { "view_reactions", "\\33\\123" }, // alt/opt-shift-s
     { "message_info", "\\33\\155" }, // alt/opt-m
+    { "poll", "\\33\\157" }, // alt/opt-o
     { "spell", "\\33\\44" }, // alt/opt-$
     { "jump_quoted", "\\33\\161" }, // alt/opt-q
     { "jump_pinned", "KEY_CTRLP" },

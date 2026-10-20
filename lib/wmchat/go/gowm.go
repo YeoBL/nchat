@@ -3889,3 +3889,95 @@ func WmSendReaction(connId int, chatId string, senderId string, msgId string, em
 
 	return 0
 }
+
+func selectedPollOptions(state *PollState, indexes string) ([]string, error) {
+	if state == nil || indexes == "" {
+		return nil, fmt.Errorf("poll options unavailable")
+	}
+	parts := strings.Split(indexes, ",")
+	if (!state.KnownLimit && len(parts) > 1) ||
+		(state.KnownLimit && state.MaxChoices > 0 && len(parts) > state.MaxChoices) {
+		return nil, fmt.Errorf("too many poll choices")
+	}
+	options := make([]string, 0, len(parts))
+	seen := make(map[int]bool)
+	for _, part := range parts {
+		index, err := strconv.Atoi(part)
+		if err != nil || index < 0 || index >= len(state.Options) || seen[index] {
+			return nil, fmt.Errorf("invalid poll choice")
+		}
+		seen[index] = true
+		options = append(options, state.Options[index])
+	}
+	return options, nil
+}
+
+func WmVotePoll(connId int, chatID, msgID, optionIndexes string) int {
+	client := GetClient(connId)
+	if client == nil || msgID == "" {
+		return -1
+	}
+	mx.Lock()
+	state := pollStates[connId][pollStateKey(chatID, msgID)]
+	options, selectErr := selectedPollOptions(state, optionIndexes)
+	if selectErr != nil {
+		mx.Unlock()
+		LOG_WARNING(fmt.Sprintf("poll choice unavailable: %v", selectErr))
+		return -1
+	}
+	rawSenderID := state.RawSenderID
+	if rawSenderID == "" {
+		rawSenderID = state.SenderID
+	}
+	isOutgoing := state.FromMe
+	mx.Unlock()
+	chat, err := types.ParseJID(chatID)
+	if err != nil {
+		LOG_WARNING(fmt.Sprintf("invalid poll chat: %v", err))
+		return -1
+	}
+	sender, err := types.ParseJID(rawSenderID)
+	if err != nil {
+		LOG_WARNING(fmt.Sprintf("invalid poll sender: %v", err))
+		return -1
+	}
+	info := types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat: chat, Sender: sender, IsFromMe: isOutgoing,
+			IsGroup: chat.Server == types.GroupServer,
+		},
+		ID: msgID,
+	}
+	ctx := context.Background()
+	vote, err := client.BuildPollVote(ctx, &info, options)
+	if err != nil {
+		LOG_WARNING(fmt.Sprintf("build poll vote failed: %v", err))
+		return -1
+	}
+	if _, err = client.SendMessage(ctx, chat, vote); err != nil {
+		LOG_WARNING(fmt.Sprintf("send poll vote failed: %v", err))
+		return -1
+	}
+	updatedText := ""
+	updatedSender := ""
+	updatedTime := 0
+	updatedFromMe := false
+	updatedIsRead := false
+	mx.Lock()
+	if current := pollStates[connId][pollStateKey(chatID, msgID)]; current != nil && client.Store.ID != nil {
+		self := StrFromJid(*client.Store.ID)
+		hashes := whatsmeow.HashPollOptions(options)
+		setRecordedPollVote(current, self, hashes, time.Now().UnixMilli())
+		savePollStates(pollStorePath(paths[connId]), pollStates[connId])
+		updatedText = formatPollState(current)
+		updatedSender, updatedTime = current.SenderID, current.TimeSent
+		updatedFromMe, updatedIsRead = current.FromMe, current.IsRead
+	}
+	mx.Unlock()
+	if updatedText != "" {
+		CWmNewMessagesNotify(connId, chatID, msgID, updatedSender, updatedText,
+			BoolToInt(updatedFromMe), "", "", "", FileStatusNone, updatedTime, BoolToInt(updatedIsRead), BoolToInt(true))
+	}
+	return 0
+}
+

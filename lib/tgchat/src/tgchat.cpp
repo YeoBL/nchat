@@ -760,6 +760,46 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
       }
       break;
 
+    case VotePollRequestType:
+      {
+        auto request = std::static_pointer_cast<VotePollRequest>(p_RequestMessage);
+        const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
+        const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
+        SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+          [this, request, chatId, msgId](Object object)
+        {
+          if (object->get_id() != td::td_api::message::ID)
+          {
+            if (request->onResult) request->onResult(false, "Could not load this poll.");
+            return;
+          }
+          auto message = td::move_tl_object_as<td::td_api::message>(object);
+          if (!message->content_ || message->content_->get_id() != td::td_api::messagePoll::ID)
+          {
+            if (request->onResult) request->onResult(false, "This message is not a poll.");
+            return;
+          }
+          auto& content = static_cast<td::td_api::messagePoll&>(*message->content_);
+          if (!content.poll_ || content.poll_->is_closed_ || request->optionIndexes.empty() ||
+              (!content.poll_->allows_multiple_answers_ && request->optionIndexes.size() != 1) ||
+              std::any_of(request->optionIndexes.begin(), request->optionIndexes.end(),
+                [&content](int index) { return index < 0 ||
+                  index >= static_cast<int>(content.poll_->options_.size()); }))
+          {
+            if (request->onResult) request->onResult(false, "This poll is closed or the option is unavailable.");
+            return;
+          }
+          std::vector<int32_t> ids(request->optionIndexes.begin(), request->optionIndexes.end());
+          SendQuery(td::td_api::make_object<td::td_api::setPollAnswer>(chatId, msgId, std::move(ids)),
+            [request](Object answer)
+          {
+            if (request->onResult) request->onResult(answer->get_id() == td::td_api::ok::ID,
+              answer->get_id() == td::td_api::ok::ID ? "Vote sent." : "Telegram rejected the vote.");
+          });
+        });
+      }
+      break;
+
     case GetStatusRequestType:
       {
         LOG_DEBUG("Get status");

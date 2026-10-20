@@ -139,6 +139,11 @@ func CWmSendReaction(connId int, chatId *C.char, senderId *C.char, msgId *C.char
 	return WmSendReaction(connId, C.GoString(chatId), C.GoString(senderId), C.GoString(msgId), C.GoString(emoji))
 }
 
+//export CWmVotePoll
+func CWmVotePoll(connId int, chatId *C.char, msgId *C.char, optionIndexes *C.char) int {
+	return WmVotePoll(connId, C.GoString(chatId), C.GoString(msgId), C.GoString(optionIndexes))
+}
+
 func CWmNewContactsNotify(connId int, chatId string, name string, phone string, isSelf int, isAlias int, notify int) {
 	C.WmNewContactsNotify(C.int(connId), C.CString(chatId), C.CString(name), C.CString(phone), C.int(isSelf), C.int(isAlias), C.int(notify))
 }
