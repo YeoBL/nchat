@@ -33,6 +33,22 @@ public:
     int64_t timeSent = 0;
   };
 
+  struct SearchQuery
+  {
+    std::string text, sender, profileId, chatId;
+    // all, text, attachment, image, video, audio, file, poll, link, deleted
+    std::string type = "all";
+    int64_t fromTime = 0, toTime = 0; // Inclusive, Unix milliseconds; 0 means no bound.
+    bool linksOnly = false;
+    int limit = 200;
+  };
+
+  struct SearchResult
+  {
+    std::string profileId, chatId, chatName, senderName;
+    ChatMessage message;
+  };
+
 private:
   enum RequestType
   {
@@ -292,6 +308,7 @@ public:
                                                     const std::string& p_ChatId);
   static std::vector<std::string> GetUnreadChatIds(const std::string& p_ProfileId);
   static std::vector<Attachment> GetAttachments();
+  static std::vector<SearchResult> SearchMessages(const SearchQuery& p_Query);
   static void UpdateMembership(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_IsMember);
   static void FindMessage(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_FromMsgId,
                           const std::string& p_LastMsgId, const std::string& p_FindText,
@@ -329,12 +346,14 @@ private:
                                      const std::string& p_MsgId, std::vector<ChatMessage>& p_ChatMessages);
 
   static void CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage);
+  static void InitSearch(const std::string& p_ProfileId);
 
 private:
   static std::function<void(std::shared_ptr<ServiceMessage>)> m_MessageHandler;
 
   static std::mutex m_DbMutex;
   static std::map<std::string, std::unique_ptr<sqlite::database>> m_Dbs;
+  static std::unordered_map<std::string, bool> m_SearchIndexed;
   static std::unordered_map<std::string, bool> m_CheckSequence;
   static std::unordered_map<std::string, std::unordered_map<std::string, bool>> m_UpdatedSequence;
 

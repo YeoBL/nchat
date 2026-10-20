@@ -10,8 +10,12 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <locale>
 #include <map>
+#include <set>
 #include <sstream>
+#include <stdexcept>
+#include <tuple>
 #include <utility>
 
 #include <sqlite_modern_cpp.h>
@@ -29,6 +33,7 @@
 std::function<void(std::shared_ptr<ServiceMessage>)> MessageCache::m_MessageHandler;
 std::mutex MessageCache::m_DbMutex;
 std::map<std::string, std::unique_ptr<sqlite::database>> MessageCache::m_Dbs;
+std::unordered_map<std::string, bool> MessageCache::m_SearchIndexed;
 std::unordered_map<std::string, bool> MessageCache::m_CheckSequence;
 std::unordered_map<std::string, std::unordered_map<std::string, bool>> MessageCache::m_UpdatedSequence;
 bool MessageCache::m_Running = false;
@@ -43,6 +48,44 @@ bool MessageCache::m_CacheReadOnly = false;
 static const std::string s_TableContacts = "contacts2";
 static const std::string s_TableChats = "chats2";
 static const std::string s_TableMessages = "messages";
+
+static std::string SearchFold(const std::string& value)
+{
+  static const std::locale locale = []
+  {
+    for (const char* name : {"", "C.UTF-8", "en_US.UTF-8"})
+    {
+      try
+      {
+        std::locale candidate(name);
+        if (std::use_facet<std::ctype<wchar_t>>(candidate).tolower(L'É') == L'é') return candidate;
+      }
+      catch (const std::runtime_error&) { }
+    }
+    return std::locale::classic();
+  }();
+  std::wstring wide = StrUtil::ToWString(value);
+  if (!wide.empty()) std::use_facet<std::ctype<wchar_t>>(locale).tolower(&wide[0], &wide[0] + wide.size());
+  return StrUtil::ToString(wide);
+}
+
+static std::string SearchFileType(const std::string& info)
+{
+  if (info.empty()) return "";
+  const FileInfo file = ProtocolUtil::FileInfoFromHex(info);
+  if (!file.fileType.empty()) return StrUtil::ToLower(file.fileType);
+  // Older Telegram cache entries have no MIME field. Classify their existing
+  // placeholders/extensions without reading or downloading the file itself.
+  const std::string name = SearchFold(FileUtil::BaseName(file.filePath));
+  const std::string extension = FileUtil::GetFileExt(name);
+  static const std::set<std::string> images = {".jpg",".jpeg",".png",".gif",".webp",".bmp",".avif",".heic",".heif",".tif",".tiff",".svg"};
+  static const std::set<std::string> videos = {".mp4",".mov",".m4v",".webm",".mkv",".avi",".3gp"};
+  static const std::set<std::string> audio = {".mp3",".m4a",".aac",".ogg",".oga",".opus",".wav",".flac",".aiff",".aif"};
+  if (name == "[photo]" || name == "[sticker]" || images.count(extension)) return "image/unknown";
+  if (name == "[video]" || name == "[videonote]" || name == "[animation]" || videos.count(extension)) return "video/unknown";
+  if (name == "[voicenote]" || audio.count(extension)) return "audio/unknown";
+  return "";
+}
 
 void MessageCache::Init()
 {
@@ -80,6 +123,7 @@ void MessageCache::Cleanup()
     std::unique_lock<std::mutex> lock(m_DbMutex);
     m_MessageHandler = nullptr;
     m_Dbs.clear();
+    m_SearchIndexed.clear();
   }
 }
 
@@ -507,10 +551,53 @@ void MessageCache::AddProfile(const std::string& p_ProfileId, bool p_CheckSequen
     {
       LOG_TRACE("db schema ready");
     }
+    InitSearch(p_ProfileId);
   }
   catch (const sqlite::sqlite_exception& ex)
   {
     HANDLE_SQLITE_EXCEPTION(ex);
+  }
+}
+
+void MessageCache::InitSearch(const std::string& p_ProfileId)
+{
+  auto& db = *m_Dbs.at(p_ProfileId);
+  db << "CREATE INDEX IF NOT EXISTS messages_search_time ON messages(timeSent DESC);";
+  db << "CREATE INDEX IF NOT EXISTS messages_search_sender ON messages(senderId,timeSent DESC);";
+  db << "CREATE INDEX IF NOT EXISTS messages_search_chat_time ON messages(chatId,timeSent DESC);";
+  db.define("nchat_file_type", &SearchFileType);
+  db.define("nchat_fold", &SearchFold);
+  // FTS is an optional accelerator. Keep substring search working on SQLite
+  // builds without FTS5/trigram rather than making the cache depend on it.
+  m_SearchIndexed[p_ProfileId] = false;
+  try
+  {
+    db << "SAVEPOINT nchat_search_index;";
+    int exists = 0;
+    db << "SELECT count(*) FROM sqlite_master WHERE name='messages_search_fts';" >> exists;
+    db << "CREATE VIRTUAL TABLE IF NOT EXISTS messages_search_fts USING fts5(text,tokenize='trigram');";
+    // BEFORE INSERT handles the cache's REPLACE conflict policy too. Normal
+    // FTS tables allow ordinary DELETE, so repeated triggers are harmless.
+    db << "CREATE TRIGGER IF NOT EXISTS messages_search_before_insert BEFORE INSERT ON messages BEGIN "
+      "DELETE FROM messages_search_fts WHERE rowid IN (SELECT rowid FROM messages WHERE chatId=NEW.chatId AND id=NEW.id); END;";
+    db << "CREATE TRIGGER IF NOT EXISTS messages_search_insert AFTER INSERT ON messages BEGIN "
+      "DELETE FROM messages_search_fts WHERE rowid=NEW.rowid; "
+      "INSERT INTO messages_search_fts(rowid,text) VALUES(NEW.rowid,COALESCE(NEW.text,'')); END;";
+    db << "CREATE TRIGGER IF NOT EXISTS messages_search_delete AFTER DELETE ON messages BEGIN "
+      "DELETE FROM messages_search_fts WHERE rowid=OLD.rowid; END;";
+    db << "CREATE TRIGGER IF NOT EXISTS messages_search_update AFTER UPDATE OF text ON messages BEGIN "
+      "DELETE FROM messages_search_fts WHERE rowid=OLD.rowid; "
+      "INSERT INTO messages_search_fts(rowid,text) VALUES(NEW.rowid,COALESCE(NEW.text,'')); END;";
+    if (!exists)
+      db << "INSERT INTO messages_search_fts(rowid,text) SELECT rowid,COALESCE(text,'') FROM messages;";
+    db << "RELEASE nchat_search_index;";
+    m_SearchIndexed[p_ProfileId] = true;
+  }
+  catch (const sqlite::sqlite_exception&)
+  {
+    try { db << "ROLLBACK TO nchat_search_index;"; db << "RELEASE nchat_search_index;"; }
+    catch (const sqlite::sqlite_exception&) { }
+    LOG_DEBUG("SQLite trigram index unavailable; using bound substring search");
   }
 }
 
@@ -775,6 +862,99 @@ std::vector<MessageCache::Attachment> MessageCache::GetAttachments()
     return lhs.timeSent > rhs.timeSent;
   });
   return attachments;
+}
+
+std::vector<MessageCache::SearchResult> MessageCache::SearchMessages(const SearchQuery& p_Query)
+{
+  std::vector<SearchResult> results;
+  const int limit = std::max(1, std::min(p_Query.limit, 1000));
+  const std::map<std::string, std::string> types =
+  {
+    {"all", "1"},
+    {"text", "COALESCE(m.fileInfo,'')=''"},
+    {"attachment", "COALESCE(m.fileInfo,'')!=''"},
+    {"image", "(nchat_file_type(m.fileInfo) LIKE 'image/%')"},
+    {"video", "(nchat_file_type(m.fileInfo) LIKE 'video/%' OR m.text LIKE '[Video%')"},
+    {"audio", "(nchat_file_type(m.fileInfo) LIKE 'audio/%' OR m.text LIKE '[Voice note]%' OR m.text LIKE '[Audio]%')"},
+    {"file", "(COALESCE(m.fileInfo,'')!='' AND nchat_file_type(m.fileInfo) NOT LIKE 'image/%' "
+      "AND nchat_file_type(m.fileInfo) NOT LIKE 'video/%' AND nchat_file_type(m.fileInfo) NOT LIKE 'audio/%')"},
+    {"poll", "m.text LIKE '[Poll]%'"},
+    {"link", "(instr(lower(m.text),'https://')>0 OR instr(lower(m.text),'http://')>0 OR instr(lower(m.text),'www.')>0)"},
+    {"deleted", "COALESCE(m.isDeleted,0)=1"},
+  };
+  const std::string typeName = StrUtil::ToLower(p_Query.type);
+  auto type = types.find(typeName);
+  if (type == types.end()) return results;
+  if (p_Query.fromTime && p_Query.toTime && p_Query.fromTime > p_Query.toTime) return results;
+
+  std::unique_lock<std::mutex> lock(m_DbMutex);
+  for (const auto& profile : m_Dbs)
+  {
+    if (!profile.second || (!p_Query.profileId.empty() && profile.first != p_Query.profileId)) continue;
+    try
+    {
+      const bool indexed = m_SearchIndexed[profile.first] && StrUtil::ToWString(p_Query.text).size() >= 3;
+      std::string sql =
+        "SELECT m.chatId,COALESCE(NULLIF(cc.name,''),m.chatId),"
+        "CASE WHEN m.isOutgoing OR c.isSelf THEN 'You' ELSE COALESCE(NULLIF(c.name,''),NULLIF(c.phone,''),m.senderId) END,"
+        "m.id,m.senderId,COALESCE(m.text,''),COALESCE(m.quotedId,''),COALESCE(m.quotedText,''),"
+        "COALESCE(m.quotedSender,''),COALESCE(m.fileInfo,''),m.timeSent,"
+        "COALESCE(m.isOutgoing,0),COALESCE(m.isRead,0),COALESCE(m.isEdited,0),"
+        "COALESCE(m.isDeleted,0),COALESCE(m.isPinned,0) FROM messages m "
+        "LEFT JOIN contacts2 c ON m.senderId=c.id LEFT JOIN contacts2 cc ON m.chatId=cc.id WHERE " + type->second;
+      if (typeName != "deleted") sql += " AND COALESCE(m.isDeleted,0)=0";
+      if (!p_Query.chatId.empty()) sql += " AND m.chatId=?";
+      if (p_Query.fromTime) sql += " AND m.timeSent>=?";
+      if (p_Query.toTime) sql += " AND m.timeSent<=?";
+      if (!p_Query.sender.empty()) sql +=
+        " AND (m.senderId=? OR instr(nchat_fold(COALESCE(c.name,'')),nchat_fold(?))>0 "
+        "OR instr(COALESCE(c.phone,''),?)>0 OR ((m.isOutgoing OR c.isSelf) AND nchat_fold(?)='you'))";
+      if (p_Query.linksOnly && typeName != "link") sql += " AND " + types.at("link");
+      if (!p_Query.text.empty()) sql += indexed ?
+        " AND m.rowid IN (SELECT rowid FROM messages_search_fts WHERE messages_search_fts MATCH ?)" :
+        " AND instr(nchat_fold(COALESCE(m.text,'')),nchat_fold(?))>0";
+      sql += " ORDER BY m.timeSent DESC,m.chatId,m.id LIMIT ?;";
+      auto query = *profile.second << sql;
+      if (!p_Query.chatId.empty()) query << p_Query.chatId;
+      if (p_Query.fromTime) query << p_Query.fromTime;
+      if (p_Query.toTime) query << p_Query.toTime;
+      if (!p_Query.sender.empty()) query << p_Query.sender << p_Query.sender << p_Query.sender << p_Query.sender;
+      if (!p_Query.text.empty())
+      {
+        std::string text = p_Query.text;
+        if (indexed)
+        {
+          size_t pos = 0;
+          while ((pos = text.find('"', pos)) != std::string::npos) { text.insert(pos, 1, '"'); pos += 2; }
+          text = '"' + text + '"';
+        }
+        query << text;
+      }
+      query << limit >> [&](const std::string& chatId, const std::string& chatName, const std::string& senderName,
+        const std::string& id, const std::string& senderId, const std::string& text, const std::string& quotedId,
+        const std::string& quotedText, const std::string& quotedSender, const std::string& fileInfo,
+        int64_t timeSent, int isOutgoing, int isRead, int isEdited, int isDeleted, int isPinned)
+      {
+        SearchResult result;
+        result.profileId = profile.first; result.chatId = chatId;
+        result.chatName = chatName; result.senderName = senderName;
+        auto& message = result.message;
+        message.id = id; message.senderId = senderId; message.text = text; message.quotedId = quotedId;
+        message.quotedText = quotedText; message.quotedSender = quotedSender; message.fileInfo = fileInfo;
+        message.timeSent = timeSent; message.isOutgoing = isOutgoing; message.isRead = isRead;
+        message.isEdited = isEdited; message.isDeleted = isDeleted; message.isPinned = isPinned;
+        results.push_back(std::move(result));
+      };
+    }
+    catch (const sqlite::sqlite_exception& ex) { HANDLE_SQLITE_EXCEPTION(ex); }
+  }
+  std::sort(results.begin(), results.end(), [](const SearchResult& lhs, const SearchResult& rhs)
+  {
+    if (lhs.message.timeSent != rhs.message.timeSent) return lhs.message.timeSent > rhs.message.timeSent;
+    return std::tie(lhs.profileId,lhs.chatId,lhs.message.id) < std::tie(rhs.profileId,rhs.chatId,rhs.message.id);
+  });
+  if (results.size() > static_cast<size_t>(limit)) results.resize(limit);
+  return results;
 }
 
 std::vector<std::string> MessageCache::GetUnreadMessageIds(const std::string& p_ProfileId,
