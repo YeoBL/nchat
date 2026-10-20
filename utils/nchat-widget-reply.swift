@@ -68,7 +68,19 @@ enum WidgetReplyBridge {
         complete = true
     }
 
-    static func submit(cachePath: String, chatID: String, referenceID: String, text: String) -> ReplyOutcome {
+    static func markRead(cachePath: String, chatID: String, messageIDs: [String]) -> ReplyOutcome {
+        guard !messageIDs.isEmpty else { return .failed("No messages to mark as read.") }
+        for offset in stride(from: 0, to: messageIDs.count, by: 100) {
+            let batch = Array(messageIDs[offset..<min(offset + 100, messageIDs.count)])
+            guard batch.allSatisfy({ !$0.isEmpty && !$0.contains("\n") }) else { return .failed("Invalid message identifier.") }
+            let outcome = submit(cachePath: cachePath, chatID: chatID, referenceID: batch.joined(separator: "\n"), text: "mark-read", markRead: true)
+            if case .accepted = outcome { continue }
+            return outcome
+        }
+        return .accepted
+    }
+
+    static func submit(cachePath: String, chatID: String, referenceID: String, text: String, markRead: Bool = false) -> ReplyOutcome {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.utf16.count <= 4000, !text.contains("\0"), !chatID.isEmpty, !referenceID.isEmpty else {
             return .failed("Write a reply of 1–4,000 characters.")
@@ -89,6 +101,9 @@ enum WidgetReplyBridge {
               server[1].count == 32, server[1].allSatisfy({ "0123456789abcdef".contains($0) }) else {
             return .failed("nchat is not running. Draft kept.")
         }
+        if markRead && (server.count < 3 || server[2] != "read-v1") {
+            return .failed("Restart nchat to enable Mark as read.")
+        }
         let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let path = directory + "/" + id
         let fields = [profile.lastPathComponent, chatID, referenceID, text]
@@ -96,7 +111,7 @@ enum WidgetReplyBridge {
             value.utf8.map { String(format: "%02x", $0) }.joined()
         }.joined(separator: "\n") + "\n"
         guard secureRead(directory + "/server") == marker else { return .failed("nchat restarted. Try again.") }
-        let suffix = ".request"
+        let suffix = markRead ? ".read" : ".request"
         guard payload.utf8.count <= 40000 else { return .failed("Too many message details. Reopen the widget and retry.") }
         do { try writeRequest(payload, path: path + suffix) }
         catch { return .failed("Could not submit the reply. Draft kept.") }
@@ -106,8 +121,8 @@ enum WidgetReplyBridge {
         while Date() < deadline {
             switch secureRead(path + ".result") {
             case "accepted": return .accepted
-            case "failed": return .failed("nchat reported a send failure. Draft kept.")
-            case "rejected": return .failed("Reply rejected before sending. Reopen the chat preview and try again.")
+            case "failed": return .failed(markRead ? "Couldn't mark every message as read. Please retry." : "nchat reported a send failure. Draft kept.")
+            case "rejected": return .failed(markRead ? "Read request rejected. Reopen the widget and retry." : "Reply rejected before sending. Reopen the chat preview and try again.")
             default: break
             }
             if secureRead(directory + "/server") != marker || kill(pid, 0) != 0 { return .unknown }

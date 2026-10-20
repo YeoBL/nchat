@@ -110,6 +110,15 @@ struct CacheError: Error, CustomStringConvertible {
 }
 
 final class Cache {
+    var dismissed: Set<String> = [] {
+        didSet { if oldValue != dismissed { version = -1 } }
+    }
+    private var dismissalPredicate: String {
+        guard !dismissed.isEmpty, let data = try? JSONEncoder().encode(Array(dismissed)) else { return "" }
+        // Hex-encoded JSON is data, never interpolated SQL identifiers/text.
+        let hex = data.map { String(format: "%02x", $0) }.joined()
+        return " AND (m.chatId || char(10) || m.id) NOT IN (SELECT value FROM json_each(CAST(X'\(hex)' AS TEXT)))"
+    }
     // Telegram now backfills full settings on sync. Unknown is not unarchived.
     private var knownSettingsPredicate: String {
         service == "Telegram" ? " AND ch.isArchived IS NOT NULL AND ch.isMuted IS NOT NULL" : ""
@@ -188,7 +197,7 @@ final class Cache {
                 FROM messages m
                 LEFT JOIN chats2 ch ON ch.id = m.chatId
                 LEFT JOIN contacts2 c ON c.id = m.chatId
-                WHERE \(unreadCandidatePredicate)\(knownSettingsPredicate)\(membershipPredicate)
+                WHERE \(unreadCandidatePredicate)\(knownSettingsPredicate)\(dismissalPredicate)\(membershipPredicate)
             ), progress AS (
                 SELECT chatId, MAX(timeSent) AS time FROM messages
                 WHERE isOutgoing = 0 AND isRead = 1
@@ -238,7 +247,7 @@ final class Cache {
                        COALESCE(m.fileInfo, ''), m.id
                 FROM messages m LEFT JOIN contacts2 c ON c.id = m.senderId
                 LEFT JOIN chats2 ch ON ch.id = m.chatId CROSS JOIN progress p
-                WHERE m.chatId = ?1 AND \(unreadCandidatePredicate)\(knownSettingsPredicate)\(membershipPredicate)
+                WHERE m.chatId = ?1 AND \(unreadCandidatePredicate)\(knownSettingsPredicate)\(dismissalPredicate)\(membershipPredicate)
                     \(service == "Telegram" ? "" : "AND m.timeSent > COALESCE(p.time, 0)")
                 ORDER BY m.timeSent DESC, m.id DESC LIMIT 200
                 """)
@@ -280,13 +289,27 @@ final class Reader {
     let root: String
     let checkBackend: Bool
     private var caches: [String: Cache] = [:]
+    private var dismissed: [String: Set<String>] = [:]
+    private var dismissalURL: URL { URL(fileURLWithPath: root).deletingLastPathComponent().appendingPathComponent("widget-dismissed.json") }
     init(root: String, checkBackend: Bool = true) {
         self.root = root
         self.checkBackend = checkBackend
+        if let data = try? Data(contentsOf: dismissalURL), let stored = try? JSONDecoder().decode([String: Set<String>].self, from: data) {
+            dismissed = stored
+        }
+    }
+
+    func clear(_ chat: UnreadChat) throws {
+        var next = dismissed
+        next[chat.cachePath, default: []].formUnion(chat.messageIDs.map { chat.id + "\n" + $0 })
+        try JSONEncoder().encode(next).write(to: dismissalURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: dismissalURL.path)
+        dismissed = next
     }
 
     func preview(_ chat: UnreadChat) throws -> [PreviewMessage] {
         let cache = try Cache(path: chat.cachePath, service: chat.service)
+        cache.dismissed = dismissed[chat.cachePath] ?? []
         return try cache.preview(chatID: chat.id)
     }
 
@@ -303,6 +326,7 @@ final class Reader {
                 if caches[path] == nil || caches[path]!.replaced() {
                     caches[path] = try Cache(path: path, service: profile.hasPrefix("Telegram_") ? "Telegram" : "WhatsApp")
                 }
+                caches[path]!.dismissed = dismissed[path] ?? []
                 chats += try caches[path]!.rows()
             }
             return Snapshot(chats: chats.sorted {
@@ -432,6 +456,10 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     var onCollapse: (() -> Void)?
     var onQuit: (() -> Void)?
     var onSend: ((UnreadChat, String, String) -> Void)?
+    var onClear: ((UnreadChat) -> Void)?
+    var onMarkRead: ((UnreadChat) -> Void)?
+    var markingRead: Set<String> = []
+    var actionErrors: [String: String] = [:]
     var onResize: ((NSSize) -> Void)?
     var onOpenImage: (URL) -> Void = openFullImageInPreview
     var onImageOpenError: (String) -> Void = imageOpenError
@@ -636,6 +664,22 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
             button.addSubview(chevron)
             document.addSubview(button)
             y += 66
+            for (title, x, action) in [("Clear", CGFloat(58), #selector(clearChat(_:))),
+                                        (markingRead.contains(chat.key) ? "Marking…" : "Mark as read", CGFloat(134), #selector(markChatRead(_:)))] {
+                let control = ChatActionButton(title: title, target: self, action: action)
+                control.chat = chat
+                control.bezelStyle = .rounded
+                control.font = .systemFont(ofSize: 11)
+                control.frame = NSRect(x: x, y: y, width: title == "Clear" ? 68 : 112, height: 24)
+                control.isEnabled = !markingRead.contains(chat.key)
+                control.toolTip = title == "Clear" ? "Dismiss these notifications only. Messages stay unread in the app." : "Mark these messages as read in \(chat.service). Sends read receipts."
+                control.setAccessibilityLabel("\(title): \(chat.name)")
+                document.addSubview(control)
+            }
+            y += 30
+            if let error = actionErrors[chat.key] {
+                y += label(error, x: 60, y: y, width: width - 85, size: 11, secondary: true, lines: 3) + 8
+            }
             if isExpanded {
                 if let messages = previews[chat.key] {
                     if messages.isEmpty {
@@ -734,6 +778,12 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         updateComposer()
     }
 
+    @objc func clearChat(_ sender: ChatActionButton) {
+        if let chat = sender.chat { onClear?(chat) }
+    }
+    @objc func markChatRead(_ sender: ChatActionButton) {
+        if let chat = sender.chat { onMarkRead?(chat) }
+    }
     @objc func toggle(_ sender: ChatButton) {
         if let chat = sender.chat { onToggle?(chat) }
     }
@@ -915,6 +965,8 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         content.onCollapse = { [weak self] in self?.collapseChats() }
         content.onQuit = { NSApplication.shared.terminate(nil) }
         content.onSend = { [weak self] chat, reference, text in self?.sendReply(chat, reference: reference, text: text) }
+        content.onClear = { [weak self] chat in self?.chatAction(chat, markRead: false) }
+        content.onMarkRead = { [weak self] chat in self?.chatAction(chat, markRead: true) }
         let source = DispatchSource.makeTimerSource(queue: cacheQueue)
         source.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(200))
         source.setEventHandler { [weak self] in
@@ -1040,6 +1092,42 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
                 self.content.previews[chat.key] = prepared
                 self.content.errors[chat.key] = issue
+                self.content.rebuild()
+            }
+        }
+    }
+
+    func chatAction(_ chat: UnreadChat, markRead: Bool) {
+        guard !content.markingRead.contains(chat.key) else { return }
+        content.actionErrors[chat.key] = nil
+        if markRead { content.markingRead.insert(chat.key) }
+        content.rebuild()
+        if !markRead {
+            cacheQueue.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    try self.reader.clear(chat)
+                    let state = self.reader.snapshot()
+                    DispatchQueue.main.async { self.render(state) }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.content.actionErrors[chat.key] = "Couldn't save the dismissal. Please retry."
+                        self.content.rebuild()
+                    }
+                }
+            }
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let outcome = WidgetReplyBridge.markRead(cachePath: chat.cachePath, chatID: chat.id, messageIDs: chat.messageIDs)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.content.markingRead.remove(chat.key)
+                switch outcome {
+                case .accepted: break // Wait for confirmed cache updates; never fake a read.
+                case .failed(let error): self.content.actionErrors[chat.key] = error
+                case .unknown: self.content.actionErrors[chat.key] = "Read status not confirmed. Check the app before retrying."
+                }
                 self.content.rebuild()
             }
         }
