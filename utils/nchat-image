@@ -3,8 +3,13 @@
 image=${1:?missing image path}
 [[ -f $image ]] || { print -u2 -- "File not found: $image"; exit 1; }
 
-# Use native Quick Look for files and when the optional terminal renderer is absent.
-if [[ $(/usr/bin/file -b --mime-type -- "$image") != image/* ]] || ! command -v chafa >/dev/null; then
+# Quick Look's video player can crash while opening video notes. Use the native
+# media player for video; retain existing audio, document and image behavior.
+mime_type=$(/usr/bin/file -b --mime-type -- "$image")
+if [[ $mime_type == video/* ]]; then
+  exec /usr/bin/open -b com.apple.QuickTimePlayerX -- "$image"
+fi
+if [[ $mime_type != image/* ]] || ! command -v chafa >/dev/null; then
   exec /usr/bin/qlmanage -p "$image"
 fi
 

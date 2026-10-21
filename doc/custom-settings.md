@@ -24,6 +24,13 @@ muted_notify_unread=1
 terminal_bell_inactive=0
 ```
 
+With `nchat-image`, Ctrl-V opens video notes and other detected videos in
+QuickTime Player, avoiding the macOS Quick Look video-player crash. Images keep
+the terminal viewer and its `P` shortcut for Preview; audio/documents and the
+missing-terminal-renderer fallback keep their existing Quick Look handling.
+Updating this standalone helper takes effect on the next open without restarting
+nchat. Playback still depends on the file being complete and its codec supported.
+
 The last two lines reproduce this fork's optional terminal-notification
 preferences; the menu-bar companion still excludes muted chats. Native recording
 and on-device transcription use helper apps in the configuration directory's
