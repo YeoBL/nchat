@@ -207,9 +207,22 @@ void UiHistoryView::Draw()
     std::string thumbnailPath;
     int thumbnailWidth = 0;
     int thumbnailRows = 0;
+    const bool isViewOnce = ProtocolUtil::IsViewOnce(msg);
     if (!msg.text.empty())
     {
       std::string text = msg.text;
+      if (isViewOnce && !msg.fileInfo.empty())
+      {
+        static const std::vector<std::string> labels = { "[View once]", "[View-once photo]",
+          "[View-once video]", "[View-once voice note]", "[View-once video note]" };
+        for (const auto& label : labels)
+          if (text.rfind(label, 0) == 0)
+          {
+            text.erase(0, label.size());
+            if (!text.empty() && (text.front() == ' ' || text.front() == '\n')) text.erase(0, 1);
+            break;
+          }
+      }
       StrUtil::SanitizeMessageStr(text);
       if (!emojiEnabled)
       {
@@ -266,8 +279,8 @@ void UiHistoryView::Draw()
         (AppConfig::GetNum("attachment_prefetch") == AttachmentPrefetchAll);
       static const bool isAttachmentPrefetchSelected =
         (AppConfig::GetNum("attachment_prefetch") == AttachmentPrefetchSelected);
-      if (isAttachmentPrefetchAll || (isSelectedMessage && isAttachmentPrefetchSelected) ||
-          IsImageAttachment(fileInfo))
+      if (!isViewOnce && (isAttachmentPrefetchAll || (isSelectedMessage && isAttachmentPrefetchSelected) ||
+          IsImageAttachment(fileInfo)))
       {
         if (!UiModel::IsAttachmentDownloaded(fileInfo) && UiModel::IsAttachmentDownloadable(fileInfo))
         {
@@ -306,10 +319,13 @@ void UiHistoryView::Draw()
         fileStatus = statusDownloadFailed;
       }
 
-      std::wstring fileStr = attachmentIndicator + StrUtil::ToWString(fileName + fileStatus);
+      const std::string attachmentLabel = isViewOnce ?
+        std::string("[View-once ") + (IsImageAttachment(fileInfo) ? "photo" : "attachment") + " · Ctrl+V to view]" :
+        fileName + fileStatus;
+      std::wstring fileStr = attachmentIndicator + StrUtil::ToWString(attachmentLabel);
       wlines.insert(wlines.begin(), fileStr);
 
-      if ((fileInfo.fileStatus == FileStatusDownloaded) &&
+      if (!isViewOnce && (fileInfo.fileStatus == FileStatusDownloaded) &&
           FileUtil::Exists(fileInfo.filePath) && IsImageAttachment(fileInfo))
       {
         thumbnailPath = fileInfo.filePath;

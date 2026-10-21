@@ -13,14 +13,17 @@
 #include <deque>
 #include <thread>
 #include <cassert>
+#include <clocale>
 #include <iostream>
 #include <sqlite_modern_cpp.h>
 #include "protocol.h"
+#include "protocolutil.h"
 #include "apputil.h"
 #include "owned_mutex.h"
 #define private public
 #include "messagecache.h"
 #include "../src/uimodel.h"
+#include "../src/uihistoryview.h"
 #undef private
 #include "../src/uiview.h"
 #include "../src/uiconfig.h"
@@ -110,6 +113,80 @@ public:
     requests.push_back(request->GetMessageType()); // Record only; never reaches a service.
   }
 };
+
+static void TestViewOnceTerminal(const std::string& root)
+{
+  std::setlocale(LC_ALL, "");
+  FILE* output = tmpfile(); FILE* input = tmpfile();
+  assert(output && input);
+  SCREEN* screen = newterm("xterm-256color", output, input);
+  assert(screen); set_term(screen); assert(resizeterm(35, 110) != ERR);
+  AppConfig::Init(); AppConfig::SetNum("attachment_prefetch", AttachmentPrefetchAll);
+  UiColorConfig::Init();
+  const auto path = root + "/synthetic-view-once.jpg";
+  FILE* image = fopen(path.c_str(), "wb"); assert(image); fputs("synthetic fixture", image); fclose(image);
+  {
+    UiModel model;
+    auto protocol = std::make_shared<HistoricalTestProtocol>();
+    const std::string profile = "WhatsAppMd_viewonce";
+    auto& impl = model.m_Impl;
+    impl.m_Protocols[profile] = protocol;
+    impl.m_CurrentChat = {profile, "chat"}; impl.m_CurrentChatIndex = 0;
+    impl.m_ChatInfos[profile]["chat"].id = "chat";
+    impl.m_MessageVec[profile]["chat"] = {"photo"};
+    impl.m_SelectMessageActive = true;
+    UiHistoryView history(UiViewParams(0, 0, 110, 35, true, &model));
+    for (const std::string prefix : {"", "[View once] ", "[View-once photo]\n", "[View-once video]\n",
+                                    "[View-once voice note]\n", "[View-once video note]\n"})
+      for (const FileStatus status : {FileStatusNotDownloaded, FileStatusDownloaded})
+      {
+        FileInfo file;
+        file.fileStatus = status; file.fileId = "synthetic-id"; file.filePath = path;
+        file.fileType = "image/jpeg"; file.isViewOnce = prefix.empty();
+        ChatMessage message;
+        message.id = "photo"; message.senderId = "sender"; message.isRead = true;
+        message.text = prefix + "preserved caption";
+        message.fileInfo = ProtocolUtil::FileInfoToHex(file);
+        impl.m_Messages[profile]["chat"][message.id] = message;
+        protocol->requests.clear();
+        // Both automatic entry points must be blocked before reaching a provider,
+        // including legacy cached messages with no dedicated metadata flag.
+        impl.DownloadAttachment(profile, "chat", "photo", file.fileId, DownloadFileActionNone);
+        impl.DownloadAttachment(profile, "chat", "photo", file.fileId, DownloadFileActionCacheOnly);
+        assert(protocol->requests.empty());
+        assert(impl.m_Messages[profile]["chat"].at("photo").fileInfo == message.fileInfo);
+        {
+          std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
+          for (int draw = 0; draw < 2; ++draw) { history.SetDirty(true); history.Draw(); }
+        }
+        assert(protocol->requests.empty() && !history.m_ThumbnailCommandHasImages);
+        std::wstring text;
+        for (int y = 0; y < history.m_PaddedH; ++y)
+        {
+          wchar_t row[111] = {};
+          mvwinnwstr(history.m_PaddedWin, y, 0, row, 110); text += row; text += L'\n';
+        }
+        const auto label = text.find(L"[View-once photo · Ctrl+V to view]");
+        assert(label != std::wstring::npos && text.find(L"[View-once", label + 1) == std::wstring::npos);
+        assert(text.find(L"[View once]") == std::wstring::npos && text.find(L"preserved caption") != std::wstring::npos);
+        // Explicit Open/Save retain their existing user-initiated behavior.
+        impl.DownloadAttachment(profile, "chat", "photo", file.fileId, DownloadFileActionOpen);
+        impl.DownloadAttachment(profile, "chat", "photo", file.fileId, DownloadFileActionSave);
+        assert(protocol->requests.size() == 2 && protocol->requests.front() == DownloadFileRequestType);
+      }
+    FileInfo ordinary; ordinary.fileStatus = FileStatusNotDownloaded; ordinary.fileId = "normal-photo";
+    ordinary.filePath = path; ordinary.fileType = "image/jpeg";
+    auto& message = impl.m_Messages[profile]["chat"].at("photo");
+    message.text = "normal caption"; message.fileInfo = ProtocolUtil::FileInfoToHex(ordinary);
+    protocol->requests.clear();
+    impl.DownloadAttachment(profile, "chat", "photo", ordinary.fileId, DownloadFileActionNone);
+    assert(protocol->requests.size() == 1); // Ordinary image prefetch is unchanged.
+  }
+  FileUtil::RmFile(path);
+  endwin(); delscreen(screen); fclose(output); fclose(input);
+  UiColorConfig::Cleanup(); AppConfig::Cleanup();
+  std::cout << "PASS: view-once photo metadata and legacy labels block automatic downloads and cached thumbnails, preserve captions and explicit Open/Save, leave ordinary attachments unchanged\n";
+}
 
 int main(int argc, char** argv)
 {
@@ -627,6 +704,7 @@ int main(int argc, char** argv)
     assert(model.m_HistoryInteraction && model.m_HomeFetchAll && model.m_Notifications.PendingChats() == 1);
     std::cout << "PASS: requested historical snapshots preserve live read/download state, unread badges, chat order/metadata and interaction while storing sorted history without provider requests\n";
   }
+  TestViewOnceTerminal(argv[1]);
   if (argc == 3)
   {
     // Actual compiled UiModel -> screen's outer tty -> Kitty -> NSDockTile ACK.

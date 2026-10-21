@@ -191,6 +191,7 @@ struct FileInfo
   std::string fileId;
   std::string filePath;
   std::string fileType;
+  bool isViewOnce = false; // Never prefetch or render an automatic thumbnail.
 };
 
 // ensure CacheUtil and Serialization are up-to-date after modifying Reactions

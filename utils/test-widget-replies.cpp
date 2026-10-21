@@ -1,6 +1,7 @@
 // Integration test: real file bridge + real temporary cache + fake protocol.
 // No user profiles, UI selection, read-receipt requests, or network access.
 #include <cassert>
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -8,10 +9,12 @@
 #include <sys/time.h>
 #include "appconfig.h"
 #include "widgetreplies.h"
+#include "peekdownloads.h"
 
 struct FakeProtocol : Protocol {
   std::atomic<int> calls{0};
   std::atomic<int> reads{0};
+  std::atomic<int> downloads{0};
   std::atomic<bool> success{true};
   std::string profile, chat, text;
   explicit FakeProtocol(std::string p) : profile(std::move(p)) {}
@@ -27,6 +30,13 @@ struct FakeProtocol : Protocol {
   bool Logout() override { return true; }
   void SetMessageHandler(const std::function<void(std::shared_ptr<ServiceMessage>)>&) override {}
   void SendRequest(std::shared_ptr<RequestMessage> request) override {
+    if (request->GetMessageType() == DownloadFileRequestType) {
+      auto download = std::static_pointer_cast<DownloadFileRequest>(request);
+      assert(download->chatId == "right-chat" && download->msgId == "ordinary-photo");
+      assert(download->downloadFileAction == DownloadFileActionCacheOnly);
+      ++downloads;
+      return;
+    }
     if (request->GetMessageType() == MarkMessageReadRequestType) {
       auto read = std::static_pointer_cast<MarkMessageReadRequest>(request);
       assert(read->chatId == "right-chat" && read->msgId == "reference" && read->senderId == "sender");
@@ -60,6 +70,30 @@ static void Await(const std::function<bool()>& ready) {
 }
 
 int main() {
+  FileInfo file;
+  file.fileStatus = FileStatusNotDownloaded;
+  file.fileId = "synthetic-remote";
+  file.filePath = "[Photo]";
+  file.fileType = "image/jpeg";
+  const auto legacy = ProtocolUtil::FileInfoToHex(file);
+  assert(std::count(legacy.begin(), legacy.end(), ',') == 3);
+  assert(!ProtocolUtil::FileInfoFromHex(legacy).isViewOnce);
+  file.isViewOnce = true;
+  const auto encoded = ProtocolUtil::FileInfoToHex(file);
+  const auto decoded = ProtocolUtil::FileInfoFromHex(encoded);
+  assert(decoded.isViewOnce && decoded.fileId == file.fileId && decoded.filePath == file.filePath);
+  assert(decoded.fileStatus == file.fileStatus && decoded.fileType == "image/jpeg");
+  assert(ProtocolUtil::FileInfoFromHex(encoded.substr(0, encoded.size() - 1)).isViewOnce);
+  ChatMessage sensitive;
+  sensitive.fileInfo = encoded;
+  assert(ProtocolUtil::IsViewOnce(sensitive));
+  sensitive.fileInfo = legacy;
+  sensitive.text = "[View once] caption";
+  assert(ProtocolUtil::IsViewOnce(sensitive));
+  sensitive.text = "[View-once photo]\ncaption";
+  assert(ProtocolUtil::IsViewOnce(sensitive));
+  sensitive.text = "ordinary caption mentioning [View once]";
+  assert(!ProtocolUtil::IsViewOnce(sensitive));
   char temporary[] = "/tmp/nchat-widget-replies.XXXXXX";
   const char* root = mkdtemp(temporary);
   assert(root);
@@ -142,6 +176,24 @@ int main() {
     std::cout << "PASS: explicit mark-read uses exact chat/message/sender, no text send, no cache rewrite, duplicates rejected and failures acknowledged\n";
   }
   assert(access((dir + "/server").c_str(), F_OK) != 0);
+  {
+    PeekDownloads server({{profile, fake}});
+    for (const std::string& id : {"flagged-photo", "legacy-photo", "ordinary-photo"}) {
+      ChatMessage photo = message;
+      photo.id = id;
+      photo.fileInfo = id == "flagged-photo" ? encoded : legacy;
+      photo.text = id == "legacy-photo" ? "[View once] caption" : "photo caption";
+      MessageCache::AddMessages(profile, "right-chat", "", {photo});
+      Await([&] { cached.clear(); return MessageCache::GetOneMessage(profile, "right-chat", id, cached); });
+      const std::string request = std::string(root) + "/peek-downloads/" + std::string(32, 'a') + ".request";
+      Write(request, StrUtil::StrToHex(profile) + "\n" + StrUtil::StrToHex("right-chat") + "\n" +
+        StrUtil::StrToHex(id) + "\n");
+      Await([&] { return access(request.c_str(), F_OK) != 0; });
+    }
+    Await([&] { return fake->downloads == 1; });
+    assert(fake->reads == 2 && fake->calls == 2);
+    std::cout << "PASS: view-once metadata round trips, legacy labels block peek downloads, ordinary images still download\n";
+  }
   MessageCache::Cleanup(); AppConfig::Cleanup();
   FileUtil::RmDir(root);
   std::cout << "PASS: exact recipient/text, Unicode/newlines, no receipt requests, unchanged cache read flag, duplicate prevention, stale sessions, expired requests, invalid text, failures and shutdown\n";

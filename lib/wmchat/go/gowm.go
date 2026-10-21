@@ -493,7 +493,7 @@ func SetExpiration(connId int, chatId string, expiration uint32) {
 }
 
 // download info
-var downloadInfoVersion = 2 // bump version upon any struct change
+var downloadInfoVersion = 2 // Bump for incompatible changes; optional fields preserve existing download IDs.
 type DownloadInfo struct {
 	Version    int    `json:"Version_int"`
 	Url        string `json:"Url_string"`
@@ -505,6 +505,7 @@ type DownloadInfo struct {
 
 	FileEncSha256 []byte `json:"FileEncSha256_arraybyte"`
 	FileSha256    []byte `json:"FileSha256_arraybyte"`
+	ViewOnce      bool   `json:"ViewOnce_bool,omitempty"`
 }
 
 func DownloadableMessageToFileId(client *whatsmeow.Client, msg whatsmeow.DownloadableMessage, targetPath string) string {
@@ -515,6 +516,7 @@ func DownloadableMessageToFileId(client *whatsmeow.Client, msg whatsmeow.Downloa
 	info.MediaKey = msg.GetMediaKey()
 	info.FileEncSha256 = msg.GetFileEncSHA256()
 	info.FileSha256 = msg.GetFileSHA256()
+	info.ViewOnce = isViewOnceDownload(msg)
 
 	info.MediaType = whatsmeow.GetMediaType(msg)
 	if len(info.MediaType) == 0 {
@@ -2161,7 +2163,7 @@ func (handler *WmEventHandler) HandleImageMessage(messageInfo types.MessageInfo,
 	ext := ExtensionByType(img.GetMimetype(), ".jpg")
 
 	// text
-	text := img.GetCaption()
+	text := viewOnceLabel(img.GetCaption(), img.GetViewOnce())
 	isEdited := (messageInfo.Edit == "1")
 
 	// context
@@ -2228,6 +2230,7 @@ func (handler *WmEventHandler) HandleVideoMessage(messageInfo types.MessageInfo,
 			text = "[Video]"
 		}
 	}
+	text = viewOnceLabel(text, vid.GetViewOnce())
 	isEdited := (messageInfo.Edit == "1")
 
 	// context
@@ -2287,6 +2290,7 @@ func (handler *WmEventHandler) HandleAudioMessage(messageInfo types.MessageInfo,
 	if aud.GetPTT() {
 		text = "[Voice note]"
 	}
+	text = viewOnceLabel(text, aud.GetViewOnce())
 
 	// context
 	quotedId := ""

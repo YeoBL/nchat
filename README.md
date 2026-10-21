@@ -361,6 +361,17 @@ Specifies level of attachment prefetching:
     1 = selected (download upon message selection) <- default
     2 = all (download when message is received)
 
+Recognized Telegram/WhatsApp view-once attachments override these settings:
+they show a view-once label without automatic downloads or inline thumbnails,
+even if the image is already cached. Select the message and press **Ctrl-V**
+to use the existing explicit attachment opener. The unread widget and
+`nchat-peek` keep these images hidden; they do not consume Ctrl-V themselves.
+Phone-only WhatsApp placeholders remain phone-only. This is preview opt-in,
+not new media recovery, receipt handling, or a guaranteed view-once lifecycle.
+Old Telegram cache entries that never stored the flag need a fresh service
+message update before they can be identified; the flag is not guessed from a
+photo's appearance.
+
 ### cache_enabled
 
 Specifies whether to enable cache functionality.

@@ -954,6 +954,11 @@ void UiModel::Impl::DownloadAttachment(const std::string& p_ProfileId, const std
                                        const std::string& p_MsgId, const std::string& p_FileId,
                                        DownloadFileAction p_DownloadFileAction)
 {
+  std::unordered_map<std::string, ChatMessage>& messages = m_Messages[p_ProfileId][p_ChatId];
+  auto mit = messages.find(p_MsgId);
+  if ((p_DownloadFileAction == DownloadFileActionNone || p_DownloadFileAction == DownloadFileActionCacheOnly) &&
+      mit != messages.end() && ProtocolUtil::IsViewOnce(mit->second)) return;
+
   std::shared_ptr<DownloadFileRequest> downloadFileRequest = std::make_shared<DownloadFileRequest>();
   downloadFileRequest->chatId = p_ChatId;
   downloadFileRequest->msgId = p_MsgId;
@@ -962,8 +967,7 @@ void UiModel::Impl::DownloadAttachment(const std::string& p_ProfileId, const std
 
   SendProtocolRequest(p_ProfileId, downloadFileRequest);
 
-  std::unordered_map<std::string, ChatMessage>& messages = m_Messages[p_ProfileId][p_ChatId];
-  auto mit = messages.find(p_MsgId);
+  mit = messages.find(p_MsgId);
   if (mit == messages.end()) return;
 
   if (mit->second.fileInfo.empty())

@@ -14,6 +14,7 @@ class ProtocolUtil
 public:
   static FileInfo FileInfoFromHex(const std::string& p_Str);
   static std::string FileInfoToHex(const FileInfo& p_FileInfo);
+  static bool IsViewOnce(const ChatMessage& p_Message);
   static std::vector<ContactInfo> ContactInfosFromJson(const std::string& p_Json);
   static std::string MentionsToJson(const std::map<std::string, std::string>& p_Mentions);
 };

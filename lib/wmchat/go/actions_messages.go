@@ -104,15 +104,11 @@ func markDeliveredViewOnce(msg *waE2E.Message) *waE2E.Message {
 	copy := proto.Clone(msg).(*waE2E.Message)
 	if image := copy.GetImageMessage(); image != nil {
 		image.ViewOnce = proto.Bool(true)
-		if !strings.HasPrefix(image.GetCaption(), "[View once]") {
-			image.Caption = proto.String(strings.TrimSpace("[View once] " + image.GetCaption()))
-		}
+		image.Caption = proto.String(viewOnceLabel(image.GetCaption(), true))
 	}
 	if video := copy.GetVideoMessage(); video != nil {
 		video.ViewOnce = proto.Bool(true)
-		if !strings.HasPrefix(video.GetCaption(), "[View once]") {
-			video.Caption = proto.String(strings.TrimSpace("[View once] " + video.GetCaption()))
-		}
+		video.Caption = proto.String(viewOnceLabel(video.GetCaption(), true))
 	}
 	if audio := copy.GetAudioMessage(); audio != nil {
 		audio.ViewOnce = proto.Bool(true)
@@ -121,6 +117,18 @@ func markDeliveredViewOnce(msg *waE2E.Message) *waE2E.Message {
 		videoNote.ViewOnce = proto.Bool(true)
 	}
 	return copy
+}
+
+func viewOnceLabel(text string, viewOnce bool) string {
+	if !viewOnce || strings.HasPrefix(text, "[View once]") {
+		return text
+	}
+	return strings.TrimSpace("[View once] " + text)
+}
+
+func isViewOnceDownload(msg whatsmeow.DownloadableMessage) bool {
+	media, ok := msg.(interface{ GetViewOnce() bool })
+	return ok && media.GetViewOnce()
 }
 
 func recordActionMessage(connID int, info types.MessageInfo, msg *waE2E.Message) {

@@ -28,6 +28,7 @@ struct PreviewMessage {
     var id: String = ""
     var needsDownload = false
     var attachmentStatus: String? = nil
+    var isViewOnce = false
 }
 
 let messageLinkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
@@ -41,7 +42,7 @@ func messageDate(_ milliseconds: Int64) -> Date {
 }
 
 func decodedFileField(_ info: String, index: Int) -> String? {
-    let parts = info.split(separator: ",", omittingEmptySubsequences: false)
+    let parts = info.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ",", omittingEmptySubsequences: false)
     guard parts.indices.contains(index), parts[index].count <= 32768, parts[index].count % 2 == 0 else { return nil }
     let hex = Array(parts[index].utf8)
     var bytes: [UInt8] = []
@@ -55,6 +56,12 @@ func decodedFileField(_ info: String, index: Int) -> String? {
 func decodedFilePath(_ info: String) -> String? {
     guard let path = decodedFileField(info, index: 2), path.hasPrefix("/"), !path.contains("\0") else { return nil }
     return path
+}
+
+func isViewOnce(_ info: String, text: String = "") -> Bool {
+    let label = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return decodedFileField(info, index: 4) == "1" || label.hasPrefix("[View once]") ||
+        label.hasPrefix("[View-once ")
 }
 
 func isImageReference(_ info: String) -> Bool {
@@ -78,7 +85,7 @@ func cachedImageURL(_ fileURL: URL, cacheRoot: String) -> URL? {
 }
 
 func cachedThumbnail(_ info: String, cacheRoot: String) -> NSImage? {
-    guard let path = decodedFilePath(info),
+    guard !isViewOnce(info), let path = decodedFilePath(info),
           let url = cachedImageURL(URL(fileURLWithPath: path), cacheRoot: cacheRoot),
           let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
           let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -292,9 +299,13 @@ final class Cache {
             var step = sqlite3_step(statement)
             while step == SQLITE_ROW {
                 let info = String(cString: sqlite3_column_text(statement, 3))
+                let text = String(cString: sqlite3_column_text(statement, 1))
+                let hidden = isViewOnce(info, text: text)
                 messages.append((PreviewMessage(sender: String(cString: sqlite3_column_text(statement, 0)),
-                    text: String(cString: sqlite3_column_text(statement, 1)), time: sqlite3_column_int64(statement, 2),
-                    attachment: !info.isEmpty, id: String(cString: sqlite3_column_text(statement, 4))), info))
+                    text: hidden ? (isImageReference(info) || text.hasPrefix("[View-once photo]") ?
+                        "View-once photo" : "View-once attachment") : text, time: sqlite3_column_int64(statement, 2),
+                    attachment: !info.isEmpty || hidden, id: String(cString: sqlite3_column_text(statement, 4)),
+                    isViewOnce: hidden), info))
                 step = sqlite3_step(statement)
             }
             guard step == SQLITE_DONE else { throw CacheError(description: String(cString: sqlite3_errmsg(db))) }
@@ -305,6 +316,10 @@ final class Cache {
         var images = 0
         return records.map { message, info in
             var result = message
+            if result.isViewOnce {
+                result.attachmentStatus = "Hidden · Ctrl+V in nchat to view"
+                return result
+            }
             if images < 20, let image = cachedThumbnail(info, cacheRoot: cacheRoot) {
                 result.image = image
                 result.imageURL = decodedFilePath(info).map { URL(fileURLWithPath: $0) }
@@ -745,11 +760,12 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
                         label(clean(message.sender), x: 60, y: y, width: width - 143, size: 12, bold: true)
                         label(date.string(from: messageDate(message.time)), x: width - 68, y: y, width: 48, size: 11, secondary: true)
                         y += 22
-                        if !message.text.isEmpty {
-                            y += label(message.text, x: 60, y: y, width: width - 86,
+                        let text = message.text
+                        if !text.isEmpty {
+                            y += label(text, x: 60, y: y, width: width - 86,
                                        lines: 0, selectable: true) + 5
                         }
-                        if let image = message.image {
+                        if !message.isViewOnce, let image = message.image {
                             let scale = min((width - 86) / image.size.width, 200 / image.size.height, 1)
                             let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
                             let photo = ImageButton(frame: NSRect(origin: NSPoint(x: 60, y: y + 3), size: size))
@@ -770,8 +786,10 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
                             photo.setAccessibilityLabel("Open full image in Preview")
                             document.addSubview(photo)
                             y += size.height + 9
-                        } else if message.attachment {
-                            y += label(message.attachmentStatus ?? "Attachment · preview not cached or unsupported", x: 60, y: y, width: width - 86, size: 12, secondary: true, lines: 2) + 5
+                        } else if message.attachment || message.isViewOnce {
+                            let status = message.isViewOnce ? "Hidden · Ctrl+V in nchat to view" :
+                                (message.attachmentStatus ?? "Attachment · preview not cached or unsupported")
+                            y += label(status, x: 60, y: y, width: width - 86, size: 12, secondary: true, lines: 2) + 5
                         }
                         y += 12
                         let card = MessageCard(frame: NSRect(x: 46, y: cardTop, width: width - 62, height: y - cardTop - 3))
@@ -1140,7 +1158,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                       self.content.expanded.contains(chat.key) else { return }
                 var prepared = messages
                 if prepared != nil {
-                    for index in prepared!.indices where prepared![index].needsDownload {
+                    for index in prepared!.indices where prepared![index].needsDownload && !prepared![index].isViewOnce {
                         let id = prepared![index].id
                         if !(self.imageRequests[chat.key] ?? []).contains(id), (self.imageRequests[chat.key]?.count ?? 0) < 20,
                            WidgetReplyBridge.queueImage(cachePath: chat.cachePath, chatID: chat.id, messageID: id) {
@@ -1578,6 +1596,47 @@ func selfTest() throws {
     sql("INSERT INTO messages(chatId,id,fileInfo,text,timeSent) VALUES('one','photo','\(fileInfo(photoURL.path))','Full image',100);")
     let fullMessages = try cache.preview(chatID: "one")
     assert(fullMessages.count == 1 && fullMessages[0].imageURL == photoURL)
+    let hiddenStatus = "Hidden · Ctrl+V in nchat to view"
+    let markedInfo = fileInfo(photoURL.path) + ",31\n" // Actual C++ serialization ends with a newline.
+    assert(isViewOnce(markedInfo) && !isViewOnce(fileInfo(photoURL.path)))
+    assert(!isViewOnce(fileInfo(photoURL.path) + ",30"))
+    assert(cachedThumbnail(markedInfo, cacheRoot: root.path) == nil)
+    let remoteInfo = "0," + Data("fixture-image-id".utf8).map { String(format: "%02x", $0) }.joined() + "," +
+        Data(root.appendingPathComponent("uncached.png").path.utf8).map { String(format: "%02x", $0) }.joined() + "," +
+        Data("image/png".utf8).map { String(format: "%02x", $0) }.joined()
+    sql("INSERT INTO chats2(id) VALUES('view-once');")
+    for (index, fixture) in [(markedInfo, "Flagged photo"), (remoteInfo + ",31", "Uncached flagged photo"),
+                              (fileInfo(photoURL.path), "[View once] [Photo]"),
+                              (fileInfo(photoURL.path), "[View-once photo]"),
+                              (remoteInfo, "Normal uncached photo")].enumerated() {
+        sql("INSERT INTO messages(chatId,id,fileInfo,text,timeSent) VALUES('view-once','\(index)','\(fixture.0)','\(fixture.1)',\(index + 200));")
+    }
+    var protectedMessages = try cache.preview(chatID: "view-once")
+    assert(protectedMessages.count == 5)
+    for message in protectedMessages.prefix(4) {
+        assert(message.isViewOnce && message.text == "View-once photo" && message.attachmentStatus == hiddenStatus)
+        assert(message.image == nil && message.imageURL == nil && !message.needsDownload)
+    }
+    assert(!protectedMessages[4].isViewOnce && protectedMessages[4].needsDownload)
+    sql("INSERT INTO messages(chatId,id,fileInfo,text,timeSent) VALUES('view-once','voice','','[View-once voice note]',300);")
+    let protectedVoice = try cache.preview(chatID: "view-once").last!
+    assert(protectedVoice.isViewOnce && protectedVoice.text == "View-once attachment" &&
+        protectedVoice.image == nil && !protectedVoice.needsDownload && protectedVoice.attachmentStatus == hiddenStatus)
+    // Rendering also rejects an accidentally retained old thumbnail; there is
+    // no image button or alternate reveal action in the widget.
+    protectedMessages.removeLast()
+    protectedMessages[0].image = thumb
+    protectedMessages[0].imageURL = photoURL
+    let hiddenController = UnreadPopoverController()
+    let protectedChat = UnreadChat(id: "view-once", name: "Protected fixture", service: "Telegram", count: 4,
+        latest: 203, cachePath: path)
+    hiddenController.state = Snapshot(chats: [protectedChat])
+    hiddenController.expanded = [protectedChat.key]
+    hiddenController.previews[protectedChat.key] = protectedMessages
+    hiddenController.rebuild()
+    assert(hiddenController.document.subviews.compactMap { $0 as? ImageButton }.isEmpty)
+    assert(hiddenController.document.subviews.compactMap { $0 as? NSTextField }.contains { $0.stringValue == hiddenStatus })
+    print("PASS: view-once flags and legacy labels hide cached/uncached thumbnails and automatic requests; widget exposes only Ctrl+V guidance")
     let imageChat = UnreadChat(id: "one", name: "Image test", service: "Telegram", count: 1, latest: 100, cachePath: path)
     controller.state = Snapshot(chats: [imageChat])
     controller.expanded = [imageChat.key]

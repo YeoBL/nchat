@@ -3979,6 +3979,34 @@ void TgChat::Impl::TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessag
   const int64_t senderId = GetSenderId(td::move_tl_object_as<td::td_api::MessageSender>(p_TdMessage.sender_id_));
   TdMessageContentConvert(*p_TdMessage.content_, senderId, p_ChatMessage.text, p_ChatMessage.fileInfo);
 
+  // Immediate self-destruction is Telegram's view-once mode. A timer or the
+  // chat's ordinary auto-delete deadline does not mean "view once".
+  if (p_TdMessage.self_destruct_type_ &&
+      p_TdMessage.self_destruct_type_->get_id() == td::td_api::messageSelfDestructTypeImmediately::ID)
+  {
+    if (!p_ChatMessage.fileInfo.empty())
+    {
+      auto file = ProtocolUtil::FileInfoFromHex(p_ChatMessage.fileInfo);
+      file.isViewOnce = true;
+      p_ChatMessage.fileInfo = ProtocolUtil::FileInfoToHex(file);
+    }
+    std::string label;
+    switch (p_TdMessage.content_->get_id())
+    {
+      case td::td_api::messagePhoto::ID: label = "[View-once photo]"; break;
+      case td::td_api::messageVideo::ID: label = "[View-once video]"; break;
+      case td::td_api::messageVideoNote::ID: label = "[View-once video note]"; break;
+      case td::td_api::messageVoiceNote::ID: label = "[View-once voice note]"; break;
+      default: break;
+    }
+    if (!label.empty())
+    {
+      if (p_ChatMessage.text == "[Voice note]" || p_ChatMessage.text == "[Video note]")
+        p_ChatMessage.text = label;
+      else p_ChatMessage.text = label + (p_ChatMessage.text.empty() ? "" : "\n" + p_ChatMessage.text);
+    }
+  }
+
   if (p_TdMessage.forward_info_ && p_TdMessage.forward_info_->origin_)
   {
     const auto& origin = *p_TdMessage.forward_info_->origin_;
@@ -4079,6 +4107,9 @@ void TgChat::Impl::DownloadFile(std::string p_ChatId, std::string p_MsgId, std::
         fileInfo.fileStatus = FileStatusDownloaded;
         fileInfo.filePath = path;
         fileInfo.fileId = p_FileId;
+        std::vector<ChatMessage> cached;
+        if (MessageCache::GetOneMessage(m_ProfileId, p_ChatId, p_MsgId, cached) && !cached.empty())
+          fileInfo.isViewOnce = ProtocolUtil::IsViewOnce(cached.front());
 
         std::shared_ptr<NewMessageFileNotify> newMessageFileNotify =
           std::make_shared<NewMessageFileNotify>(m_ProfileId);

@@ -83,6 +83,7 @@ private:
     std::vector<ChatMessage> messages;
     // Synchronous cache lookup only; it does not fetch or display the chat.
     if (!MessageCache::GetOneMessage(fields[0], fields[1], fields[2], messages) || messages.empty()) return;
+    if (ProtocolUtil::IsViewOnce(messages.front())) return;
     const FileInfo file = ProtocolUtil::FileInfoFromHex(messages.front().fileInfo);
     if (file.fileId.empty()) return;
     auto request = std::make_shared<DownloadFileRequest>();

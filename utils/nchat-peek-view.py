@@ -73,7 +73,32 @@ def wrap(text, width):
     return lines
 
 
+def is_view_once(info, text=''):
+    fields = info.strip().split(',')
+    if len(fields) > 4 and fields[4] == '31':
+        return True
+    # Legacy transcripts prepend a sender/date line; the protocol label still
+    # starts its own unquoted message line.
+    return any(line.lstrip().startswith(('[View once]', '[View-once '))
+               for line in str(text).splitlines())
+
+
+def message_is_view_once(message):
+    return is_view_once(message.get('fileInfo', ''), message.get('text', ''))
+
+
+def view_once_label(message):
+    return ('View-once photo' if is_image_reference(message.get('fileInfo', '')) or
+            '[View-once photo]' in message.get('text', '') else 'View-once attachment')
+
+
+def inline_image_path(message):
+    return None if message_is_view_once(message) else image_path(message.get('fileInfo', ''))
+
+
 def image_path(info):
+    if is_view_once(info):
+        return None
     try:
         fields = info.strip().split(',')
         path = Path(bytes.fromhex(fields[2]).decode('utf-8'))
@@ -104,6 +129,8 @@ def is_image_reference(info):
 
 
 def refresh_attachment(message):
+    if message_is_view_once(message):
+        return False
     database = message.get('database')
     if not database:
         return False
@@ -112,10 +139,12 @@ def refresh_attachment(message):
                          (message['chatId'], message['msgId'])).fetchone()
     if row and row[0]:
         message['fileInfo'] = row[0]
-    return bool(cached_file(message.get('fileInfo','')))
+    return not message_is_view_once(message) and bool(cached_file(message.get('fileInfo','')))
 
 
 def queue_download(message, queue=None):
+    if message_is_view_once(message):
+        raise ValueError('View-once media is hidden. Press Ctrl+V in nchat to view.')
     queue = DOWNLOAD_QUEUE if queue is None else Path(queue)
     for key in ('database', 'profileId', 'chatId', 'msgId'):
         if not message.get(key):
@@ -130,6 +159,8 @@ def queue_download(message, queue=None):
         raise ValueError('Start the updated nchat with the same configuration directory, then press d again.') from None
     if refresh_attachment(message):
         return None
+    if message_is_view_once(message):
+        raise ValueError('View-once media is hidden. Press Ctrl+V in nchat to view.')
     if not is_image_reference(message.get('fileInfo','')):
         raise ValueError('This attachment is not identified as an image in the cache.')
     try:
@@ -197,8 +228,11 @@ def layout(messages, sizes, columns, rows, ratio):
     for message in messages:
         message['_start'] = len(lines)
         lines.extend(wrap(message['text'].rstrip(), max(1, columns - 2)))
-        path = image_path(message.get('fileInfo', ''))
-        if path in sizes:
+        path = inline_image_path(message)
+        hidden = message_is_view_once(message)
+        if hidden:
+            lines.extend([view_once_label(message), 'Hidden · Ctrl+V in nchat to view'])
+        elif path in sizes:
             cols, height = image_box(sizes[path], columns, rows, ratio)
             placements.append((len(lines), path, cols, height))
             lines.extend(['[image — scroll to bring it fully into view]'] + [''] * (height-1))
@@ -209,7 +243,7 @@ def layout(messages, sizes, columns, rows, ratio):
                 lines.append('[image not cached — press d to download without opening the chat]')
             else:
                 lines.append('[attachment not cached; inline preview supports images]')
-        if message.get('_download_state'):
+        if not hidden and message.get('_download_state'):
             lines.extend(wrap(message['_download_state'], max(1,columns-2)))
         lines.append('')
         message['_end'] = len(lines)
@@ -272,10 +306,16 @@ def viewer(win, title, messages, sizes):
                     complete = refresh_attachment(message)
                 except (OSError, sqlite3.Error):
                     complete = False
+                if message_is_view_once(message):
+                    request.unlink(missing_ok=True)
+                    del downloads[index]
+                    message['_download_state'] = ''
+                    dirty = True
+                    continue
                 if complete:
                     if message['_start'] < top+page and message['_end'] > top:
                         reveal = index
-                    path = image_path(message['fileInfo'])
+                    path = inline_image_path(message)
                     if path:
                         sizes.update(dimensions([path]))
                     message['_download_state'] = ''
@@ -339,10 +379,13 @@ def viewer(win, title, messages, sizes):
             top = len(lines)-page
         elif key == 'd':
             candidates = [(i,m) for i,m in enumerate(messages) if i not in downloads
+                          and not message_is_view_once(m)
                           and is_image_reference(m.get('fileInfo','')) and not cached_file(m['fileInfo'])
                           and m['_start'] < top+page and m['_end'] > top]
             if not candidates:
-                note = 'No uncached image in view. Scroll to an image first.'
+                note = ('Hidden · Ctrl+V in nchat to view' if any(message_is_view_once(m)
+                        and m['_start'] < top+page and m['_end'] > top for m in messages) else
+                        'No uncached image in view. Scroll to an image first.')
             else:
                 index, message = candidates[0]
                 try:
@@ -351,7 +394,7 @@ def viewer(win, title, messages, sizes):
                         downloads[index] = (request,time.monotonic()+45)
                         message['_download_state'] = 'Downloading via nchat — you can keep scrolling.'
                     else:
-                        path = image_path(message['fileInfo'])
+                        path = inline_image_path(message)
                         if path:
                             sizes.update(dimensions([path]))
                     lines, images = layout(messages, sizes, cols, rows, cell_ratio())
@@ -596,6 +639,35 @@ def self_test():
         assert 'You' in read_messages(legacy_chat,root)[0]['text']
         assert is_image_reference(info) and not cached_file(info)
         assert not refresh_attachment(messages[0])
+        photo = root / 'synthetic-cached-photo.png'
+        photo.write_bytes(b'Synthetic path fixture; never decode this file')
+        cached_info = '0,'+b'image-id'.hex()+','+str(photo).encode().hex()+','+b'image/png'.hex()
+        protected = [
+            {'text':'Flagged cached photo', 'fileInfo':cached_info+',31\n'},
+            {'text':'Flagged uncached photo', 'fileInfo':info+',31'},
+            {'text':'[2000-01-01 00:00:00] Sender\n[View once] [Photo]', 'fileInfo':cached_info},
+            {'text':'[View-once photo]', 'fileInfo':cached_info},
+        ]
+        for message in protected:
+            assert message_is_view_once(message) and inline_image_path(message) is None
+            lines, placements = layout([message], {str(photo):(100,100)}, 80, 24, 0.5)
+            assert not placements and 'View-once photo' in lines
+            assert 'Hidden · Ctrl+V in nchat to view' in lines
+            try:
+                queue_download(message, root / 'must-not-create')
+            except ValueError as error:
+                assert 'Ctrl+V in nchat' in str(error)
+            else:
+                raise AssertionError('View-once media must never enter the peek download bridge')
+        assert not (root / 'must-not-create').exists()
+        voice = {'text':'[View-once voice note]', 'fileInfo':''}
+        assert message_is_view_once(voice)
+        lines, placements = layout([voice], {}, 80, 24, 0.5)
+        assert not placements and 'View-once attachment' in lines
+        normal = {'text':'Normal photo', 'fileInfo':cached_info}
+        assert not message_is_view_once(normal) and inline_image_path(normal) == str(photo)
+        assert layout([normal], {str(photo):(100,100)}, 80, 24, 0.5)[1]
+        assert not is_view_once(cached_info+',30') and image_path(cached_info+',31') is None
         with contextlib.closing(open_cache(database)) as db:
             try:
                 db.execute('DELETE FROM messages')
@@ -610,6 +682,19 @@ def self_test():
         assert request.read_text().splitlines() == [messages[0][key].encode().hex()
                                                   for key in ('profileId','chatId','msgId')]
         assert stat.S_IMODE(request.stat().st_mode) == 0o600
+        before_requests = set(queue.glob('*.request'))
+        with sqlite3.connect(database) as db:
+            db.execute('UPDATE messages SET fileInfo=? WHERE id=?', (info+',31','message'))
+        try:
+            queue_download(messages[0],queue)
+        except ValueError as error:
+            assert 'Ctrl+V in nchat' in str(error)
+        else:
+            raise AssertionError('A newly refreshed view-once flag must prevent a queued download')
+        assert set(queue.glob('*.request')) == before_requests
+        with sqlite3.connect(database) as db:
+            db.execute('UPDATE messages SET fileInfo=? WHERE id=?', (info,'message'))
+        messages[0]['fileInfo'] = info
         queue.chmod(0o755)
         try:
             queue_download(messages[0],queue)
@@ -617,7 +702,7 @@ def self_test():
             assert 'private' in str(error)
         else:
             raise AssertionError('An unprotected queue must be rejected')
-    print('nchat-peek self-test passed (synthetic data only)')
+    print('nchat-peek self-test passed (synthetic data only; view-once cached/uncached/legacy previews and downloads hidden)')
 
 
 def main():
@@ -649,7 +734,7 @@ def main():
             next(f)  # blank line
             messages = [json.loads(line) for line in f if line.strip()]
     print('Loading cached images…', flush=True)
-    sizes = dimensions([path for m in messages if (path := image_path(m.get('fileInfo', '')))])
+    sizes = dimensions([path for m in messages if (path := inline_image_path(m))])
     try:
         curses.wrapper(viewer, title, messages, sizes)
     finally:

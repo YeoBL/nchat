@@ -147,13 +147,15 @@ FileInfo ProtocolUtil::FileInfoFromHex(const std::string& p_Str)
 
   fileInfo.filePath = StrUtil::StrFromHex(tmp);
 
-  if (!std::getline(ss, tmp))
+  if (!std::getline(ss, tmp, ','))
   {
     LOG_WARNING("deserialization error %s", p_Str.c_str());
     return FileInfo();
   }
 
   fileInfo.fileType = StrUtil::StrFromHex(tmp);
+  // The optional policy field leaves existing four-field cache entries readable.
+  if (std::getline(ss, tmp, ',')) fileInfo.isViewOnce = (StrUtil::StrFromHex(tmp) == "1");
 
   return fileInfo;
 }
@@ -164,6 +166,14 @@ std::string ProtocolUtil::FileInfoToHex(const FileInfo& p_FileInfo)
     StrUtil::NumToHex<int>(p_FileInfo.fileStatus) + "," +
     StrUtil::StrToHex(p_FileInfo.fileId) + "," +
     StrUtil::StrToHex(p_FileInfo.filePath) + "," +
-    StrUtil::StrToHex(p_FileInfo.fileType) + "\n";
+    StrUtil::StrToHex(p_FileInfo.fileType) + (p_FileInfo.isViewOnce ? ",31" : "") + "\n";
   return hexStr;
+}
+
+bool ProtocolUtil::IsViewOnce(const ChatMessage& p_Message)
+{
+  // WhatsApp entries cached before the policy field already carry this label.
+  return p_Message.text.find("[View once]") == 0 ||
+    p_Message.text.find("[View-once ") == 0 ||
+    (!p_Message.fileInfo.empty() && FileInfoFromHex(p_Message.fileInfo).isViewOnce);
 }

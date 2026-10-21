@@ -1103,6 +1103,11 @@ void WmNewMessagesNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_Se
         fileInfo.fileStatus = (FileStatus)p_FileStatus;
         fileInfo.fileId = fileId;
         fileInfo.filePath = std::string(p_FilePath);
+        rapidjson::Document downloadInfo;
+        if (!downloadInfo.Parse(fileId.c_str()).HasParseError() && downloadInfo.IsObject() &&
+            downloadInfo.HasMember("ViewOnce_bool") && downloadInfo["ViewOnce_bool"].IsBool())
+          fileInfo.isViewOnce = downloadInfo["ViewOnce_bool"].GetBool();
+        fileInfo.isViewOnce = fileInfo.isViewOnce || ProtocolUtil::IsViewOnce(chatMessage);
         chatMessage.fileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
       }
     }
@@ -1248,6 +1253,7 @@ void WmNewMessageFileNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p
       const FileInfo cached = ProtocolUtil::FileInfoFromHex(cachedMessages.front().fileInfo);
       fileInfo.fileId = cached.fileId;
       fileInfo.fileType = cached.fileType;
+      fileInfo.isViewOnce = ProtocolUtil::IsViewOnce(cachedMessages.front());
     }
 
     std::shared_ptr<NewMessageFileNotify> newMessageFileNotify =
