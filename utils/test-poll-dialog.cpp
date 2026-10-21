@@ -30,6 +30,7 @@ struct PollProtocol : Protocol
   bool deferVote = false;
   std::vector<int> lastSelection;
   std::function<void(PollVoteInfo)> voterPage;
+  std::function<bool()> voterCancelled;
   std::function<void(bool, std::string)> pendingVote;
   std::string GetProfileId() const override { return "poll-test"; }
   std::string GetProfileDisplayName() const override { return "Offline"; }
@@ -48,6 +49,7 @@ struct PollProtocol : Protocol
     {
       ++reads;
       voterPage = std::static_pointer_cast<GetPollVotesRequest>(request)->onResult;
+      voterCancelled = std::static_pointer_cast<GetPollVotesRequest>(request)->isCancelled;
       voterPage(info);
     }
     else if (request->GetMessageType() == VotePollRequestType)
@@ -69,6 +71,20 @@ static void Select(UiPollDialog& dialog, int option)
   assert(found != dialog.m_Visible.end());
   dialog.m_Index = static_cast<int>(found - dialog.m_Visible.begin());
   dialog.KeyHandler(UiKeyConfig::GetKey("ok"));
+}
+
+static void Highlight(UiPollDialog& dialog, int option)
+{
+  const auto found = std::find(dialog.m_Visible.begin(), dialog.m_Visible.end(), option);
+  assert(found != dialog.m_Visible.end());
+  dialog.m_Index = static_cast<int>(found - dialog.m_Visible.begin());
+}
+
+static std::string Rows(const UiPollDialog& dialog)
+{
+  std::string text;
+  for (const auto& row : dialog.m_Items) text += StrUtil::ToString(row) + "\n";
+  return text;
 }
 
 int main()
@@ -135,6 +151,8 @@ int main()
     dialog.OnTimer();
     assert(dialog.m_Selected == std::set<int>{1});
     const auto oldVoterPage = protocol->voterPage;
+    const auto oldCancelled = protocol->voterCancelled;
+    assert(oldCancelled && !oldCancelled());
     Select(dialog, 0);
     assert(protocol->votes == 0 && dialog.m_Selected == std::set<int>{0});
     auto paged = protocol->info;
@@ -145,6 +163,7 @@ int main()
     assert(protocol->votes == 1 && protocol->lastSelection == std::vector<int>{0});
     dialog.OnTimer(); dialog.OnTimer();
     assert(protocol->reads == 2 && !dialog.m_Submitted);
+    assert(oldCancelled());
     oldVoterPage(paged); dialog.OnTimer();
     assert(dialog.m_Selected == std::set<int>{0});
     Select(dialog, -3);
@@ -188,9 +207,15 @@ int main()
     UiDialogParams params(&model, "Poll", 0.75, 0.5);
     UiPollDialog dialog(params, protocol, request, "poll-test", text);
     dialog.OnTimer();
+    const auto cancelledByTimeout = protocol->voterCancelled;
     dialog.m_Started -= std::chrono::seconds(16); // Fast clock advance, no real wait.
     dialog.OnTimer();
     assert(!dialog.m_Votes->info.votersLoading && dialog.m_Votes->info.canVote);
+    assert(dialog.m_Votes->info.note.find("timed out") != std::string::npos);
+    assert(cancelledByTimeout());
+    auto lateLoading = protocol->info;
+    lateLoading.note = "This late page must not restart loading";
+    protocol->voterPage(lateLoading); dialog.OnTimer();
     assert(dialog.m_Votes->info.note.find("timed out") != std::string::npos);
     Select(dialog, 0); Select(dialog, -2);
     assert(protocol->votes == 1 && dialog.m_Submitted);
@@ -212,6 +237,74 @@ int main()
     // Back always exits, including while waiting for a service acknowledgement.
     dialog.KeyHandler(UiKeyConfig::GetKey("cancel"));
     assert(!dialog.m_Running && protocol->votes == 2);
+  }
+  {
+    UiModel model;
+    auto protocol = std::make_shared<PollProtocol>();
+    model.AddProtocol(protocol); model.Init();
+    protocol->info.selectionKnown = true;
+    protocol->info.canVote = true;
+    protocol->info.canRetract = true;
+    protocol->info.maxChoices = 1;
+    protocol->info.optionTexts = {"Tea", "Coffee", "Water"};
+    protocol->info.selectedOptionIndexes = {0};
+    protocol->info.summary = "1 recorded voter";
+    auto request = std::make_shared<VotePollRequest>();
+    UiDialogParams params(&model, "Poll", 0.75, 0.5);
+    UiPollDialog dialog(params, protocol, request, "poll-test", "[Poll] Drink?\n• Tea\n• Coffee\n• Water");
+    dialog.OnTimer();
+    Highlight(dialog, 2);
+    const int oldIndex = dialog.m_Index;
+    auto paged = protocol->info;
+    paged.votes = {{0, "Synthetic voter"}};
+    paged.votersLoading = true;
+    protocol->voterPage(paged); dialog.OnTimer();
+    assert(dialog.m_Index != oldIndex && dialog.m_Visible[dialog.m_Index] == 2);
+    dialog.KeyHandler(UiKeyConfig::GetKey("ok"));
+    assert(protocol->votes == 0 && dialog.m_Selected == std::set<int>{2});
+    assert(Rows(dialog).find("vote records received") != std::string::npos);
+    Highlight(dialog, -2);
+    paged.votes.push_back({1, "Another synthetic voter"});
+    protocol->voterPage(paged); dialog.OnTimer();
+    assert(dialog.m_Visible[dialog.m_Index] == -2);
+    dialog.KeyHandler(UiKeyConfig::GetKey("ok"));
+    assert(protocol->votes == 1 && protocol->lastSelection == std::vector<int>{2});
+    dialog.OnTimer(); dialog.OnTimer();
+    // A disappeared name must never leave focus on an option or Submit.
+    protocol->voterPage(paged); dialog.OnTimer();
+    const auto name = std::find_if(dialog.m_RowKeys.begin(), dialog.m_RowKeys.end(),
+      [](const std::string& key) { return key.find("voter:0:") == 0; });
+    assert(name != dialog.m_RowKeys.end());
+    dialog.m_Index = static_cast<int>(name - dialog.m_RowKeys.begin());
+    protocol->voterPage(protocol->info); dialog.OnTimer();
+    assert(dialog.m_Visible[dialog.m_Index] == -1);
+  }
+  {
+    UiModel model;
+    auto protocol = std::make_shared<PollProtocol>();
+    model.AddProtocol(protocol); model.Init();
+    const std::string prefix = "A long shared option prefix that previously hid its distinguishing words ";
+    protocol->info.selectionKnown = true;
+    protocol->info.canVote = true;
+    protocol->info.maxChoices = 1;
+    protocol->info.optionTexts = {prefix + "FIRST-ENDING", prefix + "SECOND-ENDING"};
+    protocol->info.votes = {{1, "Synthetic-voter-name"}};
+    auto request = std::make_shared<VotePollRequest>();
+    UiDialogParams params(&model, "Poll", 0.75, 0.5);
+    UiPollDialog dialog(params, protocol, request, "poll-test",
+      "[Poll] A long question line\nwith a complete second question line\n• First\n• Second");
+    dialog.m_W = 40; dialog.OnTimer();
+    const auto rows = Rows(dialog);
+    assert(rows.find("complete second question line") != std::string::npos);
+    assert(rows.find("FIRST-ENDING") != std::string::npos && rows.find("SECOND-ENDING") != std::string::npos);
+    assert(std::count(dialog.m_Visible.begin(), dialog.m_Visible.end(), 1) > 1);
+    Highlight(dialog, 1); ++dialog.m_Index; // Continuation lines select the same logical option.
+    dialog.KeyHandler(UiKeyConfig::GetKey("ok"));
+    assert(dialog.m_Selected == std::set<int>{1} && protocol->votes == 0);
+    dialog.m_FilterStr = L"synthetic-voter"; dialog.UpdateList();
+    assert(Rows(dialog).find("Synthetic-voter-name") != std::string::npos);
+    assert(std::find(dialog.m_Visible.begin(), dialog.m_Visible.end(), 1) != dialog.m_Visible.end());
+    assert(std::find(dialog.m_Visible.begin(), dialog.m_Visible.end(), 0) == dialog.m_Visible.end());
   }
   endwin(); delscreen(terminal); fclose(output); fclose(source);
   MessageCache::Cleanup(); UiKeyConfig::Cleanup(); UiColorConfig::Cleanup(); UiConfig::Cleanup(); AppConfig::Cleanup();

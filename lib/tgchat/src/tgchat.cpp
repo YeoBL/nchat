@@ -8,6 +8,7 @@
 #include "tgchat.h"
 
 #include <cstdint>
+#include <chrono>
 #include <ctime>
 #include <functional>
 #include <iomanip>
@@ -705,14 +706,16 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
     case GetPollVotesRequestType:
       {
         auto request = std::static_pointer_cast<GetPollVotesRequest>(p_RequestMessage);
-        if (!request->onResult) break;
+        if (!request->onResult || (request->isCancelled && request->isCancelled())) break;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
         const int64_t chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
         const int64_t msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
         SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
-          [this, request, chatId, msgId](Object object)
+          [this, request, chatId, msgId, deadline](Object object)
         {
+          if (request->isCancelled && request->isCancelled()) return;
           PollVoteInfo info;
-          if (object->get_id() != td::td_api::message::ID)
+          if (!object || object->get_id() != td::td_api::message::ID)
           {
             info.note = "Could not load this poll.";
             request->onResult(std::move(info));
@@ -740,44 +743,73 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             return;
           }
           const int optionCount = static_cast<int>(poll->options_.size());
-          // Options and your own vote must not wait behind a potentially large
-          // paginated voter list. The dialog accepts the later completed list.
+          // Publish metadata and each completed page rather than withholding
+          // every name behind the slowest option or a failed later request.
           info.note = "Loading voter names...";
           info.votersLoading = true;
           request->onResult(info);
           info.note.clear();
-          info.votersLoading = false;
           auto result = std::make_shared<PollVoteInfo>(std::move(info));
+          auto seen = std::make_shared<std::set<std::pair<int, int64_t>>>();
           auto fetch = std::make_shared<std::function<void(int, int)>>();
-          *fetch = [this, request, result, fetch, chatId, msgId, optionCount](int option, int offset)
+          // The in-flight TDLib callback keeps the next step alive; the step
+          // itself is weak so cancellation/no response cannot leave a cycle.
+          std::weak_ptr<std::function<void(int, int)>> weakFetch = fetch;
+          *fetch = [this, request, result, seen, weakFetch, chatId, msgId, optionCount, deadline](int option, int offset)
           {
-            if (option >= optionCount)
+            if (request->isCancelled && request->isCancelled()) return;
+            if (std::chrono::steady_clock::now() >= deadline)
             {
+              result->votersLoading = false;
+              result->note = "Voter names timed out; list may be partial. Refresh results to retry.";
               request->onResult(*result);
-              *fetch = nullptr;
               return;
             }
-            SendQuery(td::td_api::make_object<td::td_api::getPollVoters>(chatId, msgId, option, offset, 50),
-              [this, request, result, fetch, option, offset](Object pageObject)
+            if (option >= optionCount)
             {
-              if (pageObject->get_id() != td::td_api::pollVoters::ID)
+              result->votersLoading = false;
+              request->onResult(*result);
+              return;
+            }
+            const auto nextStep = weakFetch.lock();
+            if (!nextStep) return;
+            SendQuery(td::td_api::make_object<td::td_api::getPollVoters>(chatId, msgId, option, offset, 50),
+              [this, request, result, seen, nextStep, option, offset, deadline](Object pageObject)
+            {
+              if (request->isCancelled && request->isCancelled()) return;
+              auto page = pageObject && pageObject->get_id() == td::td_api::pollVoters::ID ?
+                td::move_tl_object_as<td::td_api::pollVoters>(pageObject) : nullptr;
+              if (page) for (auto& voter : page->voters_)
               {
-                result->note = "Some voter names are unavailable from Telegram.";
-                (*fetch)(option + 1, 0);
+                if (!voter || !voter->voter_id_) continue;
+                const auto user = GetSenderId(std::move(voter->voter_id_));
+                if (user && seen->emplace(option, user).second)
+                  result->votes.push_back({option, StrUtil::NumToHex(user)});
+              }
+              if (std::chrono::steady_clock::now() >= deadline)
+              {
+                // A completed late page is still useful; don't issue another
+                // query after the deadline. The UI can already have cancelled.
+                result->votersLoading = false;
+                result->note = "Voter names timed out; list may be partial. Refresh results to retry.";
+                request->onResult(*result);
                 return;
               }
-              auto page = td::move_tl_object_as<td::td_api::pollVoters>(pageObject);
-              for (auto& voter : page->voters_)
-                result->votes.push_back({option, StrUtil::NumToHex(GetSenderId(std::move(voter->voter_id_)))});
-              const int next = offset + static_cast<int>(page->voters_.size());
-              if (TgFeaturePollPageHasMore(offset, static_cast<int>(page->voters_.size()), page->total_count_))
-                (*fetch)(option, next);
-              else
+              if (!page)
               {
-                if (next < page->total_count_)
-                  result->note = "Telegram did not return every voter; reopen to retry.";
-                (*fetch)(option + 1, 0);
+                result->note = "Some voter names are unavailable from Telegram.";
+                request->onResult(*result);
+                (*nextStep)(option + 1, 0);
+                return;
               }
+              const int next = offset + static_cast<int>(page->voters_.size());
+              const bool more = TgFeaturePollPageHasMore(offset, static_cast<int>(page->voters_.size()), page->total_count_);
+              if (!more && next < page->total_count_)
+                result->note = "Telegram did not return every voter; reopen to retry.";
+              request->onResult(*result);
+              if (more)
+                (*nextStep)(option, next);
+              else (*nextStep)(option + 1, 0);
             });
           };
           (*fetch)(0, 0);

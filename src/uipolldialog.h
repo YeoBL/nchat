@@ -5,6 +5,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "strutil.h"
@@ -40,6 +41,7 @@ class UiPollDialog : public UiListDialog
   std::string m_Question;
   std::vector<std::string> m_Options;
   std::vector<int> m_Visible;
+  std::vector<std::string> m_RowKeys;
   std::set<int> m_Selected;
   int m_MaxChoices = 1;
   bool m_Submitted = false;
@@ -58,9 +60,9 @@ public:
                const std::string& text)
     : UiListDialog(params, false), m_Protocol(protocol), m_Request(request), m_Profile(profile)
   {
-    const auto firstEnd = text.find('\n');
-    m_Question = text.substr(7, firstEnd == std::string::npos ? std::string::npos : firstEnd - 7);
-    size_t start = firstEnd;
+    const auto optionsStart = text.find("\n• ");
+    m_Question = text.substr(7, optionsStart == std::string::npos ? std::string::npos : optionsStart - 7);
+    size_t start = optionsStart;
     while (start != std::string::npos)
     {
       ++start;
@@ -99,6 +101,13 @@ protected:
     votesRequest->chatId = m_Request->chatId;
     votesRequest->msgId = m_Request->msgId;
     std::weak_ptr<VotesState> weak = m_Votes;
+    votesRequest->isCancelled = [weak, generation]()
+    {
+      const auto state = weak.lock();
+      if (!state) return true;
+      std::lock_guard<std::mutex> lock(state->mutex);
+      return state->generation != generation;
+    };
     votesRequest->onResult = [weak, generation](PollVoteInfo info)
     {
       if (auto state = weak.lock())
@@ -202,12 +211,15 @@ protected:
         m_Votes->info.note = "Poll request timed out. Select Refresh results to retry.";
         m_Votes->info.canVote = false;
         m_Votes->ready = true;
+        ++m_Votes->generation;
+        ++m_Votes->revision;
       }
       else if (m_Votes->ready && m_Votes->info.votersLoading &&
           std::chrono::steady_clock::now() - m_Started > std::chrono::seconds(15))
       {
         m_Votes->info.votersLoading = false;
         m_Votes->info.note = "Voter names timed out; list may be partial. Refresh results to retry.";
+        ++m_Votes->generation;
         ++m_Votes->revision;
       }
       votesReady = m_Votes->ready;
@@ -228,22 +240,32 @@ protected:
   }
   void UpdateList() override
   {
+    const int previousAction = m_Index >= 0 && m_Index < static_cast<int>(m_Visible.size()) ? m_Visible[m_Index] : -1;
+    const std::string previousRow = m_Index >= 0 && m_Index < static_cast<int>(m_RowKeys.size()) ? m_RowKeys[m_Index] : "";
     m_Items.clear();
     m_Visible.clear();
-    auto add = [&](const std::string& line, int option)
+    m_RowKeys.clear();
+    auto add = [&](const std::string& line, int option, const std::string& rowKey = "")
     {
-      m_Items.push_back(StrUtil::TrimPadWString(StrUtil::ToWString(line), m_W));
-      m_Visible.push_back(option);
+      const bool choice = option >= 0;
+      const auto content = choice ? line.substr(4) : line;
+      const auto key = rowKey.empty() ? "action:" + std::to_string(option) : rowKey;
+      const auto wrapped = StrUtil::WordWrap(StrUtil::ToWString(content),
+        static_cast<unsigned>(std::max(1, m_W - (choice ? 4 : 0))), false, false, false, 0);
+      for (size_t i = 0; i < wrapped.size(); ++i)
+      {
+        const auto prefix = choice ? StrUtil::ToWString(i == 0 ? line.substr(0, 4) : "    ") : L"";
+        m_Items.push_back(StrUtil::TrimPadWString(prefix + wrapped[i], m_W));
+        m_Visible.push_back(option);
+        m_RowKeys.push_back(key + ":" + std::to_string(i));
+      }
     };
-    add(m_Question, -1);
+    add(m_Question, -1, "question");
     std::string result;
     { std::lock_guard<std::mutex> lock(m_State->mutex); result = m_State->result; }
-    if (!result.empty())
-      for (const auto& line : StrUtil::WordWrap(StrUtil::ToWString(result),
-          static_cast<unsigned>(std::max(1, m_W)), false, false, false, 0))
-        add(StrUtil::ToString(line), -1);
-    else if (m_Submitted) add("Submitting vote...", -1);
-    else add("Enter toggles a choice; select Submit to save your vote.", -1);
+    if (!result.empty()) add(result, -1, "result");
+    else if (m_Submitted) add("Submitting vote...", -1, "help");
+    else add("Enter toggles a choice; select Submit to save your vote.", -1, "help");
     PollVoteInfo voteInfo;
     bool votesReady;
     {
@@ -262,26 +284,31 @@ protected:
           if (option >= 0 && option < static_cast<int>(m_Options.size())) m_Selected.insert(option);
       }
     }
-    if (!voteInfo.summary.empty())
-      for (const auto& line : StrUtil::WordWrap(StrUtil::ToWString(voteInfo.summary),
-          static_cast<unsigned>(std::max(1, m_W)), false, false, false, 0))
-        add(StrUtil::ToString(line), -1);
+    if (!voteInfo.summary.empty()) add(voteInfo.summary, -1, "summary");
     const auto filter = StrUtil::ToLower(StrUtil::ToString(m_FilterStr));
     for (size_t i = 0; i < m_Options.size(); ++i)
-      if (filter.empty() || StrUtil::ToLower(m_Options[i]).find(filter) != std::string::npos)
+    {
+      const bool matchesOption = filter.empty() || StrUtil::ToLower(m_Options[i]).find(filter) != std::string::npos;
+      std::vector<std::pair<std::string, std::string>> names;
+      if (votesReady)
+        for (const auto& vote : voteInfo.votes)
+          if (vote.optionIndex == static_cast<int>(i))
+          {
+            auto name = vote.userId == s_ReactionsSelfId ? "You" :
+              m_Model->GetContactListName(m_Profile, vote.userId, true, true);
+            if (name.empty()) name = vote.userId;
+            if (matchesOption || StrUtil::ToLower(name).find(filter) != std::string::npos ||
+                StrUtil::ToLower(vote.userId).find(filter) != std::string::npos)
+              names.emplace_back(vote.userId, std::move(name));
+          }
+      if (matchesOption || !names.empty())
       {
         add((m_Selected.count(static_cast<int>(i)) ? "[x] " : "[ ] ") +
           m_Options[i], static_cast<int>(i));
-        if (votesReady)
-          for (const auto& vote : voteInfo.votes)
-            if (vote.optionIndex == static_cast<int>(i))
-            {
-              std::string name = vote.userId == s_ReactionsSelfId ? "You" :
-                m_Model->GetContactListName(m_Profile, vote.userId, true, true);
-              if (name.empty()) name = vote.userId;
-              add("    " + name, -1);
-            }
+        for (const auto& name : names)
+          add("    " + name.second, -1, "voter:" + std::to_string(i) + ":" + name.first);
       }
+    }
     if (votesReady && !m_Submitted && !m_Unconfirmed && voteInfo.canVote)
     {
       add("Submit vote (" + std::to_string(m_Selected.size()) + "/" + std::to_string(m_MaxChoices) + ")", -2);
@@ -289,8 +316,21 @@ protected:
         "Clear selection (Submit to retract)" : "Clear selection", -3);
     }
     if (votesReady && !m_Submitted) add("Refresh results and voters", -4);
-    if (!votesReady) add("Loading voters...", -1);
-    else if (!voteInfo.note.empty()) add(voteInfo.note, -1);
-    m_Index = std::min(m_Index, std::max(0, static_cast<int>(m_Items.size()) - 1));
+    if (!votesReady) add("Loading voters...", -1, "note");
+    else
+    {
+      if (voteInfo.votersLoading) add("Loading more voter names (" +
+        std::to_string(voteInfo.votes.size()) + " vote records received)...", -1, "loading");
+      if (!voteInfo.note.empty() && (!voteInfo.votersLoading || voteInfo.note != "Loading voter names..."))
+        add(voteInfo.note, -1, "note");
+    }
+    const auto row = std::find(m_RowKeys.begin(), m_RowKeys.end(), previousRow);
+    if (!previousRow.empty() && row != m_RowKeys.end()) m_Index = static_cast<int>(row - m_RowKeys.begin());
+    else if (previousAction != -1)
+    {
+      const auto action = std::find(m_Visible.begin(), m_Visible.end(), previousAction);
+      m_Index = action == m_Visible.end() ? 0 : static_cast<int>(action - m_Visible.begin());
+    }
+    else m_Index = 0; // A disappeared name/status must never turn into a selectable choice.
   }
 };

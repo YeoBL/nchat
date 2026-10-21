@@ -385,8 +385,11 @@ public:
   virtual MessageType GetMessageType() const { return GetPollVotesRequestType; }
   std::string chatId;
   std::string msgId;
-  // May receive fresh metadata first, then the completed paginated voter list.
+  // May receive metadata, cumulative voter pages and a final loading=false result.
   std::function<void(PollVoteInfo)> onResult;
+  // Optional: refreshed/closed dialogs can stop obsolete pagination. No locks
+  // are held by the caller when this callback or onResult is invoked.
+  std::function<bool()> isCancelled;
 };
 
 class SendMessageRequest : public RequestMessage
