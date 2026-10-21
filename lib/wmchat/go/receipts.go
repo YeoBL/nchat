@@ -5,9 +5,25 @@ import (
 	"encoding/json"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 )
+
+func suppliedHistoryCounts(history *waHistorySync.HistorySync) (messages, receipts, votes int) {
+	for _, conversation := range history.GetConversations() {
+		for _, entry := range conversation.GetMessages() {
+			message := entry.GetMessage()
+			if message == nil {
+				continue
+			}
+			messages++
+			receipts += len(message.GetUserReceipt())
+			votes += len(message.GetPollUpdates())
+		}
+	}
+	return
+}
 
 // Only WhatsApp's own linked-identity mapping is authoritative. Contact names
 // and matching display numbers are not enough to merge two receipt recipients.

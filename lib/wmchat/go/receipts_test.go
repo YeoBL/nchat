@@ -8,11 +8,26 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestSuppliedHistoryCounts(t *testing.T) {
+	if messages, receipts, votes := suppliedHistoryCounts(nil); messages != 0 || receipts != 0 || votes != 0 {
+		t.Fatal("nil history must not imply a response with details")
+	}
+	history := &waHistorySync.HistorySync{Conversations: []*waHistorySync.Conversation{nil, {
+		Messages: []*waHistorySync.HistorySyncMsg{nil, {}, {Message: &waWeb.WebMessageInfo{
+			UserReceipt: []*waWeb.UserReceipt{{}, {}}, PollUpdates: []*waWeb.PollUpdate{{}},
+		}}, {Message: &waWeb.WebMessageInfo{}}},
+	}}}
+	if messages, receipts, votes := suppliedHistoryCounts(history); messages != 2 || receipts != 2 || votes != 1 {
+		t.Fatalf("incorrect supplied response counts: messages=%d receipts=%d votes=%d", messages, receipts, votes)
+	}
+}
 
 type receiptLIDStore struct {
 	store.NoopStore

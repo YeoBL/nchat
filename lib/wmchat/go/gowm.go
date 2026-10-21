@@ -1179,6 +1179,10 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 		importer := *handler
 		importer.importedHistory = true
 		handler = &importer
+		messages, receipts, votes := suppliedHistoryCounts(historySync.Data)
+		// Aggregate diagnostics distinguish an actual phone response from a peer
+		// request acknowledgement without logging chat IDs, names or message text.
+		LOG_INFO(fmt.Sprintf("Phone history received: %d messages, %d supplied receipt records, %d supplied poll updates", messages, receipts, votes))
 	}
 
 	LOG_TRACE(fmt.Sprintf("HandleHistorySync SyncType %s Progress %d",
