@@ -282,6 +282,7 @@ private:
 
 public:
   static void Init();
+  static void StopWorker(); // Drain queued writes/callbacks while keeping databases available.
   static void Cleanup();
   static void SetMessageHandler(const std::function<void(std::shared_ptr<ServiceMessage>)>& p_MessageHandler);
   static void MessageReceipts(const std::string& profileId, const std::string& chatId,

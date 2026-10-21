@@ -170,6 +170,124 @@ int main() try
     assert(count == 1); // Archive updates must preserve history and unread state.
   }
   std::cout << "production cache: archive/unarchive preserves messages and read flags\n";
+  {
+    // These are real cache requests and real reentrant queries, not UI stubs.
+    // A cache callback holding m_DbMutex deterministically blocks on itself;
+    // the watchdog makes that regression a bounded failure rather than a hang.
+    alarm(10);
+    auto add = std::make_shared<MessageCache::AddMessagesRequest>();
+    add->profileId = "test"; add->chatId = "reaction-locks";
+    ChatMessage first;
+    first.id = "first"; first.text = "old first"; first.timeSent = 1000;
+    first.isOutgoing = false; first.isRead = false;
+    first.reactions.senderEmojis = {{"synthetic-person", "thumbs-up"}};
+    first.reactions.updateCountBasedOnSender = true;
+    ChatMessage second = first;
+    second.id = "second"; second.text = "old second"; second.timeSent = 2000; second.isRead = true;
+    add->chatMessages = {first, second};
+    MessageCache::PerformRequest(add);
+    int callbacks = 0;
+    bool expectCompletedBatch = false;
+    MessageCache::SetMessageHandler([&](std::shared_ptr<ServiceMessage> event) {
+      assert(event->GetMessageType() == NewMessageReactionsNotifyType);
+      auto notify = std::static_pointer_cast<NewMessageReactionsNotify>(event);
+      assert(notify->chatId == "reaction-locks");
+      assert(!notify->reactions.senderEmojis.empty());
+      std::vector<ChatMessage> previous;
+      assert(MessageCache::GetOneMessage("test", "reaction-locks", "first", previous));
+      assert(!previous.front().isRead);
+      previous.clear();
+      assert(MessageCache::GetOneMessage("test", "reaction-locks", "second", previous));
+      assert(previous.front().isRead);
+      if (expectCompletedBatch) assert(previous.front().text == "new second");
+      assert(MessageCache::GetDeletedMessageOverlays("test", "reaction-locks", {"first", "second"}).empty());
+      ++callbacks;
+    });
+    auto update = std::make_shared<MessageCache::UpdateMessageReactionsRequest>();
+    update->profileId = "test"; update->chatId = "reaction-locks"; update->msgId = "first";
+    update->reactions.senderEmojis = {{"synthetic-person", "heart"}};
+    update->reactions.updateCountBasedOnSender = true;
+    MessageCache::PerformRequest(update);
+    assert(callbacks == 1);
+    // Both old messages already have non-default reactions, exercising the
+    // second callback source and requiring all writes before notification.
+    first.text = "new first"; second.text = "new second";
+    add->chatMessages = {first, second};
+    expectCompletedBatch = true;
+    MessageCache::PerformRequest(add);
+    assert(callbacks == 3);
+    auto lifetime = std::make_shared<int>(42);
+    std::weak_ptr<int> weakLifetime = lifetime;
+    MessageCache::SetMessageHandler([&, held = lifetime](std::shared_ptr<ServiceMessage>) {
+      MessageCache::SetMessageHandler(nullptr); // Reentrant replacement cannot destroy this invocation.
+      assert(!weakLifetime.expired() && *held == 42);
+      std::vector<ChatMessage> previous;
+      assert(MessageCache::GetOneMessage("test", "reaction-locks", "first", previous));
+      assert(!previous.front().isRead);
+    });
+    lifetime.reset();
+    MessageCache::PerformRequest(update);
+    assert(weakLifetime.expired());
+
+    // A real worker may have copied the old UI callback just before unregister.
+    // StopWorker must wait for it and commit the final queued writes, without
+    // closing databases needed by the later export/cleanup phase.
+    std::mutex gate;
+    std::condition_variable changed;
+    bool entered = false, released = false, uiAlive = true;
+    std::atomic<bool> stopped{false};
+    int workerCallbacks = 0;
+    MessageCache::SetMessageHandler([&](std::shared_ptr<ServiceMessage>) {
+      std::unique_lock<std::mutex> hold(gate);
+      assert(uiAlive);
+      entered = true;
+      changed.notify_all();
+      changed.wait(hold, [&] { return released; });
+      assert(uiAlive);
+      std::vector<ChatMessage> previous;
+      assert(MessageCache::GetOneMessage("test", "reaction-locks", "first", previous));
+      ++workerCallbacks;
+    });
+    MessageCache::EnqueueRequest(update);
+    {
+      std::unique_lock<std::mutex> hold(gate);
+      assert(changed.wait_for(hold, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    ChatMessage finalWrite = second;
+    finalWrite.id = "last-queued-write";
+    MessageCache::AddMessages("test", "reaction-locks", "", {finalWrite});
+    MessageCache::SetMessageHandler(nullptr);
+    std::thread stop([&] { MessageCache::StopWorker(); stopped = true; });
+    while (true)
+    {
+      std::unique_lock<std::mutex> hold(MessageCache::m_QueueMutex);
+      if (!MessageCache::m_Running) break;
+      hold.unlock();
+      std::this_thread::yield();
+    }
+    assert(!stopped); // In-flight callback still owns the simulated UI lifetime.
+    {
+      std::unique_lock<std::mutex> hold(gate);
+      released = true;
+      changed.notify_all();
+    }
+    stop.join();
+    assert(stopped && workerCallbacks == 1);
+    uiAlive = false;
+    std::vector<ChatMessage> finalStored;
+    assert(MessageCache::GetOneMessage("test", "reaction-locks", finalWrite.id, finalStored));
+    assert(finalStored.front().isRead && MessageCache::m_Queue.empty());
+    finalWrite.id = "rejected-after-stop";
+    MessageCache::AddMessages("test", "reaction-locks", "", {finalWrite});
+    finalStored.clear();
+    assert(!MessageCache::GetOneMessage("test", "reaction-locks", finalWrite.id, finalStored));
+    assert(MessageCache::m_Queue.empty());
+    MessageCache::StopWorker(); // Lifecycle calls remain idempotent.
+    writer << "DELETE FROM messages WHERE chatId='reaction-locks';";
+    alarm(0);
+  }
+  std::cout << "production callbacks: both reaction paths permit cache reentry, preserve read flags, complete batch writes and safely replace the active handler\n";
+  std::cout << "production lifecycle: unregister/stop drains in-flight callbacks and queued writes before UI destruction, retaining databases for export\n";
   auto receipt = std::make_shared<MessageCache::MessageReceiptsRequest>();
   receipt->profileId = "test"; receipt->chatId = "chat"; receipt->msgId = "sent";
   receipt->receipts = {{"alice", 0, 200}, {"bob", 100, 0}};

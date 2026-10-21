@@ -105,19 +105,21 @@ void MessageCache::Init()
   }
 }
 
+void MessageCache::StopWorker()
+{
+  {
+    std::unique_lock<std::mutex> lock(m_QueueMutex);
+    m_Running = false;
+    m_CondVar.notify_one();
+  }
+  if (m_Thread.joinable()) m_Thread.join();
+}
+
 void MessageCache::Cleanup()
 {
   if (!m_CacheEnabled) return;
 
-  if (m_Running)
-  {
-    {
-      std::unique_lock<std::mutex> lock(m_QueueMutex);
-      m_Running = false;
-      m_CondVar.notify_one();
-    }
-    m_Thread.join();
-  }
+  StopWorker();
 
   {
     std::unique_lock<std::mutex> lock(m_DbMutex);
@@ -1425,7 +1427,7 @@ void MessageCache::Export(const std::string& p_ExportDir)
 
 void MessageCache::Process()
 {
-  while (m_Running)
+  while (true)
   {
     std::shared_ptr<Request> request;
 
@@ -1436,12 +1438,8 @@ void MessageCache::Process()
         m_CondVar.wait(lock);
       }
 
-      if (!m_Running)
+      if (!m_Running && m_Queue.empty())
       {
-        if (!m_Queue.empty())
-        {
-          LOG_WARNING("Exiting with non-empty queue %d", m_Queue.size());
-        }
         break;
       }
 
@@ -1452,16 +1450,16 @@ void MessageCache::Process()
     PerformRequest(request);
     std::this_thread::yield(); // hack for GCC -O2 to enable context switching
   }
-
-  if (!m_Queue.empty())
-  {
-    LOG_WARNING("Exiting with non-empty queue %d", m_Queue.size());
-  }
 }
 
 void MessageCache::EnqueueRequest(std::shared_ptr<Request> p_Request)
 {
   std::unique_lock<std::mutex> lock(m_QueueMutex);
+  if (!m_Running)
+  {
+    LOG_WARNING("cache request rejected after worker stop");
+    return;
+  }
   m_Queue.push_back(p_Request);
   m_CondVar.notify_one();
 }
@@ -1549,6 +1547,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
       break;
     case AddMessagesRequestType:
       {
+        std::vector<std::shared_ptr<ServiceMessage>> notifications;
         std::unique_lock<std::mutex> lock(m_DbMutex);
         std::shared_ptr<AddMessagesRequest> addMessagesRequest =
           std::static_pointer_cast<AddMessagesRequest>(p_Request);
@@ -1732,10 +1731,14 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               newMessageReactionsNotify->chatId = chatId;
               newMessageReactionsNotify->msgId = msg.id;
               newMessageReactionsNotify->reactions = reactions;
-              CallMessageHandler(newMessageReactionsNotify);
+              notifications.push_back(newMessageReactionsNotify);
             }
           }
         }
+        // Callers can hold the model mutex while reading the cache. Never take
+        // that mutex through a UI callback while retaining the database mutex.
+        lock.unlock();
+        for (const auto& notification : notifications) CallMessageHandler(notification);
       }
       break;
 
@@ -2378,6 +2381,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
           HANDLE_SQLITE_EXCEPTION(ex);
         }
 
+        lock.unlock();
         {
           // Send consolidated info to ui
           std::shared_ptr<NewMessageReactionsNotify> newMessageReactionsNotify =
@@ -2673,9 +2677,14 @@ void MessageCache::PerformFetchOneMessage(const std::string& p_ProfileId, const 
 
 void MessageCache::CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage)
 {
-  if (m_MessageHandler)
+  std::function<void(std::shared_ptr<ServiceMessage>)> handler;
   {
-    m_MessageHandler(p_ServiceMessage);
+    std::unique_lock<std::mutex> lock(m_DbMutex);
+    handler = m_MessageHandler;
+  }
+  if (handler)
+  {
+    handler(p_ServiceMessage);
   }
   else
   {

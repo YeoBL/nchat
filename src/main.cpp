@@ -450,6 +450,9 @@ int main(int argc, char* argv[])
 
   // Clear cache message handler
   MessageCache::SetMessageHandler(nullptr);
+  // A callback already copied by the worker can still be using Ui. Join it
+  // before destroying the UI; keep the databases open for optional export.
+  MessageCache::StopWorker();
 
   // Cleanup ui
   ui->Cleanup();
