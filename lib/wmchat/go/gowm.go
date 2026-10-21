@@ -3216,9 +3216,8 @@ func WmSendMessage(connId int, chatId string, text string, quotedId string, quot
 		return -1
 	}
 	if chatJid.Server == types.NewsletterServer {
-		metadata, err := client.GetNewsletterInfo(context.Background(), chatJid)
-		if err != nil || metadata == nil || metadata.ViewerMeta == nil || (metadata.ViewerMeta.Role != types.NewsletterRoleAdmin && metadata.ViewerMeta.Role != types.NewsletterRoleOwner) {
-			LOG_WARNING("channel posting requires verified channel administrator permission")
+		if err := verifyChannelPosting(context.Background(), chatJid, filePath, client.GetNewsletterInfo); err != nil {
+			LOG_WARNING(err.Error())
 			return -1
 		}
 	}
