@@ -59,3 +59,13 @@ Offline checks, using synthetic data only:
 ```sh
 go test -race -count=1 ./cmd/viewonce-probe
 ```
+
+## Recorded live outcome
+
+On 21 October 2026, the isolated Android-companion attempt received rotating QR
+references, but the primary phone reported a connection error on repeated scans.
+No successful pairing/authentication event or paired-device record was observed;
+the attempt timed out and stopped. This does not establish the cause of the phone
+error or whether view-once delivery would work after a successful registration.
+Do not keep retrying scans or describe the offline checks as a successful live
+delivery test. The existing production nchat process/profile was not modified.

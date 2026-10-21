@@ -19,7 +19,13 @@ independently runnable. The widget snapshots were independently compiled.
 ## Verification audit and follow-up fixes — 20 October 2026
 
 Initial audited implementation: [`4a914f89`](https://github.com/YeoBL/nchat/commit/4a914f8930e89d7e8e5725e56c464bce047be479).
-Current post-fix implementation: [9787941c](https://github.com/YeoBL/nchat/commit/9787941c).
+Current post-fix implementation: [1675d36e](https://github.com/YeoBL/nchat/commit/1675d36e).
+
+### Isolated WhatsApp delivery experiment — 21 October 2026
+
+| Change | Access / effect | Commit | Verification / limits |
+|---|---|---|---|
+| Standalone view-once delivery-metadata probe | Manually build/run `cmd/viewonce-probe` as documented in `doc/viewonce-probe.md`; fresh private temporary profile and local rotating QR page only. Does not change or restart production nchat. | [1675d36e](https://github.com/YeoBL/nchat/commit/1675d36e) | Independent source review, race tests and static checks pass. Live experimental Android-companion registration reached the QR stage, but repeated phone scans failed; no Paired/Connected event, no paired-device row, and pairing timed out. The test stopped; no media was downloaded/opened and no read/played request was issued. Delivery feasibility remains **unverified**, not a working view-once viewer. Normal library linking/app-state/delivery traffic still occurs. No private profile, QR, contact data or runtime output is tracked. |
 
 ### View-once preview opt-in — 21 October 2026
 
