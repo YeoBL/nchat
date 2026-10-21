@@ -187,8 +187,15 @@ func TestChannelPaginationUsesRawAdvancingServerIDs(t *testing.T) {
 		t.Fatalf("invalid server IDs invented a cursor: %d", got)
 	}
 	params.Before = 0
+	if got := channelPostsCursor(messages[:49], params); got != 152 {
+		t.Fatalf("short service page lost older history: %d", got)
+	}
+	if got := channelPostsCursor(nil, params); got != 0 {
+		t.Fatalf("empty final page offered older history: %d", got)
+	}
+	params.Before = 152
 	if got := channelPostsCursor(messages[:49], params); got != 0 {
-		t.Fatalf("short final page offered older history: %d", got)
+		t.Fatalf("nonprogressing short page offered older history: %d", got)
 	}
 }
 

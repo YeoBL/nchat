@@ -144,7 +144,7 @@ func channelPostsPage(jid types.JID, name, description string, count, before int
 		result.Items = append(result.Items, action("Open channel posts", "Read posts and open attachments", "open_chat", map[string]string{"chatId": jid.String()}, nil, false))
 	}
 	if before > 0 {
-		result.Items = append(result.Items, action("Load older posts", "Fetch the previous 50 posts", "channel_messages",
+		result.Items = append(result.Items, action("Load older posts", "Fetch an earlier page of posts", "channel_messages",
 			map[string]string{"channelId": jid.String(), "before": strconv.Itoa(before)}, nil, false))
 	}
 	if metaErr == nil && meta != nil && meta.ViewerMeta != nil &&
@@ -208,13 +208,10 @@ func channelHistoryImporter(handler *WmEventHandler) WmEventHandler {
 }
 
 func channelPostsCursor(messages []*types.NewsletterMessage, params *whatsmeow.GetNewsletterMessagesParams) int {
-	if len(messages) < params.Count {
-		return 0
-	}
 	before := 0
 	for _, message := range messages {
-		// Deleted/unsupported posts still advance pagination. Never offer a cursor
-		// that repeats this page when the service ignores its requested position.
+		// Short pages are not an end marker: WhatsApp may cap the returned count.
+		// Deleted/unsupported posts still advance; empty/nonprogressing pages stop.
 		if message == nil || message.MessageServerID <= 0 || (params.Before > 0 && message.MessageServerID >= params.Before) {
 			continue
 		}
