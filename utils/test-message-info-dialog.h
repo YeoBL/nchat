@@ -118,6 +118,17 @@ static void TestMessageInfoDialog()
       dialog.UpdateList();
       assert(dialog.contains(L"Read by - 0") && dialog.contains(L"Not read yet."));
     }
+    else
+    {
+      // Actual production receipt-cache wording: missing historical details are
+      // unknown, not a positive claim that recipients have not read anything.
+      protocol->request->onResult({{}, "WhatsApp: recorded receipts only. Missing entries/times are unknown, not proof of unread or undelivered. Older history may be incomplete."});
+      dialog.UpdateList();
+      assert(dialog.contains(L"No receipts recorded.") && !dialog.contains(L"Not read yet."));
+      protocol->request->onResult({{{"reader", 0, 200}}, "Older unread state is unknown, not proof of undelivered."});
+      dialog.UpdateList();
+      assert(dialog.contains(L"Read by - 1") && dialog.contains(L"Delivered to - 1") && !dialog.contains(L"Not read yet."));
+    }
     dialog.OnBack();
     assert(!dialog.m_Running);
   }

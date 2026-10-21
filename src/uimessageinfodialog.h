@@ -31,7 +31,9 @@ class UiMessageInfoDialog : public UiListDialog
   {
     const auto lower = StrUtil::ToLower(note);
     if (lower.find("timed out") != std::string::npos) return "Request timed out. Retry.";
-    if (lower.find("not been read") != std::string::npos || lower.find("unread") != std::string::npos)
+    // Only a positive service statement establishes unread. The WhatsApp cache
+    // note explicitly says unknown entries are NOT proof of unread.
+    if (lower.find("telegram reports this message has not been read yet") != std::string::npos)
       return "Not read yet.";
     if (lower.find("too old") != std::string::npos) return "Read details have expired.";
     if (lower.find("eligibility") != std::string::npos || lower.find("chat type") != std::string::npos ||
