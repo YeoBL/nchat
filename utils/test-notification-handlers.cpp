@@ -39,6 +39,16 @@ bool SysUtil::RunCommand(const std::string& command, std::string*)
 static int bells = 0, clears = 0;
 static bool badgeVisible = false, badgeWriteFails = false;
 static bool liveDock = false;
+class ModalReadProtocol : public ReceiptTestProtocol
+{
+public:
+  int reads = 0;
+  void SendRequest(std::shared_ptr<RequestMessage> request) override
+  {
+    assert(request->GetMessageType() == MarkMessageReadRequestType);
+    ++reads;
+  }
+};
 UiView::UiView(UiModel*) {}
 UiView::~UiView() {}
 void UiView::TerminalBell() { ++bells; }
@@ -114,6 +124,56 @@ int main(int argc, char** argv)
   UiConfig::SetBool("online_status_dynamic", false);
   UiConfig::SetBool("typing_status_share", false);
   UiConfig::SetNum("auto_select_chat_timeout_sec", 0);
+  {
+    UiModel::Impl model(nullptr);
+    const std::string profile = "WhatsAppMd_channel_metadata_test";
+    ChatInfo existing;
+    existing.id = "existing@g.us"; existing.isPinned = true; existing.isArchived = true;
+    existing.lastMessageTime = 12345;
+    model.m_ChatInfos[profile][existing.id] = existing;
+    model.m_ChatVec = {{profile, existing.id}};
+    const auto order = model.m_ChatVec;
+    const auto mute = [&](const std::string& id, const std::string& source)
+    {
+      auto event = std::make_shared<UpdateMuteNotify>(source);
+      event->success = true; event->chatId = id; event->isMuted = true;
+      model.MessageHandler(event);
+    };
+    mute("known-later@newsletter", profile);
+    assert(model.m_ChatInfos[profile]["known-later@newsletter"].id == "known-later@newsletter");
+    assert(model.m_ChatInfos[profile]["known-later@newsletter"].isMuted && model.m_ChatVec == order);
+    const auto& preserved = model.m_ChatInfos[profile][existing.id];
+    assert(preserved.isPinned && preserved.isArchived && preserved.lastMessageTime == existing.lastMessageTime);
+    mute("unknown@g.us", profile);
+    mute("unknown@newsletter", "Telegram_channel_metadata_test");
+    assert(!model.m_ChatInfos[profile].count("unknown@g.us"));
+    assert(!model.m_ChatInfos["Telegram_channel_metadata_test"].count("unknown@newsletter"));
+    model.GotoChat({profile, "known-later@newsletter"}, true);
+    assert(model.m_ChatInfos[profile]["known-later@newsletter"].isMuted);
+  }
+  {
+    // Covered history is still drawn on resize/focus. Exercise the production
+    // read handler for every modal kind, including its real request dispatch.
+    UiModel::Impl model(nullptr);
+    auto service = std::make_shared<ModalReadProtocol>();
+    const auto profile = service->GetProfileId();
+    model.m_Protocols[profile] = service;
+    model.m_CurrentChat = {profile, "covered"};
+    model.m_CurrentChatIndex = 0;
+    model.m_TerminalActive = true;
+    ChatMessage unread;
+    unread.id = "covered-unread"; unread.senderId = "sender";
+    model.m_Messages[profile]["covered"][unread.id] = unread;
+    for (bool* active : {&model.m_ListDialogActive, &model.m_MessageDialogActive, &model.m_FileListDialogActive})
+    {
+      *active = true;
+      model.MarkRead(profile, "covered", unread.id, true);
+      assert(service->reads == 0 && !model.m_Messages[profile]["covered"][unread.id].isRead);
+      *active = false;
+    }
+    model.MarkRead(profile, "covered", unread.id, true);
+    assert(service->reads == 1 && model.m_Messages[profile]["covered"][unread.id].isRead);
+  }
   {
     setenv("NCHAT_NO_AUTO_SELECT", "1", 1);
     UiModel::Impl model(nullptr);

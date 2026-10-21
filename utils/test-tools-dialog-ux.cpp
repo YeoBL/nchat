@@ -112,9 +112,29 @@ void CheckFocusAndExcerpts(UiModel& model, const std::shared_ptr<FakeProtocol>& 
   {
     UiClientActionDialog::Page preview;
     preview.result.text = item.detail;
+    preview.focusText = true;
+    preview.result.items.push_back(item);
     UiDialogParams params(&model, "Full preview", 0.8, 0.7);
     UiClientActionDialog dialog(params, preview, false);
     assert(dialog.m_Items.size() >= 200 && "Full-message preview must remain complete and scrollable");
+    assert(dialog.m_Index == 0 && "Full previews must focus the text beginning, not the actions below it");
+    Key("Long synthetic detail line 0", "cancel");
+    dialog.Run();
+    assert(input.empty() && "The initial preview viewport must display the first text line");
+  }
+  {
+    auto request = std::make_shared<ClientActionRequest>();
+    request->operation = "local.message";
+    UiDialogParams params(&model, "Fetched preview", 0.8, 0.7);
+    auto preview = page.result;
+    preview.text = "FIRST PREVIEW LINE\n" + item.detail;
+    UiClientActionDialog dialog(params, {}, true, protocol, request,
+      [preview](const std::string&, const std::map<std::string, std::string>&,
+        std::function<void(ClientActionResult)> done) { done(preview); return true; });
+    assert(dialog.OnTimer() && dialog.m_Index == 0);
+    Key("FIRST PREVIEW LINE", "cancel");
+    dialog.Run();
+    assert(input.empty());
   }
 }
 

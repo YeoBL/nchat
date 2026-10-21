@@ -79,7 +79,8 @@ struct FakeProtocol : Protocol
 {
   std::vector<MessageType> requests;
   std::string GetProfileId() const override { return Profile; }
-  std::string GetProfileDisplayName() const override { return "Offline test"; }
+  // Real providers return an empty display name until the user names a profile.
+  std::string GetProfileDisplayName() const override { return ""; }
   bool HasFeature(ProtocolFeature) const override { return false; }
   bool IsGroupChat(const std::string&) const override { return false; }
   std::string GetSelfId() const override { return "self"; }
@@ -142,13 +143,24 @@ struct HistoryProtocol : FakeProtocol
 {
   const std::string profile = "WhatsAppMd_offline_history_test";
   std::vector<std::shared_ptr<ClientActionRequest>> historyRequests;
+  int menus = 0;
   std::string GetProfileId() const override { return profile; }
+  std::string GetProfileDisplayName() const override { return ""; }
   void SendRequest(std::shared_ptr<RequestMessage> request) override
   {
     assert(request->GetMessageType() != SendMessageRequestType &&
       request->GetMessageType() != MarkMessageReadRequestType);
     if (request->GetMessageType() != ClientActionRequestType) return;
     auto action = std::static_pointer_cast<ClientActionRequest>(request);
+    assert(action->params.at("profile") == profile);
+    if (action->operation == "menu")
+    {
+      ++menus;
+      ClientActionResult result;
+      result.title = "Synthetic WhatsApp account tools";
+      action->onResult(result);
+      return;
+    }
     assert(action->operation == "history_request");
     historyRequests.push_back(action);
     ClientActionResult result;
@@ -430,34 +442,81 @@ int main()
     MessageCache::AddProfile(history->profile, false, 1, false, false);
     ChatMessage target;
     target.id = "selected"; target.timeSent = 10099;
+    target.text = "synthetic-cross-account-history-target";
+    target.isRead = false;
     ChatMessage sameSecond = target;
     sameSecond.id = "same-second"; sameSecond.timeSent = 10999;
+    sameSecond.text = "Different synthetic message";
     ChatMessage later = target;
     later.id = "later-anchor"; later.timeSent = 12099; later.isOutgoing = true;
+    later.text = "Later anchor only";
     later.senderId = "self";
     ChatMessage localGroupEvent = target;
     localGroupEvent.id = "11"; localGroupEvent.timeSent = 11050;
+    localGroupEvent.text = "Local group event";
     MessageCache::AddMessages(history->profile, "history-chat", "", {target, sameSecond, localGroupEvent, later});
     std::vector<ChatMessage> stored;
     for (int i = 0; i < 100 && !MessageCache::GetOneMessage(history->profile, "history-chat", later.id, stored); ++i)
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     assert(!stored.empty());
+    assert(resizeterm(24, 80) != ERR); // Match the user's real Screen viewport.
+    {
+      setenv("NCHAT_NO_AUTO_SELECT", "1", 1);
+      UiModel blank;
+      unsetenv("NCHAT_NO_AUTO_SELECT");
+      Populate(blank, protocol);
+      blank.AddProtocol(history);
+      const auto beforeChat = Chat(blank);
+      assert(blank.GetCurrentChatIndexLocked() < 0);
+      Choose("Choose account", "Choose account");
+      // Require the friendly title with following padding. The raw profile ID
+      // in the detail has an underscore, so it cannot satisfy this assertion.
+      input.push_back({"Telegram ", 0});
+      Choose("WhatsApp ", "WhatsApp");
+      Key("Synthetic WhatsApp account tools", "cancel");
+      Run(blank, "client_actions");
+      assert(history->menus == 1 && history->historyRequests.empty());
+      assert(Chat(blank) == beforeChat && blank.GetCurrentChatIndexLocked() < 0);
+      blank.Cleanup();
+    }
     UiModel model;
-    model.AddProtocol(history); model.Init();
+    Populate(model, protocol);
+    model.AddProtocol(history);
+    assert(Chat(model) == "alpha"); // Remain on the unrelated Telegram chat.
+    input.push_back({"Message contains", 0});
+    Text(target.text);
+    Key("", "ok");
+    Choose("Search results", target.text);
+    Choose("Message preview", "Recover message details");
+    Choose("Review: Recover message details", "Confirm: Recover message details");
+    Key("Synthetic history requested", "cancel");
+    Run(model, "global_search");
+    assert(Chat(model) == "alpha" && history->historyRequests.size() == 1);
+    auto crossChat = history->historyRequests.front()->params;
+    assert(crossChat.at("profile") == history->profile && crossChat.at("chatId") == "history-chat");
+    assert(crossChat.at("targetMsgId") == target.id && crossChat.at("msgId") == later.id);
+    stored.clear();
+    assert(MessageCache::GetOneMessage(history->profile, "history-chat", target.id, stored) && !stored.front().isRead);
     const std::map<std::string, std::string> values = {{"profile", history->profile},
-      {"chatId", "history-chat"}, {"msgId", target.id}, {"timeSent", std::to_string(target.timeSent)}};
+      {"chatId", "history-chat"}, {"msgId", target.id}, {"timeSent", "999999999"}}; // Stale UI metadata is not authoritative.
     Key("Synthetic history requested", "cancel");
     model.OnKeyClientActions("local.whatsapp.history", values);
-    assert(input.empty() && history->historyRequests.size() == 1);
-    const auto& sent = history->historyRequests.front()->params;
+    assert(input.empty() && history->historyRequests.size() == 2);
+    const auto& sent = history->historyRequests.back()->params;
     assert(sent.at("msgId") == later.id && sent.at("timeSent") == "12099" && sent.at("isOutgoing") == "1");
     assert(sent.at("targetMsgId") == target.id && sent.at("targetTimeSent") == "10099");
     auto noAnchor = values;
     noAnchor["msgId"] = later.id; noAnchor["timeSent"] = "12099";
     Key("No later cached message", "cancel");
     model.OnKeyClientActions("local.whatsapp.history", noAnchor);
-    assert(input.empty() && history->historyRequests.size() == 1);
+    assert(input.empty() && history->historyRequests.size() == 2);
+    auto unloaded = values;
+    unloaded["profile"] = "WhatsAppMd_unloaded";
+    Key("This WhatsApp account is not loaded", "cancel");
+    model.OnKeyClientActions("local.whatsapp.history", unloaded);
+    assert(input.empty() && history->historyRequests.size() == 2 && Chat(model) == "alpha");
     model.Cleanup();
+    assert(resizeterm(45, 140) != ERR);
   }
 
   // Editing a sent message is a temporary composer mode. Cancel, save, cloud

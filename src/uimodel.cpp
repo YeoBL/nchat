@@ -870,6 +870,10 @@ void UiModel::Impl::ResetMessageOffset()
 void UiModel::Impl::MarkRead(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_MsgId,
                              bool p_WasUnread)
 {
+  // Modal tools may redraw the covered history on focus/resize. Seeing that
+  // background redraw is not an instruction to read the hidden conversation.
+  if (m_ListDialogActive || m_MessageDialogActive || m_FileListDialogActive) return;
+
   // Generally only mark read if message was unread, except if protocol needs to know every view
   const bool markReadEveryView = HasProtocolFeature(p_ProfileId, FeatureMarkReadEveryView);
   if (!markReadEveryView && !p_WasUnread) return;
@@ -2304,7 +2308,20 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         bool isMuted = updateMuteNotify->isMuted;
         std::string chatId = updateMuteNotify->chatId;
         LOG_TRACE("mute notify %s is %s", chatId.c_str(), (isMuted ? "muted" : "unmuted"));
-        if (!m_ChatInfos[profileId].count(chatId)) break;
+        if (!m_ChatInfos[profileId].count(chatId))
+        {
+          // Channel browsing can learn authoritative mute state before a
+          // channel enters the chat list. Keep only that metadata so a later
+          // explicit Open chat does not invent an unmuted default.
+          const std::string suffix = "@newsletter";
+          if (profileId.rfind("WhatsApp", 0) == 0 && chatId.size() > suffix.size() &&
+              chatId.compare(chatId.size() - suffix.size(), suffix.size(), suffix) == 0)
+          {
+            auto& info = m_ChatInfos[profileId][chatId];
+            info.id = chatId; info.isMuted = isMuted;
+          }
+          break;
+        }
 
         m_ChatInfos[profileId][chatId].isMuted = isMuted;
         if (isMuted && !UiConfig::GetBool("muted_notify_unread"))
@@ -5819,11 +5836,14 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
     auto& model = GetImpl();
     chat = model.GetCurrentChat();
+    if (model.GetCurrentChatIndex() < 0) chat = {};
     const auto profiles = model.GetProtocols();
     if (!Value(p_Params, "profile").empty()) chat.first = Value(p_Params, "profile");
     if (!Value(p_Params, "chatId").empty()) chat.second = Value(p_Params, "chatId");
     auto found = profiles.find(chat.first);
-    if (found == profiles.end() && !profiles.empty()) found = profiles.begin();
+    // A blank startup may choose the sole account, but never an arbitrary
+    // account when several are loaded or when an explicit profile is missing.
+    if (found == profiles.end() && chat.first.empty() && profiles.size() == 1) found = profiles.begin();
     if (found != profiles.end()) { protocol = found->second; chat.first = found->first; }
     p_Params["profile"] = chat.first;
     p_Params["chatId"] = chat.second;
@@ -5858,7 +5878,6 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       }
     }
   }
-  if (!protocol) { MessageDialog("Tools", "Connect an account before opening tools.", 0.7, 5); return; }
   const Params context = p_Params;
   auto selected = std::make_shared<std::set<std::string>>();
   const auto makeItem = [context](ClientActionResult& page, const std::string& title,
@@ -5868,6 +5887,7 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
     ClientActionItem item;
     item.title = title; item.operation = operation; item.params = context;
     for (const auto& value : values) item.params[value.first] = value.second;
+    if (operation == "local.message") item.params["_focusText"] = "1";
     if (operation == "local.bulk.toggle" || operation == "local.bulk.all" || operation == "local.bulk.none" ||
         operation == "local.bulk.delete" || operation == "local.folder.toggle") item.params["_replacePage"] = "1";
     item.detail = detail; item.fields = fields; item.confirm = confirm;
@@ -5876,21 +5896,60 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
   auto dispatch = [this, context, chat, protocol, bulkMessages, selected, makeItem](
     const std::string& operation, const Params& values, std::function<void(ClientActionResult)> done) -> bool
   {
+    if (operation.rfind("local.", 0) != 0)
+    {
+      // Account selection changes only this request's destination. It never
+      // selects a conversation or falls back to a different loaded account.
+      const auto profiles = GetProtocols();
+      const auto service = profiles.find(Value(values, "profile"));
+      if (service == profiles.end())
+      {
+        ClientActionResult result;
+        result.success = false; result.title = "Account unavailable";
+        result.text = "Choose a loaded account in Tools → Choose account.";
+        done(std::move(result));
+      }
+      else
+      {
+        auto request = std::make_shared<ClientActionRequest>();
+        request->operation = operation; request->params = values; request->onResult = std::move(done);
+        service->second->SendRequest(request);
+      }
+      return true;
+    }
     if (operation == "local.whatsapp.history")
     {
       ClientActionResult result;
       result.title = "Recover message details";
       result.success = false;
-      int64_t selectedTime = 0;
-      try { selectedTime = std::stoll(Value(values, "timeSent")); } catch (...) {}
+      const auto profile = Value(values, "profile");
+      const auto targetChat = Value(values, "chatId");
+      const auto targetId = Value(values, "msgId");
+      const auto profiles = GetProtocols();
+      const auto service = profiles.find(profile);
+      if (profile.rfind("WhatsApp", 0) != 0 || service == profiles.end())
+      {
+        result.text = "This WhatsApp account is not loaded. Connect it before requesting message recovery.";
+        done(std::move(result));
+        return true;
+      }
+      std::vector<ChatMessage> targets;
+      if (targetChat.empty() || targetId.empty() ||
+          !MessageCache::GetOneMessage(profile, targetChat, targetId, targets) || targets.empty())
+      {
+        result.text = "The selected message is no longer available in this account's local cache.";
+        done(std::move(result));
+        return true;
+      }
+      const auto& target = targets.front();
+      const int64_t selectedTime = target.timeSent;
       ChatMessage anchor;
       // WhatsApp returns messages BEFORE an anchor, not including it. Use a
       // real later cached message, never an invented ID or the selected ID.
       // Ignore the cache's subsecond tie-breaker: provider timestamps are seconds.
-      if (chat.first.rfind("WhatsApp", 0) != 0 || Value(values, "chatId") != chat.second ||
-          Value(values, "msgId").empty() || selectedTime < 1000 ||
+      if (selectedTime < 1000 ||
           selectedTime > INT64_MAX - 999 ||
-          !MessageCache::FindNewerMessage(chat.first, chat.second, selectedTime / 1000 * 1000 + 999, anchor))
+          !MessageCache::FindNewerMessage(profile, targetChat, selectedTime / 1000 * 1000 + 999, anchor))
       {
         result.text = "No later cached message is available as an anchor. Load a newer message in this chat and retry. WhatsApp only supplies history before an anchor; complete receipt and voter recovery is not guaranteed.";
         done(std::move(result));
@@ -5899,14 +5958,16 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       auto request = std::make_shared<ClientActionRequest>();
       request->operation = "history_request";
       request->params = values;
-      request->params["targetMsgId"] = Value(values, "msgId");
-      request->params["targetTimeSent"] = Value(values, "timeSent");
+      request->params["profile"] = profile;
+      request->params["chatId"] = targetChat;
+      request->params["targetMsgId"] = target.id;
+      request->params["targetTimeSent"] = std::to_string(selectedTime);
       request->params["msgId"] = anchor.id;
       request->params["timeSent"] = std::to_string(anchor.timeSent);
       request->params["isOutgoing"] = anchor.isOutgoing ? "1" : "0";
       request->params["senderId"] = anchor.senderId;
       request->onResult = std::move(done);
-      protocol->SendRequest(request);
+      service->second->SendRequest(request);
       return true;
     }
     if (operation == "local.record.voice" || operation == "local.record.video")
@@ -5940,12 +6001,12 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       done(std::move(result));
       return true;
     }
-    if (operation.rfind("local.", 0) != 0) return false;
     ClientActionResult page;
     page.title = "Tools";
     if (operation == "local.menu")
     {
-      page.title = "Tools · " + GetProfileDisplayName(chat.first);
+      const auto profiles = GetProtocols();
+      page.title = chat.first.empty() ? "Tools" : "Tools · " + GetProfileDisplayName(chat.first);
       makeItem(page, "Search messages across chats", "local.search.run", {{"_quickForm", "1"}},
         "Search cached history without marking it read", {{"query", "Message contains (blank shows recent messages)", ""}});
       makeItem(page, "Chat folders", "local.folders", {}, "Local lists, shared across your nchat accounts");
@@ -5953,7 +6014,10 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       makeItem(page, "Search saved audio transcripts", "local.transcripts", {{"_quickForm", "1"}}, "Search on-device transcripts without uploading audio",
         {{"query", "Transcript contains (blank shows recent transcripts)", ""}});
       makeItem(page, "Transcription status", "local.transcription.status", {}, "Check running jobs, completed transcripts and errors");
-      makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
+      if (profiles.size() > 1 || !protocol)
+        makeItem(page, "Choose account", "local.accounts", {}, "Open account tools without opening or reading a chat");
+      if (protocol)
+        makeItem(page, "Account tools", "menu", {}, "Topics, threads, stories, polls and service-specific actions");
       if (!chat.second.empty())
       {
         makeItem(page, "Select multiple messages", "local.bulk", {}, "Copy, bookmark, forward or delete loaded messages");
@@ -5973,6 +6037,31 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       }
       std::unique_lock<owned_mutex> lock(m_ModelMutex);
       if (!GetImpl().GetLocalFeatures().GetError().empty()) page.text = GetImpl().GetLocalFeatures().GetError();
+    }
+    else if (operation == "local.accounts")
+    {
+      page.title = "Choose account";
+      page.text = "Choose an account's tools. Your current chat will not change.";
+      const auto profiles = GetProtocols();
+      std::vector<std::pair<std::string, std::string>> choices;
+      for (const auto& profile : profiles)
+      {
+        auto name = profile.second->GetProfileDisplayName();
+        if (name.empty()) name = GetProfileDisplayName(profile.first);
+        if (name.empty()) name = StrUtil::GetProtocolName(profile.first);
+        if (name == "WhatsAppMd") name = "WhatsApp";
+        choices.push_back({name, profile.first});
+      }
+      std::sort(choices.begin(), choices.end());
+      for (const auto& profile : choices)
+      {
+        Params account = {{"profile", profile.second}};
+        if (profile.second != Value(context, "profile"))
+          for (const auto& key : {"chatId", "chatName", "msgId", "senderId", "timeSent", "isOutgoing", "text", "fileInfo", "draft"})
+            account[key] = "";
+        makeItem(page, profile.first, "menu", account, "Account tools · " + profile.second);
+      }
+      if (choices.empty()) page.text = "No accounts are loaded. Connect an account to use its tools.";
     }
     else if (operation == "local.transcripts") page = FeatureMedia::SearchTranscripts(Value(values, "query"));
     else if (operation == "local.search.filters")
@@ -6048,6 +6137,10 @@ void UiModel::OnKeyClientActions(const std::string& p_Operation,
       makeItem(page, "Copy message", "local.copy", values);
       if (!Value(values, "msgId").empty() && !Value(values, "chatId").empty())
         makeItem(page, "Bookmark / unbookmark", "local.bookmark.toggle", values);
+      if (Value(values, "profile").rfind("WhatsApp", 0) == 0 &&
+          !Value(values, "msgId").empty() && !Value(values, "chatId").empty())
+        makeItem(page, "Recover message details", "local.whatsapp.history", values,
+          "Ask your phone for supplied receipts and poll votes without opening or reading this chat; recovery is not guaranteed.", {}, true);
       if (!Value(values, "path").empty() && FileUtil::Exists(Value(values, "path"))) page.filePath = Value(values, "path");
       if (!Value(values, "fileInfo").empty())
       {

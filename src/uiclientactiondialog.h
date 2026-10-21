@@ -231,6 +231,7 @@ public:
     std::map<std::string, std::string> context;
     std::wstring filter;
     int index = -1;
+    bool focusText = false;
   };
 
   UiClientActionDialog(const UiDialogParams& params, const Page& page, bool canBack,
@@ -240,8 +241,13 @@ public:
   {
     m_FilterStr = page.filter;
     m_Index = page.index;
-    if (request && protocol)
+    if (request && (protocol || dispatch))
     {
+      const auto focus = request->params.find("_focusText");
+      m_Page.focusText = (focus != request->params.end() && focus->second == "1") ||
+        request->operation == "local.message" || request->operation == "tg.message" ||
+        request->operation == "message_details";
+      request->params.erase("_focusText");
       request->params.erase("_replacePage");
       request->params.erase("_quickForm");
       m_Page.context = request->params;
@@ -256,10 +262,19 @@ public:
       };
       m_Pending = true;
       if (!dispatch || !dispatch(request->operation, request->params, request->onResult))
-        protocol->SendRequest(request);
+      {
+        if (protocol) protocol->SendRequest(request);
+        else
+        {
+          ClientActionResult unavailable;
+          unavailable.success = false; unavailable.title = "Account unavailable";
+          unavailable.text = "Choose a loaded account before using this tool.";
+          request->onResult(std::move(unavailable));
+        }
+      }
     }
     UpdateList();
-    if (!request && page.index < 0) SelectFirstAction();
+    if (!request && page.index < 0 && !page.focusText) SelectFirstAction();
   }
 
   Choice SelectedChoice() const { return m_Choice; }
@@ -279,7 +294,7 @@ public:
     const std::function<void(const std::string&)>& openFile = {},
     const Dispatcher& dispatch = {}, const OpenAction& openAction = {})
   {
-    if (!model || !protocol) return;
+    if (!model || (!protocol && !dispatch)) return;
     std::vector<Page> history;
     Page page;
     auto request = std::make_shared<ClientActionRequest>();
@@ -380,7 +395,7 @@ protected:
       m_FilterStr.clear();
       m_Index = 0;
       UpdateList();
-      SelectFirstAction();
+      if (!m_Page.focusText) SelectFirstAction();
       UpdateFooter();
       return true;
     }
