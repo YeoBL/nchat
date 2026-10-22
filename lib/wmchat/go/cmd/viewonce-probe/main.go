@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,9 +49,10 @@ func (a *aliases) String() string         { return "" } // Never echo supplied i
 func (a *aliases) Set(value string) error { *a = append(*a, value); return nil }
 
 type options struct {
-	dir      string
-	senders  aliases
-	lifetime time.Duration
+	dir          string
+	senders      aliases
+	lifetime     time.Duration
+	loginControl bool
 }
 
 func parseOptions(args []string) (options, error) {
@@ -60,8 +62,9 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.dir, "probe-dir", "", "New private nchat-viewonce-probe-* directory under the system temporary directory")
 	fs.Var(&o.senders, "sender", "Allowed sender JID; repeat for phone/LID aliases")
 	fs.DurationVar(&o.lifetime, "lifetime", 20*time.Minute, "Bounded experiment lifetime")
-	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || len(o.senders) == 0 || o.lifetime < time.Minute || o.lifetime > time.Hour {
-		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH --sender JID [--sender ALIAS] [--lifetime 20m]")
+	fs.BoolVar(&o.loginControl, "login-control", false, "Standard web companion login only; disconnect immediately after authentication")
+	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (!o.loginControl && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
+		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control) [--lifetime 20m]")
 	}
 	return o, nil
 }
@@ -201,7 +204,7 @@ func (discardSignalLog) Warning(string, string) {}
 func (discardSignalLog) Error(string, string)   {}
 func (discardSignalLog) Configure(string)       {}
 
-func configureClient(device *store.Device) *whatsmeow.Client {
+func configureClient(device *store.Device, loginControl bool) *whatsmeow.Client {
 	var signalLogger signalLog.Loggable = discardSignalLog{}
 	signalLog.Setup(&signalLogger)
 	store.BaseClientPayload = proto.Clone(store.BaseClientPayload).(*waWa6.ClientPayload)
@@ -210,6 +213,12 @@ func configureClient(device *store.Device) *whatsmeow.Client {
 	store.DeviceProps = proto.Clone(store.DeviceProps).(*waCompanionReg.DeviceProps)
 	store.DeviceProps.Os = proto.String("nchat isolated delivery test")
 	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_ANDROID_PHONE.Enum()
+	if loginControl {
+		store.BaseClientPayload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
+		store.BaseClientPayload.WebInfo = &waWa6.ClientPayload_WebInfo{WebSubPlatform: waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum()}
+		store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
+		store.DeviceProps.Os = proto.String("nchat isolated login control")
+	}
 	store.DeviceProps.RequireFullSync = proto.Bool(false)
 	store.DeviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{}
 	client := whatsmeow.NewClient(device, waLog.Noop)
@@ -220,6 +229,33 @@ func configureClient(device *store.Device) *whatsmeow.Client {
 	// Normal reconnect is needed to complete QR pairing. The parent context
 	// bounds it to this experiment's lifetime; stopping never logs out a device.
 	return client
+}
+
+// Only fixed categories/numeric codes escape this boundary, never raw protocol
+// events or errors, which may contain account identities and authentication data.
+func connectionDiagnostic(event any) string {
+	switch event := event.(type) {
+	case *events.PairSuccess:
+		return "pair-success"
+	case *events.PairError:
+		return "pair-error"
+	case *events.ConnectFailure:
+		return "connect-failure " + strconv.Itoa(int(event.Reason))
+	case *events.LoggedOut:
+		return "logged-out " + strconv.Itoa(int(event.Reason))
+	case *events.TemporaryBan:
+		return "temporary-ban " + strconv.Itoa(int(event.Code))
+	case *events.ClientOutdated:
+		return "client-outdated"
+	case *events.QRScannedWithoutMultidevice:
+		return "scanned-without-multidevice"
+	case *events.StreamError:
+		if code, err := strconv.Atoi(event.Code); err == nil && code >= 0 && code <= 999 {
+			return "stream-error " + strconv.Itoa(code)
+		}
+		return "stream-error"
+	}
+	return ""
 }
 
 type qrState struct {
@@ -321,7 +357,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	if container.Upgrade(ctx) != nil {
 		return errors.New("could not initialize isolated session database")
 	}
-	client := configureClient(container.NewDevice())
+	client := configureClient(container.NewDevice(), o.loginControl)
 	client.BackgroundEventCtx = ctx
 	defer func() { cancel(); client.Disconnect() }()
 	state := &qrState{status: "pairing"}
@@ -340,17 +376,30 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	defer func() { cancel(); server.Close() }()
 	fmt.Fprintln(statusOutput, "QR page: http://"+listener.Addr().String()+"/"+token+"/")
 	var outputMu sync.Mutex
+	controlConnected := make(chan struct{}, 1)
 	notBefore := time.Now().UTC()
 	writeStatus := func(value string) { outputMu.Lock(); defer outputMu.Unlock(); fmt.Fprintln(statusOutput, value) }
 	client.AddEventHandler(func(event any) {
+		if category := connectionDiagnostic(event); category != "" {
+			writeStatus("Connection event: " + category)
+		}
 		switch event.(type) {
 		case *events.Connected:
 			state.set("connected", nil)
 			os.Remove(filepath.Join(dir, "qr.png"))
 			writeStatus("Connected")
+			if o.loginControl {
+				select {
+				case controlConnected <- struct{}{}:
+				default:
+				}
+			}
 		case *events.Disconnected:
 			state.set("disconnected", nil)
 			writeStatus("Disconnected")
+		}
+		if o.loginControl {
+			return
 		}
 		if record, ok := eventMetadata(event, allowed, notBefore); ok {
 			outputMu.Lock()
@@ -367,6 +416,9 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	}
 	for {
 		select {
+		case <-controlConnected:
+			writeStatus("Standard login control passed; disconnecting isolated test")
+			return nil
 		case <-ctx.Done():
 			return nil
 		case item, ok := <-qr:
@@ -387,6 +439,13 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 				os.Remove(filepath.Join(dir, "qr.png"))
 				writeStatus("Paired")
 			default:
+				// QR channel errors themselves can contain private protocol data.
+				switch item.Event {
+				case "timeout", "error", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice", "passkey-request", "passkey-confirmation":
+					writeStatus("Pairing status: " + item.Event)
+				default:
+					writeStatus("Pairing status: unknown")
+				}
 				return errors.New("isolated pairing did not complete")
 			}
 		}

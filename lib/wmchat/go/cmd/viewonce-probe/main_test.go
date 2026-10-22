@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	signalLog "go.mau.fi/libsignal/logger"
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWa6"
@@ -26,7 +28,7 @@ import (
 func TestIsolatedCapabilities(t *testing.T) {
 	base, props, logger := store.BaseClientPayload, store.DeviceProps, signalLog.Logger
 	t.Cleanup(func() { store.BaseClientPayload, store.DeviceProps, signalLog.Logger = base, props, logger })
-	client := configureClient(&store.Device{})
+	client := configureClient(&store.Device{}, false)
 	if store.BaseClientPayload == base || store.DeviceProps == props ||
 		store.BaseClientPayload.GetUserAgent().GetPlatform() != waWa6.ClientPayload_UserAgent_ANDROID || store.BaseClientPayload.WebInfo != nil ||
 		store.DeviceProps.GetPlatformType() != waCompanionReg.DeviceProps_ANDROID_PHONE ||
@@ -40,6 +42,42 @@ func TestIsolatedCapabilities(t *testing.T) {
 	}
 	if _, ok := signalLog.Logger.(discardSignalLog); !ok {
 		t.Fatal("libsignal can print private protocol logs")
+	}
+	control := configureClient(&store.Device{}, true)
+	if store.BaseClientPayload.GetUserAgent().GetPlatform() != waWa6.ClientPayload_UserAgent_WEB ||
+		store.BaseClientPayload.GetWebInfo().GetWebSubPlatform() != waWa6.ClientPayload_WebInfo_WEB_BROWSER ||
+		store.DeviceProps.GetPlatformType() != waCompanionReg.DeviceProps_CHROME ||
+		store.DeviceProps.GetOs() != "nchat isolated login control" ||
+		control.QRClientType != whatsmeow.PairClientChrome ||
+		!control.ManualHistorySyncDownload || !control.DisableManualHistorySyncReceipt ||
+		control.AutomaticMessageRerequestFromPhone || control.EnableDecryptedEventBuffer || control.UseRetryMessageStore {
+		t.Fatal("normal login control changed registration or privacy limits")
+	}
+}
+
+func TestConnectionDiagnosticsNeverPrintPrivateFields(t *testing.T) {
+	private := "private-ID-key-phone-error"
+	raw := &waBinary.Node{Tag: private}
+	for _, fixture := range []struct {
+		event any
+		want  string
+	}{
+		{&events.PairSuccess{BusinessName: private}, "pair-success"},
+		{&events.PairError{BusinessName: private, Error: errors.New(private)}, "pair-error"},
+		{&events.ConnectFailure{Reason: 409, Message: private, Raw: raw}, "connect-failure 409"},
+		{&events.LoggedOut{Reason: 401}, "logged-out 401"},
+		{&events.TemporaryBan{Code: 101}, "temporary-ban 101"},
+		{&events.ClientOutdated{}, "client-outdated"},
+		{&events.QRScannedWithoutMultidevice{}, "scanned-without-multidevice"},
+		{&events.StreamError{Code: "515", Raw: raw}, "stream-error 515"},
+		{&events.StreamError{Code: private, Raw: raw}, "stream-error"},
+		{&events.StreamError{Code: "1234567890", Raw: raw}, "stream-error"},
+		{&events.Message{Message: &waE2E.Message{Conversation: &private}}, ""},
+		{nil, ""},
+	} {
+		if got := connectionDiagnostic(fixture.event); got != fixture.want {
+			t.Fatalf("unexpected diagnostic: %q", got)
+		}
 	}
 }
 
@@ -183,6 +221,10 @@ func TestArgumentsAreBoundedAndNeverEchoIdentity(t *testing.T) {
 	o, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--sender", "100@s.whatsapp.net"})
 	if err != nil || o.lifetime != 20*time.Minute {
 		t.Fatal("valid options rejected")
+	}
+	control, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--login-control"})
+	if err != nil || !control.loginControl || len(control.senders) != 0 {
+		t.Fatal("login-only control requires no private sender identity")
 	}
 	for _, args := range [][]string{{"--sender", "private-identity"}, {"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--sender", "private-identity", "--lifetime", "24h"}, {"--unexpected-private-identity"}} {
 		_, err := parseOptions(args)
