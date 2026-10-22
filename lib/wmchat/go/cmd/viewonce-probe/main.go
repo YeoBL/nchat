@@ -258,6 +258,33 @@ func connectionDiagnostic(event any) string {
 	return ""
 }
 
+// The server can end registration with 516 rather than 515. Pairing already
+// expects a disconnect, so the library's generic reconnect does not run there.
+// Only the new in-process pairing may request one explicit handoff; concurrent
+// callbacks may report the stream error before PairSuccess is dispatched.
+type pairHandoff struct {
+	sync.Mutex
+	paired, code516, used, connected bool
+}
+
+func (h *pairHandoff) restart(event any) bool {
+	h.Lock()
+	defer h.Unlock()
+	switch event := event.(type) {
+	case *events.PairSuccess:
+		h.paired = true
+	case *events.StreamError:
+		h.code516 = h.code516 || event.Code == "516"
+	case *events.Connected:
+		h.connected = true
+	}
+	if !h.paired || !h.code516 || h.used || h.connected {
+		return false
+	}
+	h.used = true
+	return true
+}
+
 type qrState struct {
 	sync.RWMutex
 	png    []byte
@@ -377,11 +404,16 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	fmt.Fprintln(statusOutput, "QR page: http://"+listener.Addr().String()+"/"+token+"/")
 	var outputMu sync.Mutex
 	controlConnected := make(chan struct{}, 1)
+	restartAfterPair := make(chan struct{}, 1)
+	var handoff pairHandoff
 	notBefore := time.Now().UTC()
 	writeStatus := func(value string) { outputMu.Lock(); defer outputMu.Unlock(); fmt.Fprintln(statusOutput, value) }
 	client.AddEventHandler(func(event any) {
 		if category := connectionDiagnostic(event); category != "" {
 			writeStatus("Connection event: " + category)
+		}
+		if o.loginControl != "web" && handoff.restart(event) {
+			restartAfterPair <- struct{}{}
 		}
 		switch event.(type) {
 		case *events.Connected:
@@ -416,6 +448,18 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	}
 	for {
 		select {
+		case <-restartAfterPair:
+			if ctx.Err() != nil {
+				return nil
+			}
+			if client.IsLoggedIn() {
+				continue
+			}
+			writeStatus("Retrying isolated connection once after paired stream-error 516")
+			client.Disconnect()
+			if client.ConnectContext(ctx) != nil {
+				return errors.New("isolated post-pair reconnect failed")
+			}
 		case <-controlConnected:
 			writeStatus("Login control passed; disconnecting isolated test")
 			return nil

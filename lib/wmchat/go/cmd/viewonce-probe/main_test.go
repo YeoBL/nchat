@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +80,52 @@ func TestConnectionDiagnosticsNeverPrintPrivateFields(t *testing.T) {
 		if got := connectionDiagnostic(fixture.event); got != fixture.want {
 			t.Fatalf("unexpected diagnostic: %q", got)
 		}
+	}
+}
+
+func TestPostPair516HandoffIsOneShotAndOrderIndependent(t *testing.T) {
+	var h pairHandoff
+	for _, event := range []any{&events.StreamError{Code: "515"}, &events.StreamError{Code: "401"}, &events.PairSuccess{}} {
+		if h.restart(event) {
+			t.Fatal("handoff requested without paired 516")
+		}
+	}
+	if !h.restart(&events.StreamError{Code: "516"}) {
+		t.Fatal("paired 516 did not request a handoff")
+	}
+	for i := 0; i < 3; i++ {
+		if h.restart(&events.StreamError{Code: "516"}) || h.restart(&events.PairSuccess{}) {
+			t.Fatal("duplicate event repeated handoff")
+		}
+	}
+	var reordered pairHandoff
+	if reordered.restart(&events.StreamError{Code: "516"}) || !reordered.restart(&events.PairSuccess{}) {
+		t.Fatal("reordered callback lost pairing requirement or handoff")
+	}
+	var connected pairHandoff
+	connected.restart(&events.PairSuccess{})
+	connected.restart(&events.Connected{})
+	if connected.restart(&events.StreamError{Code: "516"}) {
+		t.Fatal("authenticated connection was restarted")
+	}
+	var concurrent pairHandoff
+	var count atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if concurrent.restart(&events.PairSuccess{}) {
+				count.Add(1)
+			}
+			if concurrent.restart(&events.StreamError{Code: "516"}) {
+				count.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if count.Load() != 1 {
+		t.Fatal("concurrent callbacks did not request exactly one handoff")
 	}
 }
 
