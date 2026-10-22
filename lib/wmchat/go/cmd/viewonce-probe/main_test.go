@@ -222,9 +222,14 @@ func TestArgumentsAreBoundedAndNeverEchoIdentity(t *testing.T) {
 	if err != nil || o.lifetime != 20*time.Minute {
 		t.Fatal("valid options rejected")
 	}
-	control, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--login-control"})
-	if err != nil || !control.loginControl || len(control.senders) != 0 {
-		t.Fatal("login-only control requires no private sender identity")
+	for _, mode := range []string{"web", "android"} {
+		control, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--login-control", mode})
+		if err != nil || control.loginControl != mode || len(control.senders) != 0 {
+			t.Fatal("login-only control requires no private sender identity")
+		}
+	}
+	if _, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--login-control", "private-invalid-mode"}); err == nil || strings.Contains(err.Error(), "private-invalid-mode") {
+		t.Fatal("invalid login mode accepted or echoed")
 	}
 	for _, args := range [][]string{{"--sender", "private-identity"}, {"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--sender", "private-identity", "--lifetime", "24h"}, {"--unexpected-private-identity"}} {
 		_, err := parseOptions(args)

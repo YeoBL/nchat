@@ -52,7 +52,7 @@ type options struct {
 	dir          string
 	senders      aliases
 	lifetime     time.Duration
-	loginControl bool
+	loginControl string
 }
 
 func parseOptions(args []string) (options, error) {
@@ -62,9 +62,9 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.dir, "probe-dir", "", "New private nchat-viewonce-probe-* directory under the system temporary directory")
 	fs.Var(&o.senders, "sender", "Allowed sender JID; repeat for phone/LID aliases")
 	fs.DurationVar(&o.lifetime, "lifetime", 20*time.Minute, "Bounded experiment lifetime")
-	fs.BoolVar(&o.loginControl, "login-control", false, "Standard web companion login only; disconnect immediately after authentication")
-	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (!o.loginControl && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
-		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control) [--lifetime 20m]")
+	fs.StringVar(&o.loginControl, "login-control", "", "Login only: web or android; disconnect immediately after authentication")
+	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (o.loginControl != "" && o.loginControl != "web" && o.loginControl != "android") || (o.loginControl == "" && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
+		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control web|android) [--lifetime 20m]")
 	}
 	return o, nil
 }
@@ -357,7 +357,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	if container.Upgrade(ctx) != nil {
 		return errors.New("could not initialize isolated session database")
 	}
-	client := configureClient(container.NewDevice(), o.loginControl)
+	client := configureClient(container.NewDevice(), o.loginControl == "web")
 	client.BackgroundEventCtx = ctx
 	defer func() { cancel(); client.Disconnect() }()
 	state := &qrState{status: "pairing"}
@@ -388,7 +388,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 			state.set("connected", nil)
 			os.Remove(filepath.Join(dir, "qr.png"))
 			writeStatus("Connected")
-			if o.loginControl {
+			if o.loginControl != "" {
 				select {
 				case controlConnected <- struct{}{}:
 				default:
@@ -398,7 +398,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 			state.set("disconnected", nil)
 			writeStatus("Disconnected")
 		}
-		if o.loginControl {
+		if o.loginControl != "" {
 			return
 		}
 		if record, ok := eventMetadata(event, allowed, notBefore); ok {
@@ -417,7 +417,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	for {
 		select {
 		case <-controlConnected:
-			writeStatus("Standard login control passed; disconnecting isolated test")
+			writeStatus("Login control passed; disconnecting isolated test")
 			return nil
 		case <-ctx.Done():
 			return nil
