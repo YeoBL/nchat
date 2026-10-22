@@ -62,9 +62,9 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.dir, "probe-dir", "", "New private nchat-viewonce-probe-* directory under the system temporary directory")
 	fs.Var(&o.senders, "sender", "Allowed sender JID; repeat for phone/LID aliases")
 	fs.DurationVar(&o.lifetime, "lifetime", 20*time.Minute, "Bounded experiment lifetime")
-	fs.StringVar(&o.loginControl, "login-control", "", "Login only: web or android; disconnect immediately after authentication")
-	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (o.loginControl != "" && o.loginControl != "web" && o.loginControl != "android") || (o.loginControl == "" && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
-		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control web|android) [--lifetime 20m]")
+	fs.StringVar(&o.loginControl, "login-control", "", "Login only: web, android or android-qr9; disconnect immediately after authentication")
+	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (o.loginControl != "" && o.loginControl != "web" && o.loginControl != "android" && o.loginControl != "android-qr9") || (o.loginControl == "" && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
+		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control web|android|android-qr9) [--lifetime 20m]")
 	}
 	return o, nil
 }
@@ -204,7 +204,7 @@ func (discardSignalLog) Warning(string, string) {}
 func (discardSignalLog) Error(string, string)   {}
 func (discardSignalLog) Configure(string)       {}
 
-func configureClient(device *store.Device, loginControl bool) *whatsmeow.Client {
+func configureClient(device *store.Device, mode string) *whatsmeow.Client {
 	var signalLogger signalLog.Loggable = discardSignalLog{}
 	signalLog.Setup(&signalLogger)
 	store.BaseClientPayload = proto.Clone(store.BaseClientPayload).(*waWa6.ClientPayload)
@@ -213,7 +213,7 @@ func configureClient(device *store.Device, loginControl bool) *whatsmeow.Client 
 	store.DeviceProps = proto.Clone(store.DeviceProps).(*waCompanionReg.DeviceProps)
 	store.DeviceProps.Os = proto.String("nchat isolated delivery test")
 	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_ANDROID_PHONE.Enum()
-	if loginControl {
+	if mode == "web" {
 		store.BaseClientPayload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
 		store.BaseClientPayload.WebInfo = &waWa6.ClientPayload_WebInfo{WebSubPlatform: waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum()}
 		store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
@@ -223,6 +223,11 @@ func configureClient(device *store.Device, loginControl bool) *whatsmeow.Client 
 	store.DeviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{}
 	client := whatsmeow.NewClient(device, waLog.Noop)
 	client.QRClientType = whatsmeow.PairClientChrome
+	if mode == "android-qr9" {
+		// Current Baileys Android presets map to OTHER_WEB_CLIENT, not Chrome.
+		// This changes one registration field only; it is not a verified fix.
+		client.QRClientType = whatsmeow.PairClientOtherWebClient
+	}
 	client.ManualHistorySyncDownload, client.DisableManualHistorySyncReceipt = true, true
 	client.AutomaticMessageRerequestFromPhone, client.EnableDecryptedEventBuffer = false, false
 	client.UseRetryMessageStore = false
@@ -256,6 +261,14 @@ func connectionDiagnostic(event any) string {
 		return "stream-error"
 	}
 	return ""
+}
+
+func terminalLoginFailure(event any) bool {
+	switch event.(type) {
+	case *events.LoggedOut, *events.ConnectFailure, *events.ClientOutdated, *events.TemporaryBan, *events.StreamReplaced:
+		return true
+	}
+	return false
 }
 
 // The server can end registration with 516 rather than 515. Pairing already
@@ -384,7 +397,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	if container.Upgrade(ctx) != nil {
 		return errors.New("could not initialize isolated session database")
 	}
-	client := configureClient(container.NewDevice(), o.loginControl == "web")
+	client := configureClient(container.NewDevice(), o.loginControl)
 	client.BackgroundEventCtx = ctx
 	defer func() { cancel(); client.Disconnect() }()
 	state := &qrState{status: "pairing"}
@@ -404,6 +417,7 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	fmt.Fprintln(statusOutput, "QR page: http://"+listener.Addr().String()+"/"+token+"/")
 	var outputMu sync.Mutex
 	controlConnected := make(chan struct{}, 1)
+	loginFailed := make(chan struct{}, 1)
 	restartAfterPair := make(chan struct{}, 1)
 	var handoff pairHandoff
 	notBefore := time.Now().UTC()
@@ -411,6 +425,15 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	client.AddEventHandler(func(event any) {
 		if category := connectionDiagnostic(event); category != "" {
 			writeStatus("Connection event: " + category)
+		}
+		if terminalLoginFailure(event) {
+			state.set("login failed", nil)
+			os.Remove(filepath.Join(dir, "qr.png"))
+			select {
+			case loginFailed <- struct{}{}:
+			default:
+			}
+			return
 		}
 		if o.loginControl != "web" && handoff.restart(event) {
 			restartAfterPair <- struct{}{}
@@ -448,7 +471,14 @@ func run(ctx context.Context, o options, output, statusOutput io.Writer) error {
 	}
 	for {
 		select {
+		case <-loginFailed:
+			return errors.New("isolated authentication rejected; test stopped")
 		case <-restartAfterPair:
+			select {
+			case <-loginFailed:
+				return errors.New("isolated authentication rejected; test stopped")
+			default:
+			}
 			if ctx.Err() != nil {
 				return nil
 			}

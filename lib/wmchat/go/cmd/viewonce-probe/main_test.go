@@ -30,7 +30,7 @@ import (
 func TestIsolatedCapabilities(t *testing.T) {
 	base, props, logger := store.BaseClientPayload, store.DeviceProps, signalLog.Logger
 	t.Cleanup(func() { store.BaseClientPayload, store.DeviceProps, signalLog.Logger = base, props, logger })
-	client := configureClient(&store.Device{}, false)
+	client := configureClient(&store.Device{}, "android")
 	if store.BaseClientPayload == base || store.DeviceProps == props ||
 		store.BaseClientPayload.GetUserAgent().GetPlatform() != waWa6.ClientPayload_UserAgent_ANDROID || store.BaseClientPayload.WebInfo != nil ||
 		store.DeviceProps.GetPlatformType() != waCompanionReg.DeviceProps_ANDROID_PHONE ||
@@ -45,7 +45,16 @@ func TestIsolatedCapabilities(t *testing.T) {
 	if _, ok := signalLog.Logger.(discardSignalLog); !ok {
 		t.Fatal("libsignal can print private protocol logs")
 	}
-	control := configureClient(&store.Device{}, true)
+	androidPayload := proto.Clone(store.BaseClientPayload)
+	androidProps := proto.Clone(store.DeviceProps)
+	qr9 := configureClient(&store.Device{}, "android-qr9")
+	if qr9.QRClientType != whatsmeow.PairClientOtherWebClient ||
+		!proto.Equal(androidPayload, store.BaseClientPayload) || !proto.Equal(androidProps, store.DeviceProps) ||
+		!qr9.ManualHistorySyncDownload || !qr9.DisableManualHistorySyncReceipt ||
+		qr9.AutomaticMessageRerequestFromPhone || qr9.EnableDecryptedEventBuffer || qr9.UseRetryMessageStore {
+		t.Fatal("QR9 variant changed more than the QR client type or relaxed privacy")
+	}
+	control := configureClient(&store.Device{}, "web")
 	if store.BaseClientPayload.GetUserAgent().GetPlatform() != waWa6.ClientPayload_UserAgent_WEB ||
 		store.BaseClientPayload.GetWebInfo().GetWebSubPlatform() != waWa6.ClientPayload_WebInfo_WEB_BROWSER ||
 		store.DeviceProps.GetPlatformType() != waCompanionReg.DeviceProps_CHROME ||
@@ -54,6 +63,19 @@ func TestIsolatedCapabilities(t *testing.T) {
 		!control.ManualHistorySyncDownload || !control.DisableManualHistorySyncReceipt ||
 		control.AutomaticMessageRerequestFromPhone || control.EnableDecryptedEventBuffer || control.UseRetryMessageStore {
 		t.Fatal("normal login control changed registration or privacy limits")
+	}
+}
+
+func TestTerminalLoginFailureIsExplicit(t *testing.T) {
+	for _, event := range []any{&events.LoggedOut{}, &events.ConnectFailure{}, &events.ClientOutdated{}, &events.TemporaryBan{}, &events.StreamReplaced{}} {
+		if !terminalLoginFailure(event) {
+			t.Fatal("permanent authentication failure would wait for the timeout")
+		}
+	}
+	for _, event := range []any{&events.PairSuccess{}, &events.Connected{}, &events.Disconnected{}, &events.StreamError{Code: "516"}, &events.Message{}, nil} {
+		if terminalLoginFailure(event) {
+			t.Fatal("ordinary pairing, handoff or message event treated as terminal failure")
+		}
 	}
 }
 
@@ -270,7 +292,7 @@ func TestArgumentsAreBoundedAndNeverEchoIdentity(t *testing.T) {
 	if err != nil || o.lifetime != 20*time.Minute {
 		t.Fatal("valid options rejected")
 	}
-	for _, mode := range []string{"web", "android"} {
+	for _, mode := range []string{"web", "android", "android-qr9"} {
 		control, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--login-control", mode})
 		if err != nil || control.loginControl != mode || len(control.senders) != 0 {
 			t.Fatal("login-only control requires no private sender identity")
