@@ -30,6 +30,38 @@ Wait for **Connected**, then have the consenting sender send a **fresh, harmless
 test photo** as view-once in a direct chat. Do not open it during this delivery
 test. Old restricted messages are not a substitute for a fresh test.
 
+### Standard-login control
+
+To distinguish general linking failures from experimental Android registration,
+run a separate new profile with `--login-control web` instead of `--sender`:
+
+```sh
+'<private-binary-path>' \
+  --probe-dir '<new-absolute-system-temp-path>/nchat-viewonce-probe-web-control' \
+  --login-control web --lifetime 5m
+```
+
+This uses standard WEB/WEB_BROWSER/CHROME registration, skips all message-metadata
+inspection/output, and disconnects automatically on authenticated **Connected**.
+QR generation alone is not a pass. Successful registration still creates a
+temporary linked device; remove only that control device afterwards in WhatsApp.
+Its profile cannot be reused for the Android experiment: use another new profile.
+For an authentication-only experimental comparison, use `--login-control android`
+with that other new profile. This also skips message inspection and disconnects
+on authentication; it does not perform the fresh-photo delivery test.
+
+In Android modes, a fresh PairSuccess plus stream error `516` permits one explicit
+disconnect/reconnect on the same client and new private session. The handoff is
+queued outside the event callback, handles callback reordering, and is skipped
+after authentication or cancellation. It does not reopen profiles or alter nchat.
+This is a bounded experimental handoff, not a general meaning assigned to every
+`516` error or a guarantee of successful Android login.
+
+Both modes emit fixed connection-event categories and numeric failure codes only.
+Raw errors, nodes, passkeys and account identifiers are never printed. A phone-side
+failure before a server pairing response may still produce only a QR timeout;
+diagnostics do not guarantee that the phone's error cause is available here.
+
 Standard output contains only timestamps and Boolean metadata for fresh incoming
 direct messages from the selected aliases: unavailable/view-once/image flags and
 URL/path/key/hash presence. Key and hash flags require 32-byte values; they do not
@@ -69,3 +101,19 @@ the attempt timed out and stopped. This does not establish the cause of the phon
 error or whether view-once delivery would work after a successful registration.
 Do not keep retrying scans or describe the offline checks as a successful live
 delivery test. The existing production nchat process/profile was not modified.
+
+On 22 October 2026, the separate standard WEB/CHROME login control succeeded:
+both pairing and authenticated connection were observed, then the control
+disconnected automatically with exit status zero. This establishes a successful
+standard login at that time, not Android compatibility or view-once delivery.
+The next Android control paired but then received stream error `516`, remained
+unauthenticated and eventually showed a phone-side linking error. It was stopped;
+both temporary device entries were removed by the user before the next attempt.
+
+The corrected Android attempt also paired and received `516`. Its one in-process
+reconnect then received server LoggedOut `401`, without authenticated **Connected**.
+The library removed that isolated device record; the phone reported it could not
+link, and the test was stopped. This is an unsuccessful login for the tested
+experimental profile, not proof of a general network fault, an account-wide ban,
+or impossibility of every alternative client. No view-once content was inspected
+or media downloaded/opened; production nchat and widget processes were unchanged.

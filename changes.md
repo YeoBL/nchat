@@ -19,7 +19,14 @@ independently runnable. The widget snapshots were independently compiled.
 ## Verification audit and follow-up fixes — 20 October 2026
 
 Initial audited implementation: [`4a914f89`](https://github.com/YeoBL/nchat/commit/4a914f8930e89d7e8e5725e56c464bce047be479).
-Current post-fix implementation: [1675d36e](https://github.com/YeoBL/nchat/commit/1675d36e).
+Current post-fix implementation: [5d94363d](https://github.com/YeoBL/nchat/commit/5d94363d).
+
+### Isolated login control — 22 October 2026
+
+| Change | Access / effect | Commit | Verification / limits |
+|---|---|---|---|
+| Standard/Android login controls and redacted failure categories | `cmd/viewonce-probe --login-control web` or `--login-control android`, each with its own new private temporary profile; no sender identity needed, no message-metadata inspection, immediate disconnect on authenticated login. WEB uses WEB_BROWSER/CHROME; Android retains the experimental profile. Existing nchat is untouched. | [ad20d350](https://github.com/YeoBL/nchat/commit/ad20d350), [f4c58503](https://github.com/YeoBL/nchat/commit/f4c58503) | Independent source review, race tests and static checks pass. Real standard control observed PairSuccess, Paired and authenticated Connected, then disconnected automatically with exit status zero. Initial Android comparison paired, then failed with stream error 516 before authentication; the test stopped and the user removed both temporary devices. Fixed diagnostics and numeric failure codes never print raw errors/nodes/identities. These test login only, not view-once delivery or media viewing; disconnect does not unlink temporary devices. |
+| Bounded post-pairing handoff in the isolated Android tester | After fresh PairSuccess plus exact stream error 516, queue one reconnect on the same new private client/profile and bounded context; never reopen an existing profile. No production library/settings changes. | [5d94363d](https://github.com/YeoBL/nchat/commit/5d94363d) | Independent review, static checks and race fixtures cover duplicate/reordered/concurrent callbacks, wrong error codes and no restart after authentication. The run loop checks cancellation and current login before reconnecting. Live retry observed pairing, 516, exactly one reconnect, then server LoggedOut 401; no authenticated Connected event. The phone reported it could not link; the isolated device row was removed and the test stopped. This experimental Android profile failed as tested; view-once delivery remains unverified. The original nchat/widget process IDs stayed unchanged throughout. |
 
 ### Isolated WhatsApp delivery experiment — 21 October 2026
 
