@@ -1478,9 +1478,11 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             view->chat_id_ = chatId;
             view->message_ids_ = {msgId};
             view->force_read_ = true;
+            int32_t topicId = 0;
             if (message.topic_id_ && message.topic_id_->get_id() == td::td_api::messageTopicForum::ID)
             {
               const auto& topic = static_cast<const td::td_api::messageTopicForum&>(*message.topic_id_);
+              topicId = topic.forum_topic_id_;
               // Remember this cache-only target so the subsequent topic inbox
               // update can reconcile it even after a restart/history eviction.
               if (!message.is_outgoing_) m_ForumReads.Track({chatId, topic.forum_topic_id_}, msgId);
@@ -1488,12 +1490,56 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             }
             else
               view->source_ = td::td_api::make_object<td::td_api::messageSourceChatHistory>();
-            SendQuery(std::move(view), [markMessageReadRequest](Object result)
+            SendQuery(std::move(view), [this, markMessageReadRequest, chatId, msgId, topicId](Object result)
             {
-              // Ok acknowledges the request, not a server read update. Only the
-              // authoritative chat/topic inbox updates may retire notifications.
-              if (markMessageReadRequest->onResult)
-                markMessageReadRequest->onResult(result->get_id() == td::td_api::ok::ID);
+              if (result->get_id() != td::td_api::ok::ID)
+              {
+                if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(false);
+                return;
+              }
+              // No update is emitted when TDLib's marker already covers this
+              // cached target. Confirm the marker explicitly, including topics,
+              // rather than treating Ok as read or waiting forever for an event.
+              auto confirm = [this, markMessageReadRequest, chatId, msgId, topicId](Object state)
+              {
+                bool read = false;
+                int unreadCount = -1;
+                if (topicId && state->get_id() == td::td_api::forumTopic::ID)
+                {
+                  const auto& topic = static_cast<const td::td_api::forumTopic&>(*state);
+                  unreadCount = topic.unread_count_;
+                  read = topic.info_ && topic.info_->chat_id_ == chatId &&
+                    topic.info_->forum_topic_id_ == topicId && topic.last_read_inbox_message_id_ >= msgId;
+                  if (read)
+                  {
+                    UpdateForumReadInbox(chatId, topicId, topic.last_read_inbox_message_id_);
+                    auto notify = std::make_shared<NewMessageStatusNotify>(m_ProfileId);
+                    notify->chatId = markMessageReadRequest->chatId;
+                    notify->msgId = markMessageReadRequest->msgId;
+                    notify->isRead = true;
+                    CallMessageHandler(notify);
+                  }
+                }
+                else if (!topicId && state->get_id() == td::td_api::chat::ID)
+                {
+                  const auto& chat = static_cast<const td::td_api::chat&>(*state);
+                  unreadCount = chat.unread_count_;
+                  read = chat.id_ == chatId && !chat.is_marked_as_unread_ && chat.last_read_inbox_message_id_ >= msgId;
+                  if (read) UpdateLastReadInboxMessage(chatId, chat.last_read_inbox_message_id_);
+                }
+                if (markMessageReadRequest->onResult)
+                {
+                  // Counts only: explicit-action diagnostics contain no message
+                  // text, chat identifiers, names or authentication data.
+                  LOG_INFO("Telegram explicit read checkpoint: covered=%d remaining=%d topic=%d",
+                           read, unreadCount, topicId != 0);
+                  markMessageReadRequest->onResult(read);
+                }
+              };
+              if (topicId)
+                SendQuery(td::td_api::make_object<td::td_api::getForumTopic>(chatId, topicId), std::move(confirm));
+              else
+                SendQuery(td::td_api::make_object<td::td_api::getChat>(chatId), std::move(confirm));
             });
           });
         }
