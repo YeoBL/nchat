@@ -1023,10 +1023,15 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let sizer = PopoverSizer()
     private var outsideClickMonitor: Any?
     private var localClickMonitor: Any?
+    var replyTransport: (UnreadChat, String, String) -> ReplyOutcome = { chat, reference, text in
+        WidgetReplyBridge.submit(cachePath: chat.cachePath, chatID: chat.id, referenceID: reference, text: text)
+    }
 
     init(root: String, diagnosticPath: String) {
         reader = Reader(root: root)
         self.diagnosticPath = diagnosticPath
+        super.init()
+        content.onSend = { [weak self] chat, reference, text in self?.sendReply(chat, reference: reference, text: text) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1060,7 +1065,6 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         content.onClose = { [weak self] in self?.popover.performClose(nil) }
         content.onCollapse = { [weak self] in self?.collapseChats() }
         content.onQuit = { NSApplication.shared.terminate(nil) }
-        content.onSend = { [weak self] chat, reference, text in self?.sendReply(chat, reference: reference, text: text) }
         content.onClear = { [weak self] chat in self?.chatAction(chat, markRead: false) }
         content.onMarkRead = { [weak self] chat in self?.chatAction(chat, markRead: true) }
         if let index = CommandLine.arguments.firstIndex(of: "--demo") {
@@ -1246,17 +1250,17 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func sendReply(_ chat: UnreadChat, reference: String, text: String) {
-        guard !content.sending.contains(chat.key) else { return }
+        // The composer claims its busy flag before calling us. Do not mistake
+        // that claim for a duplicate and silently discard the first send.
         if CommandLine.arguments.contains("--demo") {
-            content.sendStatuses[chat.key] = "Test mode — nothing sent."
-            content.updateComposer()
+            content.completeReply(chat, text: text, outcome: .failed("Test mode — nothing sent."))
             return
         }
-        content.sending.insert(chat.key)
         content.sendStatuses[chat.key] = "Submitting reply…"
         content.updateComposer()
+        let transport = replyTransport
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let outcome = WidgetReplyBridge.submit(cachePath: chat.cachePath, chatID: chat.id, referenceID: reference, text: text)
+            let outcome = transport(chat, reference, text)
             DispatchQueue.main.async { self?.content.completeReply(chat, text: text, outcome: outcome) }
         }
     }
@@ -1802,6 +1806,46 @@ func selfTest() throws {
     keyboardWindow.contentView = nil
     keyboardWindow.close()
     print("PASS: native-window ⌘Enter sends only; ⌃⌘Enter marks original chat only after accepted send; failures, ambiguity, repeats and busy state never mark/read or resend")
+    for service in ["WhatsApp", "Telegram"] {
+        let pipeline = MenuBar(root: root.appendingPathComponent("history").path, diagnosticPath: root.appendingPathComponent("test-state").path)
+        let ui = pipeline.content
+        _ = ui.view
+        let recipient = UnreadChat(id: chat.id, name: chat.name, service: service, count: chat.count,
+            latest: chat.latest, cachePath: chat.cachePath, revision: chat.revision, messageIDs: chat.messageIDs)
+        ui.replyChat = recipient
+        ui.replyReference = "pipeline-reference"
+        for (markRead, outcome, expectedReads) in [(false, ReplyOutcome.accepted, 0),
+            (true, .accepted, 1), (true, .failed("Synthetic send failure"), 0), (true, .unknown, 0)] {
+            let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+            let lock = NSLock()
+            var dispatches = 0, reads = 0
+            pipeline.replyTransport = { selected, reference, text in
+                assert(selected.key == recipient.key && reference == "pipeline-reference" && text == "Synthetic pipeline reply")
+                lock.lock(); dispatches += 1; lock.unlock()
+                entered.signal()
+                assert(release.wait(timeout: .now() + 3) == .success)
+                return outcome
+            }
+            ui.onMarkRead = { selected in assert(selected.key == recipient.key); reads += 1 }
+            ui.replyField.string = "Synthetic pipeline reply"
+            ui.unconfirmedTexts.removeAll()
+            ui.textDidChange(Notification(name: NSText.didChangeNotification))
+            ui.submitReply(markRead: markRead)
+            ui.submitReply(markRead: markRead) // Only the composer guards duplicates.
+            assert(entered.wait(timeout: .now() + 3) == .success, "Composer busy claim must not discard its own send")
+            assert(ui.sending.contains(recipient.key) && reads == 0)
+            release.signal()
+            let deadline = Date().addingTimeInterval(3)
+            while ui.sending.contains(recipient.key) && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+            lock.lock(); let count = dispatches; lock.unlock()
+            assert(count == 1 && !ui.sending.contains(recipient.key) && reads == expectedReads)
+            if case .accepted = outcome { assert(ui.replyField.string.isEmpty) }
+            else { assert(ui.replyField.string == "Synthetic pipeline reply") }
+        }
+    }
+    print("PASS: real composer→MenuBar→async transport→completion pipeline dispatches exactly once on WhatsApp/Telegram; read follows accepted send only; errors and unknown sends preserve drafts")
     if case .failed = WidgetReplyBridge.submit(cachePath: path, chatID: "test", referenceID: "id", text: " ") {} else {
         assertionFailure("Empty reply must not queue anything")
     }
