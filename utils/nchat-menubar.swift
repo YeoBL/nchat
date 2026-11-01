@@ -474,6 +474,20 @@ final class ChatButton: NSButton {
     }
 }
 
+final class ReplyTextView: NSTextView {
+    var onSubmit: ((Bool) -> Void)?
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard window?.firstResponder === self, event.type == .keyDown,
+              event.keyCode == 36 || event.keyCode == 76,
+              modifiers == [.command] || modifiers == [.command, .control] else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if !event.isARepeat { onSubmit?(modifiers.contains(.control)) }
+        return true
+    }
+}
+
 final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     let scroll = NSScrollView()
     let document = FlippedView()
@@ -485,7 +499,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     let headerRule = NSBox()
     let composer = FlippedView()
     let replyTitle = NSTextField(labelWithString: "")
-    let replyField = NSTextView()
+    let replyField = ReplyTextView()
     let replyScroll = NSScrollView()
     let sendButton = NSButton(title: "Send", target: nil, action: nil)
     let closeReplyButton = NSButton(title: "×", target: nil, action: nil)
@@ -498,6 +512,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     var sending: Set<String> = []
     var sendStatuses: [String: String] = [:]
     var unconfirmedTexts: [String: String] = [:]
+    var markReadAfterSend: Set<String> = []
     var state = Snapshot()
     var expanded: Set<String> = []
     var previews: [String: [PreviewMessage]] = [:]
@@ -579,12 +594,14 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         replyField.autoresizingMask = [.width]
         replyField.textContainer?.widthTracksTextView = true
         replyField.delegate = self
-        replyField.setAccessibilityLabel("Reply text. Use the Send button to send.")
+        replyField.setAccessibilityLabel("Reply text. Command Return sends; Control Command Return sends and marks as read.")
+        replyField.onSubmit = { [weak self] markRead in self?.submitReply(markRead: markRead) }
         replyScroll.documentView = replyField
         composer.addSubview(replyScroll)
         sendButton.bezelStyle = .rounded
         sendButton.target = self
         sendButton.action = #selector(sendReply)
+        sendButton.toolTip = "Send (⌘Enter). Send and mark as read: ⌃⌘Enter."
         composer.addSubview(sendButton)
         replyStatus.font = .systemFont(ofSize: 11)
         replyStatus.textColor = .secondaryLabelColor
@@ -895,7 +912,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         sendButton.isEnabled = !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             text.utf16.count <= 4000 && unconfirmedTexts[chat.key] != text
         replyStatus.stringValue = text.utf16.count > 4000 ? "Reply is too long (maximum 4,000 characters)." :
-            (sendStatuses[chat.key] ?? "Only Send transmits your reply.")
+            (sendStatuses[chat.key] ?? "⌘Enter: Send · ⌃⌘Enter: Send and mark as read")
     }
 
     @objc func closeComposer() {
@@ -905,13 +922,22 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     }
 
     @objc func sendReply() {
+        submitReply(markRead: false)
+    }
+
+    func submitReply(markRead: Bool) {
         guard let chat = replyChat, sendButton.isEnabled else { return }
         saveDraft()
+        if markRead { markReadAfterSend.insert(chat.key) }
+        else { markReadAfterSend.remove(chat.key) }
+        sending.insert(chat.key)
+        updateComposer()
         onSend?(chat, replyReference, replyField.string)
     }
 
     func completeReply(_ chat: UnreadChat, text: String, outcome: ReplyOutcome) {
         sending.remove(chat.key)
+        let shouldMarkRead = markReadAfterSend.remove(chat.key) != nil
         switch outcome {
         case .accepted:
             sendStatuses[chat.key] = "Submitted to \(chat.service)."
@@ -923,6 +949,9 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
             unconfirmedTexts[chat.key] = text
         }
         updateComposer()
+        // Failed or ambiguous sends preserve unread state; never retry a send
+        // automatically just to complete the separate read action.
+        if case .accepted = outcome, shouldMarkRead { onMarkRead?(chat) }
     }
 }
 
@@ -1724,6 +1753,55 @@ func selfTest() throws {
     assert(controller.replyField.string == "A different draft")
     controller.completeReply(chat, text: "A different draft", outcome: .accepted)
     assert(controller.replyField.string.isEmpty && controller.drafts[chat.key] == "")
+    let keyboardWindow = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 454, height: 300),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+    keyboardWindow.isReleasedWhenClosed = false
+    keyboardWindow.contentView = controller.view
+    assert(keyboardWindow.makeFirstResponder(controller.replyField))
+    var keyboardSends = 0
+    var readTargets: [String] = []
+    controller.onSend = { selected, reference, text in
+        assert(selected.key == chat.key && reference == "demo3" && text == "Keyboard draft 🐢")
+        keyboardSends += 1
+    }
+    controller.onMarkRead = { readTargets.append($0.key) }
+    func key(_ flags: NSEvent.ModifierFlags, repeated: Bool = false) -> Bool {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+            timestamp: 0, windowNumber: keyboardWindow.windowNumber, context: nil,
+            characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: repeated, keyCode: 36)!
+        return keyboardWindow.performKeyEquivalent(with: event)
+    }
+    func keyboardDraft() {
+        controller.replyField.string = "Keyboard draft 🐢"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification))
+    }
+    keyboardDraft()
+    _ = key([.command, .shift])
+    _ = key([.command, .option])
+    assert(keyboardSends == 0)
+    assert(key([.command]))
+    assert(key([.command])) // Busy: no duplicate send.
+    assert(keyboardSends == 1 && readTargets.isEmpty)
+    controller.completeReply(chat, text: "Keyboard draft 🐢", outcome: .accepted)
+    assert(readTargets.isEmpty) // Plain send must not mark as read.
+    keyboardDraft()
+    assert(key([.command, .control], repeated: true) && keyboardSends == 1)
+    assert(key([.command, .control]) && keyboardSends == 2 && readTargets.isEmpty)
+    controller.completeReply(chat, text: "Keyboard draft 🐢", outcome: .failed("Synthetic failure"))
+    assert(readTargets.isEmpty && controller.replyField.string == "Keyboard draft 🐢")
+    assert(key([.command, .control]) && keyboardSends == 3)
+    controller.completeReply(chat, text: "Keyboard draft 🐢", outcome: .unknown)
+    assert(readTargets.isEmpty)
+    assert(key([.command, .control]) && keyboardSends == 3) // Ambiguous sends cannot be repeated.
+    controller.unconfirmedTexts.removeAll()
+    controller.updateComposer()
+    assert(key([.command, .control]) && keyboardSends == 4)
+    controller.closeComposer() // Completion still targets the original chat.
+    controller.completeReply(chat, text: "Keyboard draft 🐢", outcome: .accepted)
+    assert(readTargets == [chat.key])
+    keyboardWindow.contentView = nil
+    keyboardWindow.close()
+    print("PASS: native-window ⌘Enter sends only; ⌃⌘Enter marks original chat only after accepted send; failures, ambiguity, repeats and busy state never mark/read or resend")
     if case .failed = WidgetReplyBridge.submit(cachePath: path, chatID: "test", referenceID: "id", text: " ") {} else {
         assertionFailure("Empty reply must not queue anything")
     }
