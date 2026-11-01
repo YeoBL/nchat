@@ -1456,29 +1456,45 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
         if (!markMessageReadRequest->msgId.empty())
         {
-          std::vector<std::int64_t> msgIds =
-            { StrUtil::NumFromHex<int64_t>(markMessageReadRequest->msgId) };
-          auto view_messages = td::td_api::make_object<td::td_api::viewMessages>();
-          view_messages->chat_id_ = chatId;
-          view_messages->message_ids_ = msgIds;
-          view_messages->force_read_ = true;
-
-          SendQuery(std::move(view_messages),
-                    [this, markMessageReadRequest](Object object)
+          const int64_t msgId = StrUtil::NumFromHex<int64_t>(markMessageReadRequest->msgId);
+          // The widget cache survives TDLib history eviction/restarts. viewMessages
+          // can return Ok without reading an unknown message, even with force_read.
+          // Load the exact target into TDLib before advancing its read marker.
+          SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+                    [this, markMessageReadRequest, chatId, msgId](Object object)
           {
-            if (object->get_id() == td::td_api::error::ID)
+            if (object->get_id() != td::td_api::message::ID)
             {
               if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(false);
               return;
             }
-
-            std::shared_ptr<MarkMessageReadNotify> markMessageReadNotify =
-              std::make_shared<MarkMessageReadNotify>(m_ProfileId);
-            markMessageReadNotify->success = true;
-            markMessageReadNotify->chatId = markMessageReadRequest->chatId;
-            markMessageReadNotify->msgId = markMessageReadRequest->msgId;
-            CallMessageHandler(markMessageReadNotify);
-            if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(true);
+            const auto& message = static_cast<const td::td_api::message&>(*object);
+            if (message.chat_id_ != chatId || message.id_ != msgId)
+            {
+              if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(false);
+              return;
+            }
+            auto view = td::td_api::make_object<td::td_api::viewMessages>();
+            view->chat_id_ = chatId;
+            view->message_ids_ = {msgId};
+            view->force_read_ = true;
+            if (message.topic_id_ && message.topic_id_->get_id() == td::td_api::messageTopicForum::ID)
+            {
+              const auto& topic = static_cast<const td::td_api::messageTopicForum&>(*message.topic_id_);
+              // Remember this cache-only target so the subsequent topic inbox
+              // update can reconcile it even after a restart/history eviction.
+              if (!message.is_outgoing_) m_ForumReads.Track({chatId, topic.forum_topic_id_}, msgId);
+              view->source_ = td::td_api::make_object<td::td_api::messageSourceForumTopicHistory>();
+            }
+            else
+              view->source_ = td::td_api::make_object<td::td_api::messageSourceChatHistory>();
+            SendQuery(std::move(view), [markMessageReadRequest](Object result)
+            {
+              // Ok acknowledges the request, not a server read update. Only the
+              // authoritative chat/topic inbox updates may retire notifications.
+              if (markMessageReadRequest->onResult)
+                markMessageReadRequest->onResult(result->get_id() == td::td_api::ok::ID);
+            });
           });
         }
 
