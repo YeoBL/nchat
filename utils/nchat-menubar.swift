@@ -517,7 +517,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     var sending: Set<String> = []
     var sendStatuses: [String: String] = [:]
     var unconfirmedTexts: [String: String] = [:]
-    var markReadAfterSend: Set<String> = []
+    var markReadAfterSend: [String: UnreadChat] = [:]
     var state = Snapshot()
     var expanded: Set<String> = []
     var previews: [String: [PreviewMessage]] = [:]
@@ -933,8 +933,12 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     func submitReply(markRead: Bool) {
         guard let chat = replyChat, sendButton.isEnabled else { return }
         saveDraft()
-        if markRead { markReadAfterSend.insert(chat.key) }
-        else { markReadAfterSend.remove(chat.key) }
+        if markRead {
+            // The composer can outlive multiple unread-list refreshes. Capture
+            // the visible notification snapshot now, not when Reply was opened
+            // or after a delayed send acknowledgement (which could cover new arrivals).
+            markReadAfterSend[chat.key] = state.chats.first { $0.key == chat.key } ?? chat
+        } else { markReadAfterSend.removeValue(forKey: chat.key) }
         sending.insert(chat.key)
         updateComposer()
         onSend?(chat, replyReference, replyField.string)
@@ -942,7 +946,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
 
     func completeReply(_ chat: UnreadChat, text: String, outcome: ReplyOutcome) {
         sending.remove(chat.key)
-        let shouldMarkRead = markReadAfterSend.remove(chat.key) != nil
+        let readTarget = markReadAfterSend.removeValue(forKey: chat.key)
         switch outcome {
         case .accepted:
             sendStatuses[chat.key] = "Submitted to \(chat.service)."
@@ -956,7 +960,7 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         updateComposer()
         // Failed or ambiguous sends preserve unread state; never retry a send
         // automatically just to complete the separate read action.
-        if case .accepted = outcome, shouldMarkRead { onMarkRead?(chat) }
+        if case .accepted = outcome, let target = readTarget { onMarkRead?(target) }
     }
 }
 
@@ -1822,7 +1826,11 @@ func selfTest() throws {
         let ui = pipeline.content
         _ = ui.view
         let recipient = UnreadChat(id: chat.id, name: chat.name, service: service, count: chat.count,
-            latest: chat.latest, cachePath: chat.cachePath, revision: chat.revision, messageIDs: chat.messageIDs)
+            latest: chat.latest, cachePath: chat.cachePath, revision: chat.revision, messageIDs: ["opened-old"])
+        let visible = UnreadChat(id: chat.id, name: chat.name, service: service, count: 2,
+            latest: chat.latest + 1, cachePath: chat.cachePath, messageIDs: ["opened-old", "arrived-while-typing"])
+        let later = UnreadChat(id: chat.id, name: chat.name, service: service, count: 3,
+            latest: chat.latest + 2, cachePath: chat.cachePath, messageIDs: visible.messageIDs + ["arrived-after-shortcut"])
         ui.replyChat = recipient
         ui.replyReference = "pipeline-reference"
         for (markRead, outcome, expectedReads) in [(false, ReplyOutcome.accepted, 0),
@@ -1837,7 +1845,12 @@ func selfTest() throws {
                 assert(release.wait(timeout: .now() + 3) == .success)
                 return outcome
             }
-            ui.onMarkRead = { selected in assert(selected.key == recipient.key); reads += 1 }
+            ui.onMarkRead = { selected in
+                assert(selected.key == recipient.key && selected.messageIDs == visible.messageIDs,
+                       "Read target must be the visible send-time snapshot, not the old composer or later arrivals")
+                reads += 1
+            }
+            ui.state = Snapshot(chats: [visible])
             ui.replyField.string = "Synthetic pipeline reply"
             ui.unconfirmedTexts.removeAll()
             ui.textDidChange(Notification(name: NSText.didChangeNotification))
@@ -1845,6 +1858,7 @@ func selfTest() throws {
             ui.submitReply(markRead: markRead) // Only the composer guards duplicates.
             assert(entered.wait(timeout: .now() + 3) == .success, "Composer busy claim must not discard its own send")
             assert(ui.sending.contains(recipient.key) && reads == 0)
+            ui.state = Snapshot(chats: [later]) // Send acknowledgement must not mark this new arrival read.
             release.signal()
             let deadline = Date().addingTimeInterval(3)
             while ui.sending.contains(recipient.key) && Date() < deadline {
@@ -1857,6 +1871,7 @@ func selfTest() throws {
         }
     }
     print("PASS: real composer→MenuBar→async transport→completion pipeline dispatches exactly once on WhatsApp/Telegram; read follows accepted send only; errors and unknown sends preserve drafts")
+    print("PASS: send-and-read includes messages arriving during composition, but excludes messages arriving after the shortcut, on both services")
     if case .failed = WidgetReplyBridge.submit(cachePath: path, chatID: "test", referenceID: "id", text: " ") {} else {
         assertionFailure("Empty reply must not queue anything")
     }
