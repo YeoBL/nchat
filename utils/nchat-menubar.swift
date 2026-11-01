@@ -478,6 +478,11 @@ final class ReplyTextView: NSTextView {
     var onSubmit: ((Bool) -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if window?.firstResponder === self, event.type == .keyDown, modifiers == [.command],
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            selectAll(nil)
+            return true
+        }
         guard window?.firstResponder === self, event.type == .keyDown,
               event.keyCode == 36 || event.keyCode == 76,
               modifiers == [.command] || modifiers == [.command, .control] else {
@@ -1769,16 +1774,22 @@ func selfTest() throws {
         keyboardSends += 1
     }
     controller.onMarkRead = { readTargets.append($0.key) }
-    func key(_ flags: NSEvent.ModifierFlags, repeated: Bool = false) -> Bool {
+    func key(_ flags: NSEvent.ModifierFlags, repeated: Bool = false, characters: String = "\r", code: UInt16 = 36) -> Bool {
         let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
             timestamp: 0, windowNumber: keyboardWindow.windowNumber, context: nil,
-            characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: repeated, keyCode: 36)!
+            characters: characters, charactersIgnoringModifiers: characters, isARepeat: repeated, keyCode: code)!
         return keyboardWindow.performKeyEquivalent(with: event)
     }
     func keyboardDraft() {
         controller.replyField.string = "Keyboard draft 🐢"
         controller.textDidChange(Notification(name: NSText.didChangeNotification))
     }
+    controller.replyField.string = "Select the whole draft 🐢\nincluding this second line"
+    controller.textDidChange(Notification(name: NSText.didChangeNotification))
+    assert(key([.command], characters: "a", code: 0))
+    assert(controller.replyField.selectedRange() == NSRange(location: 0, length: controller.replyField.string.utf16.count))
+    assert(keyboardSends == 0 && readTargets.isEmpty)
+    print("PASS: focused reply ⌘A selects the entire multiline Unicode draft without sending or marking read")
     keyboardDraft()
     _ = key([.command, .shift])
     _ = key([.command, .option])
@@ -1997,6 +2008,8 @@ func testPopoverLayout() {
     NSApplication.shared.setActivationPolicy(.accessory)
     let copyItem = NSApplication.shared.mainMenu?.item(withTitle: "Edit")?.submenu?.item(withTitle: "Copy")
     precondition(copyItem?.keyEquivalent == "c" && copyItem?.action == #selector(NSText.copy(_:)))
+    let selectAllItem = NSApplication.shared.mainMenu?.item(withTitle: "Edit")?.submenu?.item(withTitle: "Select All")
+    precondition(selectAllItem?.keyEquivalent == "a" && selectAllItem?.action == #selector(NSText.selectAll(_:)))
     let host = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 500, height: 100), styleMask: [.borderless], backing: .buffered, defer: false)
     let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 30, height: 20))
     host.contentView!.addSubview(anchor)
@@ -2105,6 +2118,7 @@ func installCopyMenu() {
     let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
     let editMenu = NSMenu(title: "Edit")
     editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
     mainMenu.addItem(editItem)
     mainMenu.setSubmenu(editMenu, for: editItem)
     NSApplication.shared.mainMenu = mainMenu
