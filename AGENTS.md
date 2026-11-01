@@ -1,5 +1,11 @@
 # Personal nchat fork
 
+## Widget restart permission
+
+The user permits restarting the menu-bar widget whenever needed, without asking
+again. Preserve unsent drafts where practical. This does not authorize restarting
+the core nchat session or resending messages automatically.
+
 This checkout contains the user's custom nchat features. The personal GitHub
 fork is `YeoBL/nchat`; `upstream` is the original `d99kris/nchat` repository.
 
