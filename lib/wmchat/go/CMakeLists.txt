@@ -52,7 +52,8 @@ add_custom_command(OUTPUT ${OUTPUT_DIR}/${LIB}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND env GOPATH=${GOPATH} CGO_ENABLED=1 go build -buildmode=${BUILDMODE} ${CUSTOM_GO_FLAGS}
   -o "${OUTPUT_DIR}/${LIB}"
-  ${CMAKE_GO_FLAGS} ./...
+  # Only this bridge is a library; cmd/ contains independent probe executables.
+  ${CMAKE_GO_FLAGS} .
   COMMENT "Building Go library")
 add_custom_target(${TARGET} DEPENDS ${OUTPUT_DIR}/${LIB} ${HEADER})
 
