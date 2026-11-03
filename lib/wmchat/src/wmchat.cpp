@@ -998,7 +998,10 @@ void WmNewContactsNotify(int p_ConnId, char* p_ChatId, char* p_Name, char* p_Pho
       instance->AddContactInfo(contactInfo);
 
       newContactsNotify = std::make_shared<NewContactsNotify>(instance->GetProfileId());
-      newContactsNotify->fullSync = true;
+      // This inventory combines local contacts and a separate network group
+      // lookup. A timeout, left group or absent alias is not a name deletion.
+      // Merge it so both the UI and durable cache retain previously known names.
+      newContactsNotify->fullSync = false;
       newContactsNotify->contactInfos = instance->GetContactInfos();
       instance->ClearContactInfos();
     }

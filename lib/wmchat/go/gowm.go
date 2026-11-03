@@ -1548,7 +1548,6 @@ func PhoneFromUserId(userId string) string {
 		phone = strings.Replace(userId, "@s.whatsapp.net", "", 1)
 	}
 
-	LOG_TRACE(fmt.Sprintf("user %s phone %s", userId, phone))
 	return phone
 }
 
@@ -2992,6 +2991,8 @@ func WmLogin(connId int) int {
 	}
 
 	// authenticate if needed, otherwise just connect
+	// Publish durable names before any network work, including failed logins.
+	publishCachedContactNames(connId, cli, CWmNewContactsNotify)
 	SetState(connId, Connecting)
 	var timeoutMs int = 10000 // 10 sec timeout by default (regular connect)
 
