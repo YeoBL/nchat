@@ -2863,6 +2863,7 @@ func WmInit(path string, proxy string, sendType int) int {
 	store.DeviceProps.Os = proto.String(GetOSName())
 
 	// create new whatsapp connection
+	refreshWhatsAppVersionOnce(proxy)
 	clientLog := NcLogger()
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	if client == nil {
