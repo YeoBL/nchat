@@ -6,6 +6,13 @@ The user permits restarting the menu-bar widget whenever needed, without asking
 again. Preserve unsent drafts where practical. This does not authorize restarting
 the core nchat session or resending messages automatically.
 
+## Core restart location
+
+When restarting nchat, reuse the same GNU Screen session and the same window
+that held the running process. Do not create a new Screen window or session.
+Confirm the original window is still selected after restarting. If reusing it
+is unavailable, explain the limitation before choosing a different location.
+
 This checkout contains the user's custom nchat features. The personal GitHub
 fork is `YeoBL/nchat`; `upstream` is the original `d99kris/nchat` repository.
 
