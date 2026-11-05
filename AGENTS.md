@@ -1,10 +1,10 @@
 # Personal nchat fork
 
-## Widget restart permission
+## Restart permission
 
-The user permits restarting the menu-bar widget whenever needed, without asking
-again. Preserve unsent drafts where practical. This does not authorize restarting
-the core nchat session or resending messages automatically.
+The user permits restarting the menu-bar widget and core nchat whenever needed,
+without asking again (expanded on 5 November 2026). Preserve unsent drafts where
+practical. This does not authorize resending messages or casting test votes.
 
 ## Core restart location
 
