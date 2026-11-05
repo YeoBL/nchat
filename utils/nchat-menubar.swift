@@ -441,6 +441,30 @@ final class ChatActionButton: NSButton {
     var chat: UnreadChat?
 }
 
+final class PollButton: NSButton {
+    var chat: UnreadChat?
+    var messageID = ""
+    var optionIndex = -1
+}
+
+struct WidgetPollState {
+    var token = UUID()
+    var info: WidgetPollInfo?
+    var selected: Set<Int> = []
+    var touched = false
+    var loading = false
+    var voting = false
+    var unconfirmed = false
+    var notice = ""
+    var canSubmit: Bool {
+        guard let info = info, !loading, !voting, !unconfirmed,
+              info.canVote, info.selectionKnown, info.maxChoices >= 0 else { return false }
+        if selected.isEmpty { return info.canRetract && !info.selected.isEmpty }
+        return selected != Set(info.selected) && selected.allSatisfy { info.options.indices.contains($0) } &&
+            (info.maxChoices == 0 || selected.count <= info.maxChoices)
+    }
+}
+
 final class ChatButton: NSButton {
     var chat: UnreadChat?
     var expandedHighlight = false { didSet { updateHighlight() } }
@@ -529,6 +553,9 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
     var onSend: ((UnreadChat, String, String) -> Void)?
     var onClear: ((UnreadChat) -> Void)?
     var onMarkRead: ((UnreadChat) -> Void)?
+    var onLoadPoll: ((UnreadChat, String) -> Void)?
+    var onVotePoll: ((UnreadChat, String, [Int]) -> Void)?
+    var polls: [String: WidgetPollState] = [:]
     var markingRead: Set<String> = []
     var actionErrors: [String: String] = [:]
     var onResize: ((NSSize) -> Void)?
@@ -658,6 +685,153 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         else if expanded.isEmpty { onClose?() } else { onCollapse?() }
     }
 
+    func pollKey(_ chat: UnreadChat, _ messageID: String) -> String { chat.key + "\n" + messageID }
+
+    @discardableResult
+    func pollButton(_ title: String, chat: UnreadChat, messageID: String, x: CGFloat, y: CGFloat,
+                    width: CGFloat, action: Selector, enabled: Bool = true) -> PollButton {
+        let button = PollButton(title: title, target: self, action: action)
+        button.chat = chat; button.messageID = messageID
+        button.bezelStyle = .rounded
+        button.font = .systemFont(ofSize: 12)
+        button.frame = NSRect(x: x, y: y, width: width, height: 28)
+        button.isEnabled = enabled
+        button.setAccessibilityLabel(title)
+        document.addSubview(button)
+        return button
+    }
+
+    func drawPoll(_ chat: UnreadChat, messageID: String, y start: CGFloat) -> CGFloat {
+        let state = polls[pollKey(chat, messageID)]
+        var y = start
+        guard let info = state?.info else {
+            if let notice = state?.notice, !notice.isEmpty {
+                y += label(notice, x: 60, y: y, width: width - 86, size: 11, secondary: true, lines: 0) + 5
+            }
+            pollButton(state?.loading == true ? "Loading poll…" : "Vote / results", chat: chat, messageID: messageID,
+                       x: 60, y: y, width: 142, action: #selector(loadPoll(_:)), enabled: state?.loading != true)
+            return y + 32
+        }
+        let stateValue = state!
+        let editable = info.canVote && info.selectionKnown && info.maxChoices >= 0 &&
+            !stateValue.loading && !stateValue.voting && !stateValue.unconfirmed
+        for (index, title) in info.options.enumerated() {
+            let button = pollButton(title, chat: chat, messageID: messageID, x: 60, y: y,
+                                    width: width - 86, action: #selector(choosePollOption(_:)), enabled: editable)
+            button.setButtonType(info.maxChoices == 1 ? .radio : .switch)
+            button.alignment = .left
+            button.cell?.wraps = true
+            button.cell?.lineBreakMode = .byWordWrapping
+            button.optionIndex = index
+            button.state = stateValue.selected.contains(index) ? .on : .off
+            let height = max(28, ceil((title as NSString).boundingRect(with: NSSize(width: width - 116, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: NSFont.systemFont(ofSize: 12)]).height) + 10)
+            button.frame.size.height = height
+            y += height + 3
+        }
+        if !info.summary.isEmpty {
+            y += label(info.summary, x: 60, y: y + 3, width: width - 86, size: 11, secondary: true, lines: 0) + 8
+        }
+        if info.canVote && info.maxChoices > 1 {
+            y += label("Choose up to \(info.maxChoices)", x: 60, y: y, width: width - 86, size: 11, secondary: true) + 5
+        }
+        if !stateValue.notice.isEmpty {
+            y += label(stateValue.notice, x: 60, y: y, width: width - 86, size: 11, secondary: true, lines: 0) + 5
+        } else if !info.note.isEmpty {
+            y += label(info.note, x: 60, y: y, width: width - 86, size: 11, secondary: true, lines: 0) + 5
+        }
+        if info.canVote {
+            let title = stateValue.voting ? "Submitting…" : stateValue.selected.isEmpty && !info.selected.isEmpty ?
+                "Remove vote" : info.selected.isEmpty ? "Vote" : "Update vote"
+            pollButton(title, chat: chat, messageID: messageID, x: 60, y: y, width: 110,
+                       action: #selector(submitPollVote(_:)), enabled: stateValue.canSubmit)
+            if !stateValue.selected.isEmpty {
+                pollButton("Clear selection", chat: chat, messageID: messageID, x: 177, y: y, width: 125,
+                           action: #selector(clearPollSelection(_:)), enabled: editable)
+            }
+            y += 31
+        }
+        pollButton(stateValue.loading ? "Refreshing…" : "Refresh results", chat: chat, messageID: messageID,
+                   x: 60, y: y, width: 142, action: #selector(loadPoll(_:)),
+                   enabled: !stateValue.loading && !stateValue.voting)
+        return y + 32
+    }
+
+    @objc func loadPoll(_ sender: PollButton) {
+        guard let chat = sender.chat else { return }
+        let key = pollKey(chat, sender.messageID)
+        var state = polls[key] ?? WidgetPollState()
+        guard !state.loading && !state.voting else { return }
+        state.loading = true; state.token = UUID(); state.notice = ""
+        polls[key] = state
+        rebuild()
+        onLoadPoll?(chat, sender.messageID)
+    }
+
+    func completePollLoad(_ chat: UnreadChat, messageID: String, token: UUID, outcome: PollLoadOutcome) {
+        let key = pollKey(chat, messageID)
+        guard var state = polls[key], state.token == token else { return }
+        state.loading = false
+        switch outcome {
+        case .loaded(let info):
+            guard info.valid else { state.notice = "Invalid poll results. Refresh to retry."; polls[key] = state; rebuild(); return }
+            if !state.touched || state.info?.options.count != info.options.count || state.unconfirmed {
+                state.selected = Set(info.selected); state.touched = false
+            }
+            state.unconfirmed = false
+            state.info = info
+        case .failed(let error): state.notice = error
+        }
+        polls[key] = state
+        rebuild()
+    }
+
+    @objc func choosePollOption(_ sender: PollButton) {
+        guard let chat = sender.chat else { return }
+        let key = pollKey(chat, sender.messageID)
+        guard var state = polls[key], let info = state.info, info.canVote, info.selectionKnown,
+              !state.voting, !state.loading, !state.unconfirmed, info.options.indices.contains(sender.optionIndex) else { return }
+        if info.maxChoices == 1 { state.selected = [sender.optionIndex] }
+        else if state.selected.contains(sender.optionIndex) { state.selected.remove(sender.optionIndex) }
+        else if info.maxChoices == 0 || state.selected.count < info.maxChoices { state.selected.insert(sender.optionIndex) }
+        state.touched = true
+        polls[key] = state
+        rebuild() // Selecting a choice never submits it.
+    }
+
+    @objc func clearPollSelection(_ sender: PollButton) {
+        guard let chat = sender.chat else { return }
+        let key = pollKey(chat, sender.messageID)
+        guard var state = polls[key], !state.voting, !state.loading, !state.unconfirmed else { return }
+        state.selected = []; state.touched = true; polls[key] = state; rebuild()
+    }
+
+    @objc func submitPollVote(_ sender: PollButton) {
+        guard let chat = sender.chat else { return }
+        let key = pollKey(chat, sender.messageID)
+        guard var state = polls[key], state.canSubmit else { return }
+        state.voting = true; state.notice = "Submitting vote…"
+        polls[key] = state; rebuild()
+        onVotePoll?(chat, sender.messageID, state.selected.sorted())
+    }
+
+    func completePollVote(_ chat: UnreadChat, messageID: String, outcome: ReplyOutcome) {
+        let key = pollKey(chat, messageID)
+        guard var state = polls[key] else { return }
+        state.voting = false
+        switch outcome {
+        case .accepted: state.notice = "Vote submitted."; state.touched = false
+        case .failed(let error): state.notice = error
+        case .unknown: state.notice = "Vote not confirmed. Refresh results before voting again."; state.unconfirmed = true
+        }
+        polls[key] = state
+        rebuild()
+        if case .accepted = outcome {
+            let button = PollButton(); button.chat = chat; button.messageID = messageID
+            loadPoll(button)
+        }
+    }
+
     @objc func collapseAll() { onCollapse?() }
     @objc func closePopover() { onClose?() }
 
@@ -782,11 +956,13 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
                         label(clean(message.sender), x: 60, y: y, width: width - 143, size: 12, bold: true)
                         label(date.string(from: messageDate(message.time)), x: width - 68, y: y, width: 48, size: 11, secondary: true)
                         y += 22
-                        let text = message.text
+                        let isPoll = message.text.hasPrefix("[Poll] ") && !message.id.isEmpty && !message.isViewOnce
+                        let text = isPoll ? "Poll · " + String(message.text.dropFirst(7)).components(separatedBy: "\n• ")[0] : message.text
                         if !text.isEmpty {
                             y += label(text, x: 60, y: y, width: width - 86,
                                        lines: 0, selectable: true) + 5
                         }
+                        if isPoll { y = drawPoll(chat, messageID: message.id, y: y) }
                         if !message.isViewOnce, let image = message.image {
                             let scale = min((width - 86) / image.size.width, 200 / image.size.height, 1)
                             let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
@@ -1035,12 +1211,20 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var replyTransport: (UnreadChat, String, String) -> ReplyOutcome = { chat, reference, text in
         WidgetReplyBridge.submit(cachePath: chat.cachePath, chatID: chat.id, referenceID: reference, text: text)
     }
+    var pollLoadTransport: (UnreadChat, String) -> PollLoadOutcome = { chat, id in
+        WidgetReplyBridge.loadPoll(cachePath: chat.cachePath, chatID: chat.id, messageID: id)
+    }
+    var pollVoteTransport: (UnreadChat, String, [Int]) -> ReplyOutcome = { chat, id, choices in
+        WidgetReplyBridge.votePoll(cachePath: chat.cachePath, chatID: chat.id, messageID: id, choices: choices)
+    }
 
     init(root: String, diagnosticPath: String) {
         reader = Reader(root: root)
         self.diagnosticPath = diagnosticPath
         super.init()
         content.onSend = { [weak self] chat, reference, text in self?.sendReply(chat, reference: reference, text: text) }
+        content.onLoadPoll = { [weak self] chat, id in self?.loadPoll(chat, messageID: id) }
+        content.onVotePoll = { [weak self] chat, id, choices in self?.votePoll(chat, messageID: id, choices: choices) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1111,6 +1295,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         content.expanded.formIntersection(keys)
         content.previews = content.previews.filter { keys.contains($0.key) }
         content.errors = content.errors.filter { keys.contains($0.key) }
+        content.polls = content.polls.filter { entry in state.chats.contains { entry.key.hasPrefix($0.key + "\n") } }
         previewRequests = previewRequests.filter { keys.contains($0.key) }
         content.rebuild()
         for chat in state.chats where content.expanded.contains(chat.key) {
@@ -1153,6 +1338,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             content.expanded.remove(chat.key)
             previewRequests.removeValue(forKey: chat.key)
             content.previews.removeValue(forKey: chat.key)
+            content.polls = content.polls.filter { !$0.key.hasPrefix(chat.key + "\n") }
         } else {
             content.expanded.insert(chat.key)
             content.errors.removeValue(forKey: chat.key)
@@ -1172,6 +1358,7 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         previewRequests.removeAll()
         content.expanded.removeAll()
         content.previews.removeAll()
+        content.polls.removeAll()
         content.errors.removeAll()
         content.rebuild()
         content.scroll.contentView.scroll(to: .zero)
@@ -1258,6 +1445,31 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    func loadPoll(_ chat: UnreadChat, messageID: String) {
+        let key = content.pollKey(chat, messageID)
+        guard let token = content.polls[key]?.token else { return }
+        let transport = pollLoadTransport
+        let demo = CommandLine.arguments.contains("--demo")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result: PollLoadOutcome = demo ? .failed("Demo only — no account queried.") : transport(chat, messageID)
+            DispatchQueue.main.async { self?.content.completePollLoad(chat, messageID: messageID, token: token, outcome: result) }
+        }
+    }
+
+    func votePoll(_ chat: UnreadChat, messageID: String, choices: [Int]) {
+        let key = content.pollKey(chat, messageID)
+        guard let token = content.polls[key]?.token else { return }
+        let transport = pollVoteTransport
+        let demo = CommandLine.arguments.contains("--demo")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result: ReplyOutcome = demo ? .failed("Demo only — nothing submitted.") : transport(chat, messageID, choices)
+            DispatchQueue.main.async {
+                guard let self = self, self.content.polls[key]?.token == token else { return }
+                self.content.completePollVote(chat, messageID: messageID, outcome: result)
+            }
+        }
+    }
+
     func sendReply(_ chat: UnreadChat, reference: String, text: String) {
         // The composer claims its busy flag before calling us. Do not mistake
         // that claim for a duplicate and silently discard the first send.
@@ -1323,6 +1535,107 @@ final class MenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: diagnosticPath + ".ui")
         }
     }
+}
+
+func testWidgetPolls(_ root: URL) {
+    for service in ["WhatsApp", "Telegram"] {
+        for maxChoices in [1, 2] {
+            let pipeline = MenuBar(root: root.path, diagnosticPath: root.appendingPathComponent("poll-test-state").path)
+            let ui = pipeline.content
+            _ = ui.view
+            let chat = UnreadChat(id: "exact-chat", name: "Synthetic group", service: service, count: 1,
+                latest: 1, cachePath: root.appendingPathComponent("history/\(service)_test/db.sqlite").path)
+            let id = "exact-poll", key = ui.pollKey(chat, "exact-poll")
+            ui.state = Snapshot(chats: [chat]); ui.expanded = [chat.key]
+            ui.previews[chat.key] = [PreviewMessage(sender: "Synthetic sender", text: "[Poll] Lunch?\n• Tea\n• Coffee\n• Water", time: 1, attachment: false, id: id)]
+            ui.onMarkRead = { _ in preconditionFailure("A poll action must not mark the chat read") }
+            ui.onSend = { _, _, _ in preconditionFailure("A poll action must not send a text reply") }
+            let lock = NSLock()
+            var loads = 0, votes = 0, selected = [0], closed = false
+            var outcome = ReplyOutcome.accepted
+            var release: DispatchSemaphore?
+            pipeline.pollLoadTransport = { target, message in
+                assert(target.key == chat.key && message == id)
+                lock.lock(); defer { lock.unlock() }; loads += 1
+                return .loaded(WidgetPollInfo(options: ["Tea 🍵 (2 votes, 67%)",
+                    String(repeating: "Coffee with a long wrapped option label ", count: 4) + "(1 vote, 33%)", "Water (0 votes, 0%)"],
+                    selected: selected, maxChoices: maxChoices, selectionKnown: true, canVote: !closed,
+                    canRetract: !closed, summary: closed ? "3 total voters\n[Closed]" : "3 total voters", note: ""))
+            }
+            pipeline.pollVoteTransport = { target, message, choices in
+                assert(target.key == chat.key && message == id)
+                lock.lock(); votes += 1; selected = choices; let result = outcome; let gate = release; lock.unlock()
+                if let gate = gate { assert(gate.wait(timeout: .now() + 3) == .success) }
+                return result
+            }
+            func wait(_ ready: () -> Bool) {
+                let deadline = Date().addingTimeInterval(3)
+                while !ready() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+                precondition(ready(), "Poll callback did not finish")
+            }
+            func button(_ action: Selector, option: Int = -1) -> PollButton {
+                ui.rebuild()
+                return ui.document.subviews.compactMap { $0 as? PollButton }.first { $0.action == action && $0.optionIndex == option }!
+            }
+            ui.rebuild()
+            assert(loads == 0 && votes == 0) // No lookup until explicit poll interaction.
+            button(#selector(UnreadPopoverController.loadPoll(_:))).performClick(nil)
+            wait { ui.polls[key]?.info != nil && ui.polls[key]?.loading == false }
+            assert(ui.polls[key]?.selected == [0])
+            button(#selector(UnreadPopoverController.choosePollOption(_:)), option: 1).performClick(nil)
+            assert(votes == 0 && ui.polls[key]!.canSubmit)
+            assert(ui.polls[key]!.selected == (maxChoices == 1 ? [1] : [0, 1]))
+            if maxChoices == 2 {
+                button(#selector(UnreadPopoverController.choosePollOption(_:)), option: 2).performClick(nil)
+                assert(ui.polls[key]!.selected == [0, 1]) // Limit enforced without submitting.
+            }
+            let controls = ui.document.subviews.compactMap { $0 as? PollButton }
+            assert(controls.allSatisfy { $0.frame.maxX <= 454 && $0.frame.minX >= 0 })
+            assert(controls.first { $0.optionIndex == 1 }!.frame.height > 28) // Long labels wrap.
+            let gate = DispatchSemaphore(value: 0)
+            lock.lock(); release = gate; lock.unlock()
+            let submit = button(#selector(UnreadPopoverController.submitPollVote(_:)))
+            submit.performClick(nil)
+            ui.submitPollVote(submit) // Busy guard blocks duplicate native clicks too.
+            wait { lock.lock(); defer { lock.unlock() }; return votes == 1 }
+            assert(ui.polls[key]!.voting)
+            gate.signal()
+            wait { ui.polls[key]?.voting == false && ui.polls[key]?.loading == false }
+            assert(!ui.polls[key]!.canSubmit) // Refreshed current selection is preselected.
+            lock.lock(); release = nil; lock.unlock()
+            button(#selector(UnreadPopoverController.clearPollSelection(_:))).performClick(nil)
+            let remove = button(#selector(UnreadPopoverController.submitPollVote(_:)))
+            assert(remove.title == "Remove vote" && remove.isEnabled)
+            remove.performClick(nil)
+            wait { ui.polls[key]?.voting == false && ui.polls[key]?.loading == false }
+            assert(ui.polls[key]!.selected.isEmpty)
+            button(#selector(UnreadPopoverController.choosePollOption(_:)), option: 1).performClick(nil)
+            lock.lock(); outcome = .failed("Synthetic rejection"); lock.unlock()
+            button(#selector(UnreadPopoverController.submitPollVote(_:))).performClick(nil)
+            wait { ui.polls[key]?.voting == false }
+            assert(ui.polls[key]!.canSubmit && ui.polls[key]!.notice == "Synthetic rejection")
+            lock.lock(); outcome = .unknown; lock.unlock()
+            button(#selector(UnreadPopoverController.submitPollVote(_:))).performClick(nil)
+            wait { ui.polls[key]?.voting == false }
+            assert(ui.polls[key]!.unconfirmed && !ui.polls[key]!.canSubmit)
+            let attempted = votes
+            ui.submitPollVote(submit)
+            assert(votes == attempted)
+            button(#selector(UnreadPopoverController.loadPoll(_:))).performClick(nil)
+            wait { ui.polls[key]?.loading == false }
+            assert(!ui.polls[key]!.unconfirmed)
+            lock.lock(); closed = true; lock.unlock()
+            button(#selector(UnreadPopoverController.loadPoll(_:))).performClick(nil)
+            wait { ui.polls[key]?.loading == false }
+            assert(ui.polls[key]!.info!.summary.contains("Closed") && !ui.polls[key]!.canSubmit)
+            assert(!button(#selector(UnreadPopoverController.choosePollOption(_:)), option: 0).isEnabled)
+            let stale = ui.polls[key]!
+            pipeline.collapseChats()
+            ui.completePollLoad(chat, messageID: id, token: stale.token, outcome: .loaded(stale.info!))
+            assert(ui.polls.isEmpty) // A late callback cannot reopen a collapsed poll.
+        }
+    }
+    print("PASS: actual widget poll controls→MenuBar→async transport; single/multiple choice, limits, results, current votes, withdrawal, busy/rejection/unknown guards, closed polls, wrapping and stale callbacks; no read or text-send actions")
 }
 
 func selfTest() throws {
@@ -1872,6 +2185,7 @@ func selfTest() throws {
     }
     print("PASS: real composer→MenuBar→async transport→completion pipeline dispatches exactly once on WhatsApp/Telegram; read follows accepted send only; errors and unknown sends preserve drafts")
     print("PASS: send-and-read includes messages arriving during composition, but excludes messages arriving after the shortcut, on both services")
+    testWidgetPolls(root)
     if case .failed = WidgetReplyBridge.submit(cachePath: path, chatID: "test", referenceID: "id", text: " ") {} else {
         assertionFailure("Empty reply must not queue anything")
     }
@@ -2015,6 +2329,19 @@ func renderUITests(_ directory: String) throws {
     controller.expanded = [chat.key]
     controller.previews[chat.key] = [PreviewMessage(sender: "Jamie", text: "You can sign up for student discounts with your university email. Check the offers throughout the year before buying a new laptop. Some shops run special promotions at the start of term, so it may be worth waiting until you have compared the available prices.", time: Int64(Date().timeIntervalSince1970 * 1000), attachment: true, image: image)]
     try save("10-wrapped-caption-image")
+    controller.previews[chat.key] = [PreviewMessage(sender: "Jamie", text: "[Poll] Friday coffee?\n• Yes\n• No", time: Int64(Date().timeIntervalSince1970 * 1000), attachment: false, id: "synthetic-poll")]
+    try save("11-poll-collapsed")
+    let key = controller.pollKey(chat, "synthetic-poll")
+    var info = WidgetPollInfo(options: ["Yes (3 votes, 75%)", "No (1 vote, 25%)"], selected: [], maxChoices: 1,
+        selectionKnown: true, canVote: true, canRetract: true, summary: "4 total voters", note: "")
+    controller.polls[key] = WidgetPollState(info: info, selected: [0], touched: true)
+    try save("12-poll-vote-results")
+    controller.view.appearance = NSAppearance(named: .aqua)
+    try save("13-poll-light")
+    controller.view.appearance = appearance
+    info.canVote = false; info.canRetract = false; info.summary += "\n[Closed]"
+    controller.polls[key] = WidgetPollState(info: info)
+    try save("14-poll-closed-results")
     print("Rendered actual native views: \(directory)")
 }
 
@@ -2114,6 +2441,17 @@ func testPopoverLayout() {
     controller.previews[chat.key] = demoMessages()
     controller.rebuild()
     settle("short preview after long preview")
+    controller.previews[chat.key] = [PreviewMessage(sender: "Jamie", text: "[Poll] Coffee?\n• Yes\n• No", time: 1, attachment: false, id: "layout-poll")]
+    controller.polls[controller.pollKey(chat, "layout-poll")] = WidgetPollState(info: WidgetPollInfo(
+        options: [String(repeating: "Wrapped option ", count: 12), "No (1 vote)"], selected: [], maxChoices: 1,
+        selectionKnown: true, canVote: true, canRetract: true, summary: "4 voters", note: ""))
+    controller.rebuild()
+    settle("inline poll options and results")
+    precondition(controller.document.subviews.compactMap { $0 as? PollButton }.allSatisfy { $0.frame.maxX <= 454 })
+    controller.previews[chat.key] = demoMessages()
+    controller.polls.removeAll()
+    controller.rebuild()
+    settle("poll back to message preview")
     let reply = controller.document.subviews.compactMap { $0 as? ChatButton }.first { $0.title == "Reply…" }!
     reply.performClick(nil)
     controller.replyField.string = "Draft preserved"

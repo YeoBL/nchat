@@ -1,4 +1,4 @@
-// Explicit reply/read actions only. This helper never writes message-cache flags.
+// Explicit reply/read/poll actions only. This helper never writes message-cache flags.
 import Foundation
 import Darwin
 
@@ -6,6 +6,27 @@ enum ReplyOutcome {
     case accepted
     case failed(String)
     case unknown
+}
+
+struct WidgetPollInfo: Codable, Equatable {
+    var options: [String]
+    var selected: [Int]
+    var maxChoices: Int
+    var selectionKnown: Bool
+    var canVote: Bool
+    var canRetract: Bool
+    var summary: String
+    var note: String
+    var valid: Bool {
+        options.count <= 100 && Set(selected).count == selected.count &&
+        selected.allSatisfy { options.indices.contains($0) } &&
+        maxChoices >= -1 && maxChoices <= 100
+    }
+}
+
+enum PollLoadOutcome {
+    case loaded(WidgetPollInfo)
+    case failed(String)
 }
 
 enum WidgetReplyBridge {
@@ -34,13 +55,13 @@ enum WidgetReplyBridge {
         catch { return false }
     }
 
-    static func secureRead(_ path: String) -> String? {
+    static func secureRead(_ path: String, maxBytes: Int = 512) -> String? {
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         var st = stat()
         guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_uid == getuid(),
-              st.st_mode & 0o077 == 0, st.st_size > 0, st.st_size <= 512 else { return nil }
+              st.st_mode & 0o077 == 0, st.st_size > 0, st.st_size <= maxBytes else { return nil }
         var bytes = [UInt8](repeating: 0, count: Int(st.st_size))
         guard read(fd, &bytes, bytes.count) == bytes.count else { return nil }
         return String(bytes: bytes, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,7 +101,30 @@ enum WidgetReplyBridge {
         return .accepted
     }
 
-    static func submit(cachePath: String, chatID: String, referenceID: String, text: String, markRead: Bool = false) -> ReplyOutcome {
+    static func loadPoll(cachePath: String, chatID: String, messageID: String) -> PollLoadOutcome {
+        var info: WidgetPollInfo?
+        let outcome = submit(cachePath: cachePath, chatID: chatID, referenceID: messageID, text: "poll-info", pollAction: "poll") { raw in
+            info = try? JSONDecoder().decode(WidgetPollInfo.self, from: Data(raw.utf8))
+        }
+        switch outcome {
+        case .accepted:
+            guard let info = info, info.valid else { return .failed("Couldn't read this poll's results. Refresh to retry.") }
+            return .loaded(info)
+        case .failed(let error): return .failed(error)
+        case .unknown: return .failed("Results timed out. Refresh to retry.")
+        }
+    }
+
+    static func votePoll(cachePath: String, chatID: String, messageID: String, choices: [Int]) -> ReplyOutcome {
+        guard choices.count <= 100, Set(choices).count == choices.count,
+              choices.allSatisfy({ (0..<100).contains($0) }) else { return .failed("Invalid poll choices.") }
+        let text = choices.isEmpty ? "withdraw" : choices.sorted().map(String.init).joined(separator: ",")
+        return submit(cachePath: cachePath, chatID: chatID, referenceID: messageID, text: text, pollAction: "vote")
+    }
+
+    static func submit(cachePath: String, chatID: String, referenceID: String, text: String, markRead: Bool = false,
+                       pollAction: String? = nil, pollData: ((String) -> Void)? = nil) -> ReplyOutcome {
+        guard pollAction == nil || (["poll", "vote"].contains(pollAction!) && !markRead) else { return .failed("Invalid poll action.") }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.utf16.count <= 4000, !text.contains("\0"), !chatID.isEmpty, !referenceID.isEmpty else {
             return .failed("Write a reply of 1–4,000 characters.")
@@ -94,15 +138,18 @@ enum WidgetReplyBridge {
         guard lstat(directory, &st) == 0, st.st_mode & S_IFMT == S_IFDIR,
               st.st_uid == getuid(), st.st_mode & 0o077 == 0,
               let marker = secureRead(directory + "/server") else {
-            return .failed("Start or restart nchat to enable replies. Draft kept.")
+            return .failed(pollAction != nil ? "Start or restart nchat to enable widget polls." : "Start or restart nchat to enable replies. Draft kept.")
         }
         let server = marker.split(separator: " ")
         guard server.count >= 2, let pid = Int32(server[0]), pid > 1, kill(pid, 0) == 0,
               server[1].count == 32, server[1].allSatisfy({ "0123456789abcdef".contains($0) }) else {
-            return .failed("nchat is not running. Draft kept.")
+            return .failed(pollAction != nil ? "Start nchat to load or vote on this poll." : "nchat is not running. Draft kept.")
         }
         if markRead && (server.count < 3 || server[2] != "read-v1") {
             return .failed("Restart nchat to enable Mark as read.")
+        }
+        if pollAction != nil && !server.contains("poll-v1") {
+            return .failed("Restart nchat to enable widget polls.")
         }
         let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let path = directory + "/" + id
@@ -111,18 +158,30 @@ enum WidgetReplyBridge {
             value.utf8.map { String(format: "%02x", $0) }.joined()
         }.joined(separator: "\n") + "\n"
         guard secureRead(directory + "/server") == marker else { return .failed("nchat restarted. Try again.") }
-        let suffix = markRead ? ".read" : ".request"
+        let suffix = pollAction.map { "." + $0 } ?? (markRead ? ".read" : ".request")
         guard payload.utf8.count <= 40000 else { return .failed("Too many message details. Reopen the widget and retry.") }
         do { try writeRequest(payload, path: path + suffix) }
         catch { return .failed("Could not submit the reply. Draft kept.") }
         // Never resend automatically after timeout or a lost acknowledgement.
-        defer { unlink(path + suffix) }
+        defer {
+            unlink(path + suffix)
+            if pollAction == "poll" { unlink(path + ".result.poll-data") }
+        }
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             switch secureRead(path + ".result") {
-            case "accepted": return .accepted
-            case "failed": return .failed(markRead ? "Couldn't mark every message as read. Please retry." : "nchat reported a send failure. Draft kept.")
-            case "rejected": return .failed(markRead ? "Read request rejected. Reopen the widget and retry." : "Reply rejected before sending. Reopen the chat preview and try again.")
+            case "accepted":
+                if pollAction == "poll" {
+                    guard let raw = secureRead(path + ".result.poll-data", maxBytes: 128000) else {
+                        return .failed("Couldn't read poll results. Refresh to retry.")
+                    }
+                    pollData?(raw)
+                }
+                return .accepted
+            case "failed": return .failed(pollAction != nil ? "Couldn't complete the poll action. Refresh results and try again." :
+                (markRead ? "Couldn't mark every message as read. Please retry." : "nchat reported a send failure. Draft kept."))
+            case "rejected": return .failed(pollAction != nil ? "This poll is unavailable. Reopen the preview and retry." :
+                (markRead ? "Read request rejected. Reopen the widget and retry." : "Reply rejected before sending. Reopen the chat preview and try again."))
             default: break
             }
             if secureRead(directory + "/server") != marker || kill(pid, 0) != 0 { return .unknown }
