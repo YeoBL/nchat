@@ -731,6 +731,8 @@ final class UnreadPopoverController: NSViewController, NSTextViewDelegate {
         }
         if !info.summary.isEmpty {
             y += label(info.summary, x: 60, y: y + 3, width: width - 86, size: 11, secondary: true, lines: 0) + 8
+        } else if !info.options.isEmpty {
+            y += label("Results aren’t available yet.", x: 60, y: y + 3, width: width - 86, size: 11, secondary: true, lines: 0) + 8
         }
         if info.canVote && info.maxChoices > 1 {
             y += label("Choose up to \(info.maxChoices)", x: 60, y: y, width: width - 86, size: 11, secondary: true) + 5
@@ -2342,6 +2344,9 @@ func renderUITests(_ directory: String) throws {
     info.canVote = false; info.canRetract = false; info.summary += "\n[Closed]"
     controller.polls[key] = WidgetPollState(info: info)
     try save("14-poll-closed-results")
+    info.canVote = true; info.canRetract = true; info.summary = ""; info.options = ["Yes", "No"]
+    controller.polls[key] = WidgetPollState(info: info)
+    try save("15-poll-results-unavailable")
     print("Rendered actual native views: \(directory)")
 }
 
