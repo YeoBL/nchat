@@ -139,6 +139,28 @@ struct EditingProtocol : FakeProtocol
   std::vector<std::shared_ptr<EditMessageRequest>> edits;
 };
 
+struct PermissionEditingProtocol : EditingProtocol
+{
+  bool allowed = true;
+  int checks = 0;
+  std::function<void()> whileChecking;
+  bool HasFeature(ProtocolFeature feature) const override { return feature == FeatureEditMessagePermissions; }
+  void SendRequest(std::shared_ptr<RequestMessage> request) override
+  {
+    if (request->GetMessageType() == GetMessageEditabilityRequestType)
+    {
+      auto query = std::static_pointer_cast<GetMessageEditabilityRequest>(request);
+      assert(query->chatId == "alpha" && query->msgId == "loaded-message");
+      ++checks;
+      if (whileChecking) whileChecking(); // Must run outside the model lock.
+      query->onResult(allowed, allowed ? "" : "Telegram does not allow editing this message.");
+      query->onResult(!allowed, "Duplicate callback ignored");
+      return;
+    }
+    EditingProtocol::SendRequest(request);
+  }
+};
+
 struct HistoryProtocol : FakeProtocol
 {
   const std::string profile = "WhatsAppMd_offline_history_test";
@@ -517,6 +539,40 @@ int main()
     assert(input.empty() && history->historyRequests.size() == 2 && Chat(model) == "alpha");
     model.Cleanup();
     assert(resizeterm(45, 140) != ERR);
+  }
+
+  // Native permission checks override the blanket age/ownership assumptions.
+  {
+    auto editing = std::make_shared<PermissionEditingProtocol>();
+    UiModel model;
+    Populate(model, editing);
+    auto& impl = model.GetImpl();
+    auto& message = impl.GetMessages(Profile, "alpha").at("loaded-message");
+    message.isOutgoing = true; message.timeSent = 1000;
+    impl.ReplaceDraft("Keep this unsent draft");
+    impl.SetSelectMessageActive(true); impl.GetMessageOffset(Profile, "alpha") = 0;
+    model.KeyHandler(UiKeyConfig::GetKey("edit_msg"));
+    assert(editing->checks == 1 && impl.GetEditMessageActive());
+    model.KeyHandler(UiKeyConfig::GetKey("cancel"));
+    assert(Entry(model) == L"Keep this unsent draft");
+    editing->allowed = false;
+    Key("Telegram does not allow editing this message.", "ok");
+    Run(model, "edit_msg");
+    assert(!impl.GetEditMessageActive() && Entry(model) == L"Keep this unsent draft");
+    editing->allowed = true;
+    message.isOutgoing = false; // E.g. channel posts editable by an authorized admin.
+    Run(model, "edit_msg");
+    assert(impl.GetEditMessageActive());
+    Type(model, L" synthetic amendment");
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    assert(editing->edits.size() == 1 && editing->edits.front()->msgId == "loaded-message");
+    assert(Entry(model) == L"Keep this unsent draft");
+    editing->whileChecking = [&] { impl.GotoChat({Profile, "beta"}); };
+    impl.SetSelectMessageActive(true); impl.GetMessageOffset(Profile, "alpha") = 0;
+    model.KeyHandler(UiKeyConfig::GetKey("edit_msg"));
+    assert(Chat(model) == "beta" && !impl.GetEditMessageActive());
+    assert(impl.GetLocalFeatures().GetDraft({Profile, "alpha"}) == "Keep this unsent draft");
+    std::cout << "PASS: old Telegram messages use native permissions, denials preserve drafts, authorized incoming posts edit exact targets, duplicate replies/navigation cannot reopen editors\n";
   }
 
   // Editing a sent message is a temporary composer mode. Cancel, save, cloud

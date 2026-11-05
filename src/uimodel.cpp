@@ -13,6 +13,8 @@
 #include <sstream>
 #include <iomanip>
 #include <thread>
+#include <future>
+#include <atomic>
 
 #include <ncurses.h>
 #include <sys/ioctl.h>
@@ -3843,8 +3845,9 @@ bool UiModel::Impl::PreEditMsg(std::string& p_ProfileId, std::string& p_ChatId, 
                                std::string& p_MsgDialogText)
 {
   p_ProfileId = m_CurrentChat.first;
+  const bool nativePermissions = HasProtocolFeature(p_ProfileId, FeatureEditMessagePermissions);
   if (!HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinTwoDays) &&
-      !HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinFifteenMins))
+      !HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinFifteenMins) && !nativePermissions)
   {
     p_MsgDialogText = "Protocol does not support editing.";
     return false;
@@ -3868,7 +3871,7 @@ bool UiModel::Impl::PreEditMsg(std::string& p_ProfileId, std::string& p_ChatId, 
     return false;
   }
   const ChatMessage& chatMessage = message->second;
-  if (!chatMessage.isOutgoing)
+  if (!chatMessage.isOutgoing && !nativePermissions)
   {
     p_MsgDialogText = "Received messages cannot be edited.";
     return false;
@@ -3880,13 +3883,13 @@ bool UiModel::Impl::PreEditMsg(std::string& p_ProfileId, std::string& p_ChatId, 
   static const time_t twoDaysSec = 48 * 3600;
   static const time_t fifteenMinsSec = 15 * 60;
 
-  if (HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinTwoDays) &&
+  if (!nativePermissions && HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinTwoDays) &&
       (messageAgeSec >= twoDaysSec))
   {
     p_MsgDialogText = "Messages older than 48 hours cannot be edited.";
     return false;
   }
-  else if (HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinFifteenMins) &&
+  else if (!nativePermissions && HasProtocolFeature(p_ProfileId, FeatureEditMessagesWithinFifteenMins) &&
            (messageAgeSec >= fifteenMinsSec))
   {
     p_MsgDialogText = "Messages older than 15 minutes cannot be edited.";
@@ -3903,7 +3906,8 @@ void UiModel::Impl::StartEditMsg(const std::string& p_ProfileId, const std::stri
   if (GetEditMessageActive() || m_CurrentChat != std::make_pair(p_ProfileId, p_ChatId)) return;
   const auto& messages = m_Messages[p_ProfileId][p_ChatId];
   const auto message = messages.find(p_MsgId);
-  if (message == messages.end() || message->second.isDeleted || !message->second.isOutgoing) return;
+  if (message == messages.end() || message->second.isDeleted ||
+      (!message->second.isOutgoing && !HasProtocolFeature(p_ProfileId, FeatureEditMessagePermissions))) return;
   EnsureDraft();
   m_EditMessageChat = m_CurrentChat;
   m_EditDraft = m_EntryStr[p_ProfileId][p_ChatId];
@@ -3945,7 +3949,8 @@ void UiModel::Impl::SaveEditMessage()
   std::wstring& entryStr = m_EntryStr[profileId][chatId];
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
   const auto message = messages.find(m_EditMessageId);
-  if (message == messages.end() || message->second.isDeleted || !message->second.isOutgoing)
+  if (message == messages.end() || message->second.isDeleted ||
+      (!message->second.isOutgoing && !HasProtocolFeature(profileId, FeatureEditMessagePermissions)))
   {
     LOG_WARNING("discard edit for unavailable message %s", m_EditMessageId.c_str());
     SetEditMessageActive(false);
@@ -6611,11 +6616,41 @@ void UiModel::OnKeyEditMsg()
   std::string chatId;
   std::string msgId;
   std::string msgDialogText;
+  std::shared_ptr<Protocol> permissionProtocol;
   {
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
     if (!GetImpl().GetSelectMessageActive() || GetImpl().GetEditMessageActive()) return;
 
     isAllowed = GetImpl().PreEditMsg(profileId, chatId, msgId, msgDialogText);
+    if (isAllowed && GetImpl().HasProtocolFeature(profileId, FeatureEditMessagePermissions))
+      permissionProtocol = GetImpl().GetProtocols().at(profileId);
+  }
+
+  if (permissionProtocol)
+  {
+    auto promise = std::make_shared<std::promise<std::pair<bool, std::string>>>();
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    auto result = promise->get_future();
+    auto request = std::make_shared<GetMessageEditabilityRequest>();
+    request->chatId = chatId; request->msgId = msgId;
+    request->onResult = [promise, done](bool allowed, std::string reason)
+    {
+      if (!done->exchange(true)) promise->set_value({allowed, std::move(reason)});
+    };
+    // No model lock while TDLib checks the message. Late callbacks own only
+    // this promise and cannot reopen an editor or touch a destroyed model.
+    permissionProtocol->SendRequest(request);
+    if (result.wait_for(std::chrono::seconds(5)) == std::future_status::ready)
+    {
+      auto permission = result.get();
+      isAllowed = permission.first;
+      msgDialogText = permission.second;
+    }
+    else
+    {
+      isAllowed = false;
+      msgDialogText = "Edit permission check timed out. Check the connection and retry.";
+    }
   }
 
   // Open modal dialog without model mutex held

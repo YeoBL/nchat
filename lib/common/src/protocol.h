@@ -34,6 +34,7 @@ enum ProtocolFeature
   FeatureArchiveChat = (1 << 8),
   FeaturePinMessage = (1 << 9),
   FeaturePresenceRequiresOnline = (1 << 10),
+  FeatureEditMessagePermissions = (1 << 11), // Query service permissions; no blanket age limit.
 };
 
 class Protocol
@@ -132,6 +133,7 @@ enum MessageType
   GetPollVotesRequestType,
   UpdateMembershipNotifyType,
   ClientActionRequestType,
+  GetMessageEditabilityRequestType,
 };
 
 // Account tools use the same labelled lists/forms for both services. Operations
@@ -403,6 +405,15 @@ public:
   // Optional completion for explicitly submitted local-widget replies.
   // Success means accepted by the protocol, not delivered/read by the recipient.
   std::function<void(bool)> onResult;
+};
+
+class GetMessageEditabilityRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return GetMessageEditabilityRequestType; }
+  std::string chatId;
+  std::string msgId;
+  std::function<void(bool, std::string)> onResult;
 };
 
 class EditMessageRequest : public RequestMessage

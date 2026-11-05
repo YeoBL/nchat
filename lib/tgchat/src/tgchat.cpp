@@ -365,7 +365,7 @@ bool TgChat::Impl::HasFeature(ProtocolFeature p_ProtocolFeature) const
 {
   static int customFeatures =
     FeatureTypingTimeout |
-    FeatureEditMessagesWithinTwoDays |
+    FeatureEditMessagePermissions |
     FeatureLimitedReactions |
     FeatureMarkReadEveryView |
     FeatureAutoGetContactsOnLogin |
@@ -1364,6 +1364,56 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           sendMessageNotify->chatId = sendMessageRequest->chatId;
           sendMessageNotify->chatMessage = sendMessageRequest->chatMessage;
           CallMessageHandler(sendMessageNotify);
+        });
+      }
+      break;
+
+    case GetMessageEditabilityRequestType:
+      {
+        auto request = std::static_pointer_cast<GetMessageEditabilityRequest>(p_RequestMessage);
+        if (!request->onResult) break;
+        const auto chatId = StrUtil::NumFromHex<int64_t>(request->chatId);
+        const auto msgId = StrUtil::NumFromHex<int64_t>(request->msgId);
+        // The UI cache can outlive TDLib's local message cache. Load the exact
+        // message without viewing it before querying its current permissions.
+        SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+          [this, request, chatId, msgId](Object object)
+        {
+          if (!object || object->get_id() != td::td_api::message::ID)
+          {
+            request->onResult(false, "Could not load this message. Check the connection and retry.");
+            return;
+          }
+          const auto& message = static_cast<const td::td_api::message&>(*object);
+          if (!message.content_)
+          {
+            request->onResult(false, "This message has no editable content.");
+            return;
+          }
+          switch (message.content_->get_id())
+          {
+            case td::td_api::messageText::ID:
+            case td::td_api::messagePhoto::ID:
+            case td::td_api::messageVideo::ID:
+            case td::td_api::messageAnimation::ID:
+            case td::td_api::messageAudio::ID:
+            case td::td_api::messageDocument::ID:
+            case td::td_api::messageVoiceNote::ID: break;
+            default:
+              request->onResult(false, "This message type cannot be edited as text or a caption.");
+              return;
+          }
+          SendQuery(td::td_api::make_object<td::td_api::getMessageProperties>(chatId, msgId),
+            [request](Object properties)
+          {
+            if (!properties || properties->get_id() != td::td_api::messageProperties::ID)
+              request->onResult(false, "Could not check Telegram's edit permission. Please retry.");
+            else
+            {
+              const bool allowed = static_cast<const td::td_api::messageProperties&>(*properties).can_be_edited_;
+              request->onResult(allowed, allowed ? "" : "Telegram does not allow editing this message.");
+            }
+          });
         });
       }
       break;
