@@ -58,12 +58,13 @@ struct TelegramMuteHandlerTest
     std::shared_ptr<bool> canceled = std::make_shared<bool>(false);
     std::weak_ptr<GetPollVotesRequest> request;
 
-    void Start()
+    void Start(bool includeVoters = true)
     {
       assert(!impl.m_ClientManager);
       auto query = std::make_shared<GetPollVotesRequest>();
       query->chatId = StrUtil::NumToHex(int64_t(1001));
       query->msgId = StrUtil::NumToHex(int64_t(10));
+      query->includeVoters = includeVoters;
       query->isCancelled = [flag = canceled] { return *flag; };
       query->onResult = [this](PollVoteInfo info) { snapshots.push_back(std::move(info)); };
       request = query;
@@ -98,6 +99,18 @@ struct TelegramMuteHandlerTest
 
   static void Run()
   {
+    for (bool namedVoters : {false, true})
+    {
+      Fixture test;
+      test.Start(false);
+      const auto queryId = test.impl.m_CurrentQueryId;
+      test.Reply(PollMessage(namedVoters));
+      assert(test.snapshots.size() == 1 && !test.snapshots.front().votersLoading);
+      assert(test.snapshots.front().votes.empty() && test.snapshots.front().note.empty());
+      assert(test.impl.m_CurrentQueryId == queryId); // No voter queries or view/read operation.
+      test.CheckMetadata(); test.CheckReleased();
+    }
+    std::cout << "PASS: widget metadata-only Telegram poll results include counts/current choices without voter pagination or view/read queries\n";
     {
       Fixture test;
       test.Start();

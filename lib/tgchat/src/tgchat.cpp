@@ -736,6 +736,11 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             return;
           }
           info = TgPollInfo(*poll);
+          if (!request->includeVoters)
+          {
+            request->onResult(std::move(info));
+            return;
+          }
           if (!poll->can_get_voters_)
           {
             info.note = "Telegram does not disclose voter names for this poll.";

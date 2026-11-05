@@ -386,6 +386,7 @@ public:
   virtual MessageType GetMessageType() const { return GetPollVotesRequestType; }
   std::string chatId;
   std::string msgId;
+  bool includeVoters = true; // Widget results need metadata/counts, not voter pagination.
   // May receive metadata, cumulative voter pages and a final loading=false result.
   std::function<void(PollVoteInfo)> onResult;
   // Optional: refreshed/closed dialogs can stop obsolete pagination. No locks

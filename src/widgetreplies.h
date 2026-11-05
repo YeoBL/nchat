@@ -1,4 +1,5 @@
-// Explicit reply/read actions from the widget. Previewing never uses this bridge.
+// Explicit reply/read/poll actions from the widget. Cached text previews do not
+// use this bridge; fetching poll metadata does not open or mark a chat read.
 #pragma once
 #include <atomic>
 #include <chrono>
@@ -15,6 +16,8 @@
 #include "fileutil.h"
 #include "messagecache.h"
 #include "strutil.h"
+#include "../lib/ncutil/ext/cereal/include/cereal/external/rapidjson/stringbuffer.h"
+#include "../lib/ncutil/ext/cereal/include/cereal/external/rapidjson/writer.h"
 
 class WidgetReplies
 {
@@ -29,7 +32,7 @@ public:
     if (m_Lock < 0 || flock(m_Lock, LOCK_EX | LOCK_NB)) return;
     std::random_device random;
     for (int i = 0; i < 32; ++i) m_Nonce += "0123456789abcdef"[random() % 16];
-    if (!Write(m_Dir + "/server", std::to_string(getpid()) + " " + m_Nonce + " read-v1\n")) return;
+    if (!Write(m_Dir + "/server", std::to_string(getpid()) + " " + m_Nonce + " read-v1 poll-v1\n")) return;
     m_Thread = std::thread([this] {
       while (!m_Stop)
       {
@@ -37,7 +40,7 @@ public:
         {
           if (m_Stop) break;
           if (!((name.size() == 40 && name.substr(32) == ".request") ||
-                (name.size() == 37 && name.substr(32) == ".read")) ||
+                (name.size() == 37 && (name.substr(32) == ".read" || name.substr(32) == ".poll" || name.substr(32) == ".vote"))) ||
               name.substr(0, 32).find_first_not_of("0123456789abcdef") != std::string::npos) continue;
           Process(m_Dir + "/" + name);
         }
@@ -70,6 +73,8 @@ private:
   void Process(const std::string& path)
   {
     const bool markRead = path.size() >= 5 && path.substr(path.size() - 5) == ".read";
+    const bool poll = path.size() >= 5 && path.substr(path.size() - 5) == ".poll";
+    const bool vote = path.size() >= 5 && path.substr(path.size() - 5) == ".vote";
     int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return;
     struct stat st;
@@ -79,7 +84,7 @@ private:
     ssize_t len = read(fd, &data[0], data.size());
     close(fd);
     unlink(path.c_str()); // Claim exactly once, before any network action.
-    const std::string result = path.substr(0, path.size() - (markRead ? 5 : 8)) + ".result";
+    const std::string result = path.substr(0, path.size() - (markRead || poll || vote ? 5 : 8)) + ".result";
     if (access(result.c_str(), F_OK) == 0) return; // Duplicate request ID never resends.
     auto reject = [&] { Write(result, "rejected\n"); };
     if (len != (ssize_t)data.size() || time(nullptr) - st.st_mtime > 30 || st.st_mtime > time(nullptr) + 5)
@@ -123,12 +128,77 @@ private:
     }
     else if (!MessageCache::GetOneMessage(fields[0], fields[1], fields[2], messages) || messages.empty() || messages.front().isDeleted)
       { reject(); return; }
+    std::vector<int> choices;
+    if (poll || vote)
+    {
+      if (messages.front().text.rfind("[Poll] ", 0) != 0 || (poll && fields[3] != "poll-info")) { reject(); return; }
+      if (vote && fields[3] != "withdraw")
+      {
+        std::istringstream values(fields[3]);
+        std::string value;
+        std::set<int> unique;
+        while (std::getline(values, value, ','))
+        {
+          if (value.empty() || value.size() > 3 || value.find_first_not_of("0123456789") != std::string::npos)
+            { reject(); return; }
+          const int index = std::stoi(value);
+          if (index > 99 || !unique.insert(index).second || unique.size() > 100) { reject(); return; }
+          choices.push_back(index);
+        }
+        if (choices.empty() || fields[3].back() == ',') { reject(); return; }
+      }
+    }
     // Persist the claim before dispatch. After a crash, ambiguous sends are not retried.
     int claim = open(result.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     if (claim < 0) return;
     const bool claimed = write(claim, "pending\n", 8) == 8 && fsync(claim) == 0;
     close(claim);
     if (!claimed) return;
+    if (poll)
+    {
+      auto request = std::make_shared<GetPollVotesRequest>();
+      request->chatId = fields[1]; request->msgId = fields[2];
+      request->includeVoters = false;
+      auto finished = std::make_shared<std::atomic<bool>>(false);
+      request->isCancelled = [finished] { return finished->load(); };
+      request->onResult = [finished, result](PollVoteInfo info)
+      {
+        if (finished->exchange(true)) return;
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> json(buffer);
+        json.StartObject();
+        json.Key("options"); json.StartArray();
+        for (const auto& option : info.optionTexts) json.String(option.data(), option.size());
+        json.EndArray();
+        json.Key("selected"); json.StartArray();
+        for (int index : info.selectedOptionIndexes) json.Int(index);
+        json.EndArray();
+        json.Key("maxChoices"); json.Int(info.maxChoices);
+        json.Key("selectionKnown"); json.Bool(info.selectionKnown);
+        json.Key("canVote"); json.Bool(info.canVote);
+        json.Key("canRetract"); json.Bool(info.canRetract);
+        json.Key("summary"); json.String(info.summary.data(), info.summary.size());
+        json.Key("note"); json.String(info.note.data(), info.note.size());
+        json.EndObject();
+        const std::string payload(buffer.GetString(), buffer.GetSize());
+        const bool ok = info.optionTexts.size() <= 100 && payload.size() <= 128000 &&
+          Write(result + ".poll-data", payload);
+        Write(result, ok ? "accepted\n" : "failed\n");
+      };
+      protocol->second->SendRequest(request);
+      return;
+    }
+    if (vote)
+    {
+      auto request = std::make_shared<VotePollRequest>();
+      request->chatId = fields[1]; request->msgId = fields[2];
+      request->senderId = messages.front().senderId;
+      request->isOutgoing = messages.front().isOutgoing;
+      request->optionIndexes = std::move(choices);
+      request->onResult = [result](bool success, std::string) { Write(result, success ? "accepted\n" : "failed\n"); };
+      protocol->second->SendRequest(request);
+      return;
+    }
     if (markRead)
     {
       if (messages.empty()) { Write(result, "accepted\n"); return; }

@@ -15,6 +15,8 @@ struct FakeProtocol : Protocol {
   std::atomic<int> calls{0};
   std::atomic<int> reads{0};
   std::atomic<int> downloads{0};
+  std::atomic<int> pollLoads{0}, pollVotes{0};
+  std::vector<int> choices;
   std::atomic<bool> success{true};
   std::string profile, chat, text;
   explicit FakeProtocol(std::string p) : profile(std::move(p)) {}
@@ -30,6 +32,30 @@ struct FakeProtocol : Protocol {
   bool Logout() override { return true; }
   void SetMessageHandler(const std::function<void(std::shared_ptr<ServiceMessage>)>&) override {}
   void SendRequest(std::shared_ptr<RequestMessage> request) override {
+    if (request->GetMessageType() == GetPollVotesRequestType) {
+      auto poll = std::static_pointer_cast<GetPollVotesRequest>(request);
+      assert(poll->chatId == "right-chat" && poll->msgId == "poll-ref" && !poll->includeVoters);
+      PollVoteInfo info;
+      info.optionTexts = {"Tea 🍵 (2 votes, 67%)", "Coffee \"iced\"\n(1 vote, 33%)"};
+      info.selectedOptionIndexes = {0}; info.maxChoices = 2;
+      info.selectionKnown = info.canVote = info.canRetract = true;
+      info.summary = "3 total voters";
+      info.votes.push_back({0, "SHOULD_NOT_LEAK"});
+      poll->onResult(info);
+      assert(poll->isCancelled());
+      info.summary = "Duplicate callback must be ignored";
+      poll->onResult(info);
+      ++pollLoads;
+      return;
+    }
+    if (request->GetMessageType() == VotePollRequestType) {
+      auto vote = std::static_pointer_cast<VotePollRequest>(request);
+      assert(vote->chatId == "right-chat" && vote->msgId == "poll-ref" && vote->senderId == "sender" && !vote->isOutgoing);
+      choices = vote->optionIndexes;
+      vote->onResult(success, success ? "Vote sent" : "Rejected");
+      ++pollVotes;
+      return;
+    }
     if (request->GetMessageType() == DownloadFileRequestType) {
       auto download = std::static_pointer_cast<DownloadFileRequest>(request);
       assert(download->chatId == "right-chat" && download->msgId == "ordinary-photo");
@@ -113,6 +139,12 @@ int main() {
   MessageCache::AddMessages(waProfile, "right-chat", "", {message});
   Await([&] { cached.clear(); return MessageCache::GetOneMessage(waProfile, "right-chat", "reference", cached); });
   auto waFake = std::make_shared<FakeProtocol>(waProfile);
+  ChatMessage pollMessage = message;
+  pollMessage.id = "poll-ref"; pollMessage.text = "[Poll] Lunch?\n• Tea\n• Coffee";
+  for (const auto& account : {profile, waProfile}) {
+    MessageCache::AddMessages(account, "right-chat", "", {pollMessage});
+    Await([&] { cached.clear(); return MessageCache::GetOneMessage(account, "right-chat", "poll-ref", cached); });
+  }
   const std::string dir = std::string(root) + "/widget-replies";
   {
     WidgetReplies server({{profile, fake}, {waProfile, waFake}});
@@ -174,6 +206,52 @@ int main() {
     cached.clear();
     assert(MessageCache::GetOneMessage(profile, "right-chat", "reference", cached) && !cached.front().isRead);
     std::cout << "PASS: explicit mark-read uses exact chat/message/sender, no text send, no cache rewrite, duplicates rejected and failures acknowledged\n";
+    int next = 100;
+    for (auto service : {fake, waFake}) {
+      auto pollPayload = [&](const std::string& target, const std::string& id, const std::string& value) {
+        return nonce + "\n" + StrUtil::StrToHex(service->profile) + "\n" + StrUtil::StrToHex(target) + "\n" +
+          StrUtil::StrToHex(id) + "\n" + StrUtil::StrToHex(value) + "\n";
+      };
+      service->success = true;
+      const auto query = path(next++);
+      Write(query + ".poll", pollPayload("right-chat", "poll-ref", "poll-info"));
+      Await([&] { return Read(query + ".result") == "accepted\n"; });
+      const auto data = Read(query + ".result.poll-data");
+      assert(data.find("3 total voters") != std::string::npos && data.find("SHOULD_NOT_LEAK") == std::string::npos);
+      assert(data.find("Duplicate callback") == std::string::npos && data.find("\\\"iced\\\"") != std::string::npos);
+      assert(service->pollLoads == 1 && service->pollVotes == 0);
+      for (const auto& selection : {"1", "0,1", "withdraw"}) {
+        const auto vote = path(next++);
+        Write(vote + ".vote", pollPayload("right-chat", "poll-ref", selection));
+        Await([&] { return Read(vote + ".result") == "accepted\n"; });
+        if (std::string(selection) == "1") assert(service->choices == std::vector<int>{1});
+        else if (std::string(selection) == "0,1") assert((service->choices == std::vector<int>{0,1}));
+        else assert(service->choices.empty());
+        const int calls = service->pollVotes;
+        Write(vote + ".vote", pollPayload("right-chat", "poll-ref", selection));
+        Await([&] { return access((vote + ".vote").c_str(), F_OK) != 0; });
+        assert(service->pollVotes == calls);
+      }
+      for (const auto& selection : {"1,1", "-1", "100", "1,", ",1", "1,abc"}) {
+        const auto vote = path(next++);
+        Write(vote + ".vote", pollPayload("right-chat", "poll-ref", selection));
+        Await([&] { return Read(vote + ".result") == "rejected\n"; });
+      }
+      for (const auto& target : {"wrong-chat", "right-chat"}) {
+        const auto bad = path(next++);
+        Write(bad + ".poll", pollPayload(target, std::string(target) == "right-chat" ? "reference" : "poll-ref", "poll-info"));
+        Await([&] { return Read(bad + ".result") == "rejected\n"; });
+      }
+      service->success = false;
+      const auto failed = path(next++);
+      Write(failed + ".vote", pollPayload("right-chat", "poll-ref", "1"));
+      Await([&] { return Read(failed + ".result") == "failed\n"; });
+      service->success = true;
+      cached.clear();
+      assert(MessageCache::GetOneMessage(service->profile, "right-chat", "poll-ref", cached) && !cached.front().isRead);
+    }
+    assert(fake->calls == 2 && fake->reads == 2 && waFake->calls == 0 && waFake->reads == 1);
+    std::cout << "PASS: widget polls use exact account/chat/message, metadata-only results, explicit single/multiple/withdraw votes, duplicate protection and unchanged read flags on both services\n";
   }
   assert(access((dir + "/server").c_str(), F_OK) != 0);
   {
