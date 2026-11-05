@@ -2235,6 +2235,12 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         {
           m_UserTimeSeen[profileId][userId] = timeSeen;
         }
+        else if (!isOnline && HasProtocolFeature(profileId, FeaturePresenceRequiresOnline))
+        {
+          // An unavailable/hidden timestamp must not leave an old last-seen
+          // value presented as the peer's current shared status.
+          m_UserTimeSeen[profileId].erase(userId);
+        }
         UpdateStatus();
       }
       break;
@@ -2982,7 +2988,8 @@ std::string UiModel::Impl::GetChatStatus(const std::string& p_ProfileId, const s
       switch (timeSeen)
       {
         case TimeSeenNone:
-          chatStatus = "away";
+          chatStatus = HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline)
+            ? "last seen unavailable" : "away";
           break;
 
         case TimeSeenLastMonth:
@@ -2994,7 +3001,8 @@ std::string UiModel::Impl::GetChatStatus(const std::string& p_ProfileId, const s
           break;
 
         default:
-          chatStatus = "seen " + TimeUtil::GetTimeString(timeSeen, false /* p_IsExport */);
+          chatStatus = (HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline) ? "last seen " : "seen ") +
+            TimeUtil::GetTimeString(timeSeen, false /* p_IsExport */);
           break;
       }
     }
@@ -3136,16 +3144,22 @@ void UiModel::Impl::RequestUserStatusNextChat()
 {
   const std::pair<std::string, std::string>& nextChat = GetNextChat();
   if (nextChat == s_ChatNone) return;
+  // WhatsApp subscriptions are refreshed for the visible chat, not prefetched
+  // for the next contact every time the user switches chats.
+  if (HasProtocolFeature(nextChat.first, FeaturePresenceRequiresOnline)) return;
 
   RequestUserStatus(nextChat);
 }
 
 void UiModel::Impl::RequestUserStatus(const std::pair<std::string, std::string>& p_Chat)
 {
-  static std::set<std::pair<std::string, std::string>> requestedStatuses;
-  if (requestedStatuses.count(p_Chat)) return;
-
-  requestedStatuses.insert(p_Chat);
+  if (p_Chat == s_ChatNone || !m_Protocols.count(p_Chat.first)) return;
+  // WhatsApp subscriptions can expire or be lost while offline. Always renew
+  // on opening a chat; a lifetime one-shot guard permanently suppressed retries.
+  if (!HasProtocolFeature(p_Chat.first, FeaturePresenceRequiresOnline))
+  {
+    if (!m_RequestedUserStatuses.insert(p_Chat).second) return;
+  }
 
   const std::string& profileId = p_Chat.first;
   const std::string& chatId = p_Chat.second;
@@ -3182,6 +3196,10 @@ void UiModel::Impl::SetStatusOnline(const std::string& p_ProfileId, bool p_IsOnl
   LOG_TRACE("set status %s online %d", p_ProfileId.c_str(), (int)p_IsOnline);
   SendProtocolRequest(p_ProfileId, setStatusRequest);
 
+  if (p_IsOnline && HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline) &&
+      m_CurrentChat.first == p_ProfileId)
+    RequestUserStatusCurrentChat(); // Queue after available, including focus/reconnect.
+
   if (!p_IsOnline && HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline))
   {
     // For protocols that only deliver contact presence while we are marked online,
@@ -3203,7 +3221,6 @@ void UiModel::Impl::SetStatusOnline(const std::string& p_ProfileId, bool p_IsOnl
     auto onlineIt = m_UserOnline.find(p_ProfileId);
     if (onlineIt != m_UserOnline.end())
     {
-      auto& profileTimeSeen = m_UserTimeSeen[p_ProfileId];
       for (auto& userOnline : onlineIt->second)
       {
         if (userOnline.second)
@@ -3211,14 +3228,8 @@ void UiModel::Impl::SetStatusOnline(const std::string& p_ProfileId, bool p_IsOnl
           userOnline.second = false;
           statusChanged = true;
 
-          // A peer flagged online was active right up to now, so refresh last-seen -
-          // but only if we already hold a real timestamp for them (i.e. they share
-          // last-seen). Fabricating one would disclose a last-seen they chose to hide.
-          auto timeSeenIt = profileTimeSeen.find(userOnline.first);
-          if (timeSeenIt != profileTimeSeen.end())
-          {
-            timeSeenIt->second = TimeUtil::GetCurrentTimeMSec();
-          }
+          // Losing our own connection/focus does not establish when a peer
+          // went offline. Preserve only the timestamp actually supplied.
         }
       }
     }

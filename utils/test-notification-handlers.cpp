@@ -114,6 +114,64 @@ public:
   }
 };
 
+class PresenceTestProtocol : public HistoricalTestProtocol
+{
+public:
+  bool whatsapp = true;
+  bool HasFeature(ProtocolFeature feature) const override
+  { return whatsapp && feature == FeaturePresenceRequiresOnline; }
+  bool IsGroupChat(const std::string&) const override { return false; }
+};
+
+static void TestPresenceStatus()
+{
+  AppConfig::Init(); // Date rendering uses the real timestamp-format setting.
+  const std::string profile = "WhatsAppMd_presence_test", peer = "15550002@s.whatsapp.net";
+  UiModel::Impl model(nullptr);
+  auto protocol = std::make_shared<PresenceTestProtocol>();
+  model.m_CurrentChat = {profile, peer};
+  model.m_ChatVec = {model.m_CurrentChat, {profile, "other@s.whatsapp.net"}};
+  model.m_CurrentChatIndex = 0;
+  model.RequestUserStatusCurrentChat(); // A missing provider must not poison later requests.
+  model.m_Protocols[profile] = protocol;
+  model.RequestUserStatusCurrentChat();
+  model.RequestUserStatusCurrentChat();
+  assert(protocol->requests.size() == 2); // Reopening renews a dropped/expired subscription.
+  model.RequestUserStatusNextChat();
+  assert(protocol->requests.size() == 2); // No WhatsApp background prefetch.
+  protocol->requests.clear();
+  model.SetStatusOnline(profile, true);
+  assert((protocol->requests == std::vector<MessageType>{SetStatusRequestType, GetStatusRequestType}));
+  auto status = std::make_shared<ReceiveStatusNotify>(profile);
+  status->userId = peer; status->isOnline = false; status->timeSeen = 1793872800000;
+  model.MessageHandler(status);
+  const auto lastSeen = model.GetChatStatus(profile, peer);
+  assert(lastSeen.find("last seen ") != std::string::npos && lastSeen.find("unavailable") == std::string::npos);
+  status->isOnline = true; status->timeSeen = TimeSeenNone;
+  model.MessageHandler(status);
+  assert(model.GetChatStatus(profile, peer) == " (online)");
+  model.SetStatusOnline(profile, false);
+  assert(model.m_UserTimeSeen[profile][peer] == 1793872800000); // Our focus loss cannot invent a peer date.
+  assert(model.GetChatStatus(profile, peer) == lastSeen);
+  status->isOnline = false; // Hidden/unknown offline update clears an old timestamp.
+  model.MessageHandler(status);
+  assert(model.m_UserTimeSeen[profile].count(peer) == 0);
+  assert(model.GetChatStatus(profile, peer) == " (last seen unavailable)");
+  status->timeSeen = 1793872900000;
+  model.MessageHandler(status);
+  assert(model.m_UserTimeSeen[profile][peer] == 1793872900000);
+  protocol->whatsapp = false; // Telegram subscriptions and labels retain their behavior.
+  protocol->requests.clear();
+  model.RequestUserStatusCurrentChat(); model.RequestUserStatusCurrentChat();
+  assert(protocol->requests.size() == 1);
+  assert(model.GetChatStatus(profile, peer).find(" (seen ") == 0);
+  UiModel::Impl second(nullptr);
+  second.m_Protocols[profile] = protocol;
+  second.RequestUserStatus({profile, peer});
+  assert(protocol->requests.size() == 2); // The guard belongs to the model, not the process.
+  std::cout << "PASS: WhatsApp presence refresh on chat/focus, supplied last-seen rendering, hidden timestamps, and Telegram isolation\n";
+}
+
 static void TestViewOnceTerminal(const std::string& root)
 {
   std::setlocale(LC_ALL, "");
@@ -201,6 +259,7 @@ int main(int argc, char** argv)
   UiConfig::SetBool("online_status_dynamic", false);
   UiConfig::SetBool("typing_status_share", false);
   UiConfig::SetNum("auto_select_chat_timeout_sec", 0);
+  TestPresenceStatus();
   {
     UiModel::Impl model(nullptr);
     const std::string profile = "WhatsAppMd_channel_metadata_test";

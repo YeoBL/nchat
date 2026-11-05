@@ -297,6 +297,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, std::set<std::string>>> m_UsersTyping;
     std::unordered_map<std::string, std::unordered_map<std::string, bool>> m_UserOnline;
     std::unordered_map<std::string, std::unordered_map<std::string, int64_t>> m_UserTimeSeen;
+    std::set<std::pair<std::string, std::string>> m_RequestedUserStatuses;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> m_GroupMembers;
     int64_t m_GroupMembersUpdateTime = 0;

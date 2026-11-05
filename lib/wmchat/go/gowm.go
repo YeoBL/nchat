@@ -895,6 +895,7 @@ type WmEventHandler struct {
 	connId int
 	importedHistory bool
 	notifyMessage messageNotifyFunc // Optional per-handler sink for offline bridge fixtures.
+	notifyStatus func(int, string, int, int) // Optional offline presence sink.
 }
 
 func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
@@ -1138,7 +1139,7 @@ func (handler *WmEventHandler) HandleUndecryptableMessage(evt *events.Undecrypta
 }
 
 func (handler *WmEventHandler) HandlePresence(presence *events.Presence) {
-	if presence.From.Server != types.GroupServer {
+	if presence != nil && (presence.From.Server == types.DefaultUserServer || presence.From.Server == types.HiddenUserServer) {
 		connId := handler.connId
 		var client *whatsmeow.Client = GetClient(connId)
 		if client == nil {
@@ -1147,9 +1148,15 @@ func (handler *WmEventHandler) HandlePresence(presence *events.Presence) {
 		}
 		userId := GetUserId(client, nil, &presence.From)
 		isOnline := !presence.Unavailable
-		timeSeen := int(presence.LastSeen.Unix())
-		LOG_TRACE(fmt.Sprintf("Call CWmNewStatusNotify"))
-		CWmNewStatusNotify(connId, userId, BoolToInt(isOnline), timeSeen)
+		timeSeen := 0 // Unknown/hidden, never convert Go's zero time to a date.
+		if !isOnline && !presence.LastSeen.IsZero() && presence.LastSeen.Unix() > 0 && presence.LastSeen.Unix() <= math.MaxInt32 {
+			timeSeen = int(presence.LastSeen.Unix())
+		}
+		notify := handler.notifyStatus
+		if notify == nil {
+			notify = CWmNewStatusNotify
+		}
+		notify(connId, userId, BoolToInt(isOnline), timeSeen)
 	}
 }
 
@@ -3700,8 +3707,8 @@ func WmGetStatus(connId int, userId string) int {
 	}
 
 	// ignore presence requests for groups
-	userJid, _ := types.ParseJID(userId)
-	if userJid.Server == types.GroupServer {
+	userJid, parseErr := types.ParseJID(userId)
+	if parseErr != nil || userJid.IsEmpty() || (userJid.Server != types.DefaultUserServer && userJid.Server != types.HiddenUserServer) {
 		return -1
 	}
 
@@ -3712,7 +3719,8 @@ func WmGetStatus(connId int, userId string) int {
 	}
 
 	// subscribe user presence
-	ctx := context.TODO()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	err := client.SubscribePresence(ctx, userJid)
 
 	// log any error

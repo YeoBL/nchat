@@ -38,7 +38,8 @@ int main()
   auto add = reinterpret_cast<void(*)(int, WmChat*)>(dlsym(library, "_ZN6WmChat11AddInstanceEiPS_"));
   auto remove = reinterpret_cast<void(*)(int)>(dlsym(library, "_ZN6WmChat14RemoveInstanceEi"));
   auto notify = reinterpret_cast<decltype(&WmNewContactsNotify)>(dlsym(library, "WmNewContactsNotify"));
-  assert(create && add && remove && notify);
+  auto statusNotify = reinterpret_cast<decltype(&WmNewStatusNotify)>(dlsym(library, "WmNewStatusNotify"));
+  assert(create && add && remove && notify && statusNotify);
   std::unique_ptr<WmChat> provider(create());
   add(-801, provider.get());
   auto batch = [&](const std::string& name)
@@ -82,7 +83,18 @@ int main()
   fetch->profileId = profile;
   MessageCache::PerformRequest(fetch);
   MessageCache::m_MessageHandler = nullptr;
+  for (const auto seconds : {1793872800, 0})
+  {
+    statusNotify(-801, strdup("person@s.whatsapp.net"), 0, seconds);
+    assert(provider->m_RequestsQueue.size() == 1);
+    auto deferred = std::static_pointer_cast<DeferNotifyRequest>(provider->m_RequestsQueue.front());
+    provider->m_RequestsQueue.pop_front();
+    auto event = std::static_pointer_cast<ReceiveStatusNotify>(deferred->serviceMessage);
+    assert(event->userId == "person@s.whatsapp.net" && !event->isOnline);
+    assert(event->timeSeen == (seconds ? 1793872800000LL : TimeSeenNone));
+  }
   remove(-801);
   MessageCache::m_Dbs.clear();
   std::cout << "WhatsApp contact bridge: partial refresh preserves group names, updates names/aliases, and cache reload retains them\n";
+  std::cout << "WhatsApp status bridge: exact seconds-to-milliseconds conversion and unknown timestamp sentinel passed\n";
 }
