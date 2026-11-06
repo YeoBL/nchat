@@ -919,6 +919,26 @@ void WmChat::SetProtocolUiControl(bool p_IsTakeControl)
 void WmChat::SetStatus(int p_Flags)
 {
   Status::Set(m_ProfileId, p_Flags);
+  if (p_Flags & Status::FlagOnline)
+  {
+    bool reconnect = false;
+    {
+      std::unique_lock<std::mutex> lock(m_Mutex);
+      reconnect = m_HasTransportConnected;
+      m_HasTransportConnected = true;
+    }
+    if (reconnect)
+    {
+      // Socket reconnects bypass Login(). Restore UI-owned availability and
+      // the visible chat's subscription without refetching all conversations.
+      auto event = std::make_shared<ConnectNotify>(m_ProfileId);
+      event->success = true;
+      event->isReconnect = true;
+      auto deferred = std::make_shared<DeferNotifyRequest>();
+      deferred->serviceMessage = event;
+      SendRequest(deferred);
+    }
+  }
 }
 
 void WmChat::ClearStatus(int p_Flags)

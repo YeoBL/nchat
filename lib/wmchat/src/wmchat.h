@@ -93,6 +93,7 @@ private:
   int m_WhatsmeowDate = 0;
   int m_ProfileDirVersion = 0;
   bool m_WasOnline = false;
+  bool m_HasTransportConnected = false; // Protected by m_Mutex.
   bool m_IsSetup = false;
 
   mutable std::mutex m_Mutex;

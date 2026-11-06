@@ -1725,6 +1725,15 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
       {
         std::shared_ptr<ConnectNotify> connectNotify = std::static_pointer_cast<ConnectNotify>(p_ServiceMessage);
         LOG_TRACE("connect notify %d", connectNotify->success);
+        if (connectNotify->isReconnect)
+        {
+          if (connectNotify->success)
+          {
+            const bool active = !UiConfig::GetBool("online_status_dynamic") || m_TerminalActive;
+            SetStatusOnline(profileId, active);
+          }
+          break;
+        }
         if (!HasProtocolFeature(profileId, FeatureAutoGetChatsOnLogin))
         {
           std::shared_ptr<GetChatsRequest> getChatsRequest = std::make_shared<GetChatsRequest>();

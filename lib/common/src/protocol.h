@@ -672,6 +672,7 @@ public:
     : ServiceMessage(p_ProfileId) { }
   virtual MessageType GetMessageType() const { return ConnectNotifyType; }
   bool success = false;
+  bool isReconnect = false;
 };
 
 class MarkMessageReadNotify : public ServiceMessage

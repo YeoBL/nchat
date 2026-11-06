@@ -142,6 +142,20 @@ static void TestPresenceStatus()
   protocol->requests.clear();
   model.SetStatusOnline(profile, true);
   assert((protocol->requests == std::vector<MessageType>{SetStatusRequestType, GetStatusRequestType}));
+  auto reconnect = std::make_shared<ConnectNotify>(profile);
+  reconnect->success = true; reconnect->isReconnect = true;
+  UiConfig::SetBool("online_status_dynamic", true);
+  protocol->requests.clear();
+  model.MessageHandler(reconnect);
+  assert((protocol->requests == std::vector<MessageType>{SetStatusRequestType, GetStatusRequestType}));
+  // No all-chat/contact refetch or read request on automatic reconnect.
+  protocol->requests.clear();
+  model.m_TerminalActive = false;
+  model.MessageHandler(reconnect);
+  assert((protocol->requests == std::vector<MessageType>{SetStatusRequestType}));
+  assert(!model.m_TerminalActive); // Background reconnect must not announce us online.
+  model.m_TerminalActive = true;
+  UiConfig::SetBool("online_status_dynamic", false);
   auto status = std::make_shared<ReceiveStatusNotify>(profile);
   status->userId = peer; status->isOnline = false; status->timeSeen = 1793872800000;
   model.MessageHandler(status);

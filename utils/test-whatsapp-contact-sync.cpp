@@ -39,7 +39,9 @@ int main()
   auto remove = reinterpret_cast<void(*)(int)>(dlsym(library, "_ZN6WmChat14RemoveInstanceEi"));
   auto notify = reinterpret_cast<decltype(&WmNewContactsNotify)>(dlsym(library, "WmNewContactsNotify"));
   auto statusNotify = reinterpret_cast<decltype(&WmNewStatusNotify)>(dlsym(library, "WmNewStatusNotify"));
-  assert(create && add && remove && notify && statusNotify);
+  auto setStatus = reinterpret_cast<decltype(&WmSetStatus)>(dlsym(library, "WmSetStatus"));
+  auto clearStatus = reinterpret_cast<decltype(&WmClearStatus)>(dlsym(library, "WmClearStatus"));
+  assert(create && add && remove && notify && statusNotify && setStatus && clearStatus);
   std::unique_ptr<WmChat> provider(create());
   add(-801, provider.get());
   auto batch = [&](const std::string& name)
@@ -93,8 +95,27 @@ int main()
     assert(event->userId == "person@s.whatsapp.net" && !event->isOnline);
     assert(event->timeSeen == (seconds ? 1793872800000LL : TimeSeenNone));
   }
+  // Actual Go-to-C++ connection flags must reach the UI on socket reconnect,
+  // but the first connection retains Login()'s existing notification.
+  setStatus(-801, 1 << 2); // FlagOnline.
+  assert(provider->m_RequestsQueue.empty());
+  setStatus(-801, 1 << 3); // A non-connection flag cannot renew presence.
+  assert(provider->m_RequestsQueue.empty());
+  for (int cycle = 0; cycle < 2; ++cycle)
+  {
+    clearStatus(-801, 1 << 2);
+    setStatus(-801, 1 << 2);
+    assert(provider->m_RequestsQueue.size() == 1);
+    auto deferred = std::static_pointer_cast<DeferNotifyRequest>(provider->m_RequestsQueue.front());
+    provider->m_RequestsQueue.pop_front();
+    assert(deferred->serviceMessage->GetMessageType() == ConnectNotifyType);
+    auto event = std::static_pointer_cast<ConnectNotify>(deferred->serviceMessage);
+    assert(event->success && event->isReconnect);
+  }
+  clearStatus(-801, (1 << 2) | (1 << 3));
   remove(-801);
   MessageCache::m_Dbs.clear();
   std::cout << "WhatsApp contact bridge: partial refresh preserves group names, updates names/aliases, and cache reload retains them\n";
   std::cout << "WhatsApp status bridge: exact seconds-to-milliseconds conversion and unknown timestamp sentinel passed\n";
+  std::cout << "WhatsApp reconnect bridge: initial login unchanged, repeated transport reconnects notify the UI\n";
 }
