@@ -15,6 +15,7 @@
 #include <cassert>
 #include <clocale>
 #include <iostream>
+#include <fstream>
 #include <sqlite_modern_cpp.h>
 #include "protocol.h"
 #include "protocolutil.h"
@@ -258,6 +259,87 @@ static void TestViewOnceTerminal(const std::string& root)
   endwin(); delscreen(screen); fclose(output); fclose(input);
   UiColorConfig::Cleanup(); AppConfig::Cleanup();
   std::cout << "PASS: view-once photo metadata and legacy labels block automatic downloads and cached thumbnails, preserve captions and explicit Open/Save, leave ordinary attachments unchanged\n";
+}
+
+static void TestHistoryEmojiRendering(const std::string& root)
+{
+  std::setlocale(LC_ALL, "");
+  FILE* output = tmpfile(); FILE* input = tmpfile();
+  assert(output && input);
+  SCREEN* screen = newterm("xterm-256color", output, input);
+  assert(screen); set_term(screen); assert(resizeterm(24, 96) != ERR);
+  AppConfig::Init(); UiColorConfig::Init();
+  {
+    UiModel model;
+    auto protocol = std::make_shared<HistoricalTestProtocol>();
+    auto& impl = model.m_Impl;
+    const std::string profile = "WhatsAppMd_synthetic_render", chat = "synthetic-chat";
+    impl.m_Protocols[profile] = protocol;
+    impl.m_CurrentChat = {profile, chat}; impl.m_CurrentChatIndex = 0;
+    impl.m_MessageVec[profile][chat] = {"new", "peer", "old"};
+    impl.m_ContactInfos[profile]["self"].isSelf = true;
+    impl.m_ContactInfos[profile]["peer"].name = "Peer";
+    for (const std::string id : {"new", "peer", "old"})
+    {
+      ChatMessage message;
+      message.id = id; message.senderId = id == "peer" ? "peer" : "self";
+      message.isOutgoing = id != "peer"; message.isRead = true;
+      message.text = "Synthetic message " + id; message.timeSent = 1794150000000;
+      impl.m_Messages[profile][chat][id] = message;
+    }
+    mvwaddstr(stdscr, 0, 0, "SYNTHETIC LIST"); wrefresh(stdscr);
+    UiHistoryView history(UiViewParams(16, 0, 80, 22, true, &model));
+    for (int frame = 0; frame < 8; ++frame)
+    {
+      const wchar_t tone = L'\U0001f3fb' + (frame % 5);
+      std::wstring glyph = L"👍";
+      if (frame == 6) glyph += L'\ufe0f';
+      glyph += tone;
+      const auto emoji = StrUtil::ToString(glyph);
+      auto& older = impl.m_Messages[profile][chat]["old"];
+      older.reactions.emojiCounts.clear();
+      if (frame != 5) older.reactions.emojiCounts[emoji] = 2;
+      auto& latest = impl.m_Messages[profile][chat]["new"];
+      latest.timeSent += 60000;
+      latest.text = "Frame " + std::to_string(frame) + " Body " +
+        (frame == 5 ? "plain" : emoji) + " tail 漢字 é 🥺 https://example.test/path";
+      impl.m_SelectMessageActive = (frame % 2) != 0;
+      {
+        std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
+        history.SetDirty(true); history.Draw();
+      }
+      int combined = 0;
+      for (int y = 0; y < history.m_PaddedH; ++y)
+        for (int x = 0; x < history.m_PaddedW; ++x)
+        {
+          cchar_t cell = {};
+          assert(mvwin_wch(history.m_PaddedWin, y, x, &cell) != ERR);
+          if (cell.chars[0] != L'👍') continue;
+          const int modifier = frame == 6 ? 2 : 1;
+          assert(frame != 5 && cell.chars[modifier] == tone);
+          ++combined;
+          ++x; // Skip the second cell of this two-column glyph.
+        }
+      assert(combined == (frame == 5 ? 0 : 2));
+      assert(protocol->requests.empty());
+    }
+    // Capture the real incremental curses byte stream before leaving the screen.
+    // Kitty's independent, headless parser compares it with curses' own grid.
+    fflush(output); rewind(output);
+    std::ofstream raw(root + "/history-render.raw", std::ios::binary);
+    char bytes[4096]; size_t size = 0;
+    while ((size = fread(bytes, 1, sizeof(bytes), output)) != 0) raw.write(bytes, size);
+    std::ofstream expected(root + "/history-render.expected");
+    for (int y = 0; y < 24; ++y)
+    {
+      wchar_t row[96 * CCHARW_MAX + 1] = {};
+      mvwinnwstr(curscr, y, 0, row, 96 * CCHARW_MAX);
+      expected << StrUtil::ToString(row) << '\n';
+    }
+  }
+  endwin(); delscreen(screen); fclose(output); fclose(input);
+  UiColorConfig::Cleanup(); AppConfig::Cleanup();
+  std::cout << "PASS: production history groups all five skin tones in two-column glyphs, retains VS16, handles updates/removal and preserves message state\n";
 }
 
 int main(int argc, char** argv)
@@ -802,6 +884,7 @@ int main(int argc, char** argv)
     std::cout << "PASS: requested historical snapshots preserve live read/download state, unread badges, chat order/metadata and interaction while storing sorted history without provider requests\n";
   }
   TestViewOnceTerminal(argv[1]);
+  TestHistoryEmojiRendering(argv[1]);
   if (argc == 3)
   {
     // Actual compiled UiModel -> screen's outer tty -> Kitty -> NSDockTile ACK.
