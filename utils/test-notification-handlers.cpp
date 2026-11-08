@@ -25,6 +25,10 @@
 #include "messagecache.h"
 #include "../src/uimodel.h"
 #include "../src/uihistoryview.h"
+#include "../src/uilistview.h"
+#include "../src/uilistborderview.h"
+#include "../src/uientryview.h"
+#include "../src/uistatusview.h"
 #undef private
 #include "../src/uiview.h"
 #include "../src/uiconfig.h"
@@ -261,14 +265,38 @@ static void TestViewOnceTerminal(const std::string& root)
   std::cout << "PASS: view-once photo metadata and legacy labels block automatic downloads and cached thumbnails, preserve captions and explicit Open/Save, leave ordinary attachments unchanged\n";
 }
 
-static void TestHistoryEmojiRendering(const std::string& root)
+static void TestHistoryEmojiRendering(const std::string& root, const std::string& terminal,
+                                     const std::string& fixture, int rows, int columns)
 {
+  const char* screenEnvironment = std::getenv("STY");
+  const std::string oldScreenEnvironment = screenEnvironment ? screenEnvironment : "";
+  if (terminal == "screen") setenv("STY", "synthetic-screen", 1);
+  else unsetenv("STY");
   std::setlocale(LC_ALL, "");
   FILE* output = tmpfile(); FILE* input = tmpfile();
   assert(output && input);
-  SCREEN* screen = newterm("xterm-256color", output, input);
-  assert(screen); set_term(screen); assert(resizeterm(24, 96) != ERR);
+  SCREEN* screen = newterm(terminal.c_str(), output, input);
+  assert(screen); set_term(screen); assert(resizeterm(rows, columns) != ERR);
+  noecho(); nonl(); keypad(stdscr, TRUE);
   AppConfig::Init(); UiColorConfig::Init();
+  assert(StrUtil::TrimWString(L"ABCDEFGHIJK🇸🇬", 12) == L"ABCDEFGHIJK");
+  assert(StrUtil::TrimPadWString(L"ABCDEFGHIJK🇸🇬", 12) == L"ABCDEFGHIJK ");
+  assert(StrUtil::TrimWString(L"ABCDEFGHIJK🇸🇬", 13) == L"ABCDEFGHIJK🇸🇬");
+  assert(StrUtil::TrimWString(L"🇸🇬🇲🇾", 3) == L"🇸🇬");
+  assert(StrUtil::TrimWString(L"🇸🇬", 0).empty());
+  for (unsigned width = 1; width < 18; ++width)
+  {
+    const std::wstring original = L"ABCDEFGHIJK🇸🇬👍🏻X";
+    const auto wrapped = StrUtil::WordWrap(original, width, false, false, false, 0);
+    std::wstring joined;
+    for (const auto& line : wrapped)
+    {
+      assert(!line.empty());
+      assert(line.front() != L'\U0001f1ec' && line.front() != L'\U0001f3fb');
+      joined += line;
+    }
+    assert(joined == original);
+  }
   {
     UiModel model;
     auto protocol = std::make_shared<HistoricalTestProtocol>();
@@ -276,6 +304,15 @@ static void TestHistoryEmojiRendering(const std::string& root)
     const std::string profile = "WhatsAppMd_synthetic_render", chat = "synthetic-chat";
     impl.m_Protocols[profile] = protocol;
     impl.m_CurrentChat = {profile, chat}; impl.m_CurrentChatIndex = 0;
+    impl.m_ChatVec.push_back({profile, chat});
+    impl.m_ContactInfos[profile][chat].name = "Active Chat";
+    for (int i = 0; i < 80; ++i)
+    {
+      const auto id = "sidebar-" + std::to_string(i);
+      impl.m_ChatVec.push_back({profile, id});
+      impl.m_ContactInfos[profile][id].name = i % 4 == 0 ? "ABCDEFGHIJK🇸🇬" :
+        (i % 4 == 1 ? "CUMSA 🇸🇬🇲🇾 -" : (i % 4 == 2 ? "Peer 👍🏻" : "Chat " + std::to_string(i)));
+    }
     impl.m_MessageVec[profile][chat] = {"new", "peer", "old"};
     impl.m_ContactInfos[profile]["self"].isSelf = true;
     impl.m_ContactInfos[profile]["peer"].name = "Peer";
@@ -287,26 +324,56 @@ static void TestHistoryEmojiRendering(const std::string& root)
       message.text = "Synthetic message " + id; message.timeSent = 1794150000000;
       impl.m_Messages[profile][chat][id] = message;
     }
-    mvwaddstr(stdscr, 0, 0, "SYNTHETIC LIST"); wrefresh(stdscr);
-    UiHistoryView history(UiViewParams(16, 0, 80, 22, true, &model));
-    for (int frame = 0; frame < 8; ++frame)
+    for (int i = 0; i < 40; ++i)
     {
-      const wchar_t tone = L'\U0001f3fb' + (frame % 5);
+      const auto id = "older-" + std::to_string(i);
+      ChatMessage message;
+      message.id = id; message.senderId = i % 2 ? "self" : "peer";
+      message.isOutgoing = i % 2; message.isRead = true;
+      message.text = "Older message " + std::to_string(i) + " emoji 😔😪";
+      message.timeSent = 1794150000000 - (i + 1) * 60000;
+      if (i % 4 == 0) message.quotedId = "peer";
+      impl.m_MessageVec[profile][chat].push_back(id);
+      impl.m_Messages[profile][chat][id] = message;
+    }
+    UiListView list(UiViewParams(0, 1, 14, rows - 4, true, &model));
+    UiListBorderView borderView(UiViewParams(14, 1, 1, rows - 4, true, &model));
+    UiHistoryView history(UiViewParams(15, 1, columns - 15, rows - 4, true, &model));
+    UiStatusView statusView(UiViewParams(0, rows - 3, columns, 1, true, &model));
+    UiEntryView entryView(UiViewParams(0, rows - 2, columns, 1, true, &model));
+    const auto directory = root + "/history-render/" + fixture;
+    FileUtil::MkDir(root + "/history-render"); FileUtil::MkDir(directory);
+    int renderedFrame = 0;
+    for (int frame = 0; frame < 20; ++frame)
+    {
+      const int contentFrame = frame < 8 ? frame : 6;
+      const wchar_t tone = L'\U0001f3fb' + (contentFrame % 5);
       std::wstring glyph = L"👍";
-      if (frame == 6) glyph += L'\ufe0f';
+      if (contentFrame == 6) glyph += L'\ufe0f';
       glyph += tone;
       const auto emoji = StrUtil::ToString(glyph);
       auto& older = impl.m_Messages[profile][chat]["old"];
       older.reactions.emojiCounts.clear();
-      if (frame != 5) older.reactions.emojiCounts[emoji] = 2;
+      if (contentFrame != 5) older.reactions.emojiCounts[emoji] = 2;
       auto& latest = impl.m_Messages[profile][chat]["new"];
-      latest.timeSent += 60000;
-      latest.text = "Frame " + std::to_string(frame) + " Body " +
-        (frame == 5 ? "plain" : emoji) + " tail 漢字 é 🥺 https://example.test/path";
+      if (frame < 8) latest.timeSent += 60000;
+      latest.text = "Frame " + std::to_string(contentFrame) + " Body " +
+        (contentFrame == 5 ? "plain" : emoji) + " tail 漢字 é 🥺 https://example.test/path";
       impl.m_SelectMessageActive = (frame % 2) != 0;
+      if (frame < 8) impl.m_CurrentChatIndex = frame % 2 == 0 ? 0 : 70;
+      const int scrollOffsets[] = {0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0, 1};
+      impl.m_MessageOffset[profile][chat] = frame < 8 ? (frame % 3 == 0 ? 0 : 10) : scrollOffsets[frame - 8];
+      impl.GetEntryStr() = contentFrame == 5 ? L"" : L"Draft " + glyph + L" tail";
+      impl.GetEntryPos() = static_cast<int>(impl.GetEntryStr().size());
       {
         std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
-        history.SetDirty(true); history.Draw();
+        list.SetDirty(frame < 8 && frame % 3 != 2); list.Draw();
+        borderView.SetDirty(frame == 0); borderView.Draw();
+        history.SetDirty(frame >= 8 || frame % 3 != 1); history.Draw();
+        if (frame >= 8 || frame % 3 != 1) renderedFrame = contentFrame;
+        statusView.SetDirty(frame < 8 && frame % 2 == 0); statusView.Draw();
+        entryView.SetDirty(frame < 8); entryView.Draw();
+        curs_set(1);
       }
       int combined = 0;
       for (int y = 0; y < history.m_PaddedH; ++y)
@@ -315,31 +382,58 @@ static void TestHistoryEmojiRendering(const std::string& root)
           cchar_t cell = {};
           assert(mvwin_wch(history.m_PaddedWin, y, x, &cell) != ERR);
           if (cell.chars[0] != L'👍') continue;
-          const int modifier = frame == 6 ? 2 : 1;
-          assert(frame != 5 && cell.chars[modifier] == tone);
+          const int modifier = renderedFrame == 6 ? 2 : 1;
+          assert(renderedFrame != 5);
+          if (terminal == "screen") assert(cell.chars[1] == 0);
+          else assert(cell.chars[modifier] == L'\U0001f3fb' + renderedFrame % 5);
           ++combined;
           ++x; // Skip the second cell of this two-column glyph.
         }
-      assert(combined == (frame == 5 ? 0 : 2));
+      if (frame < 8) assert(combined == (renderedFrame % 3 == 0 ? 2 : 0));
       assert(protocol->requests.empty());
-    }
-    // Capture the real incremental curses byte stream before leaving the screen.
-    // Kitty's independent, headless parser compares it with curses' own grid.
-    fflush(output); rewind(output);
-    std::ofstream raw(root + "/history-render.raw", std::ios::binary);
-    char bytes[4096]; size_t size = 0;
-    while ((size = fread(bytes, 1, sizeof(bytes), output)) != 0) raw.write(bytes, size);
-    std::ofstream expected(root + "/history-render.expected");
-    for (int y = 0; y < 24; ++y)
-    {
-      wchar_t row[96 * CCHARW_MAX + 1] = {};
-      mvwinnwstr(curscr, y, 0, row, 96 * CCHARW_MAX);
-      expected << StrUtil::ToString(row) << '\n';
+      fflush(output); rewind(output);
+      std::ofstream raw(directory + "/" + std::to_string(frame) + ".raw", std::ios::binary);
+      char bytes[4096]; size_t size = 0;
+      while ((size = fread(bytes, 1, sizeof(bytes), output)) != 0) raw.write(bytes, size);
+      fseek(output, 0, SEEK_END);
+      std::ofstream expected(directory + "/" + std::to_string(frame) + ".expected");
+      std::ofstream cells(directory + "/" + std::to_string(frame) + ".cells");
+      expected << rows << " " << columns << '\n';
+      int cursorY = 0, cursorX = 0;
+      getyx(curscr, cursorY, cursorX);
+      for (int y = 0; y < rows; ++y)
+      {
+        std::wstring positioned;
+        std::wstring displayed;
+        int nextGlyphColumn = 0;
+        for (int x = 0; x < columns; ++x)
+        {
+          cchar_t cell = {};
+          mvwin_wch(curscr, y, x, &cell);
+          const bool ascii = cell.chars[0] >= 32 && cell.chars[0] <= 126 &&
+            !cell.chars[1] && !(cell.attr & A_ALTCHARSET);
+          positioned += ascii ? cell.chars[0] : L'\uffff';
+          if (x >= nextGlyphColumn)
+          {
+            if ((cell.attr & A_ALTCHARSET) && cell.chars[0] == L'x') displayed += L'│';
+            else if (!cell.chars[0]) displayed += L' ';
+            else
+              for (int part = 0; part < CCHARW_MAX && cell.chars[part]; ++part)
+                displayed += cell.chars[part];
+            nextGlyphColumn = x + std::max(1, wcwidth(cell.chars[0]));
+          }
+        }
+        expected << StrUtil::ToString(displayed) << '\n';
+        cells << StrUtil::ToString(positioned) << '\n';
+      }
+      wmove(curscr, cursorY, cursorX);
     }
   }
   endwin(); delscreen(screen); fclose(output); fclose(input);
   UiColorConfig::Cleanup(); AppConfig::Cleanup();
-  std::cout << "PASS: production history groups all five skin tones in two-column glyphs, retains VS16, handles updates/removal and preserves message state\n";
+  if (screenEnvironment) setenv("STY", oldScreenEnvironment.c_str(), 1);
+  else unsetenv("STY");
+  std::cout << "PASS: " << fixture << " draws stable emoji cells through content changes and scrolling, with intact flag/wrap boundaries\n";
 }
 
 int main(int argc, char** argv)
@@ -884,7 +978,9 @@ int main(int argc, char** argv)
     std::cout << "PASS: requested historical snapshots preserve live read/download state, unread badges, chat order/metadata and interaction while storing sorted history without provider requests\n";
   }
   TestViewOnceTerminal(argv[1]);
-  TestHistoryEmojiRendering(argv[1]);
+  TestHistoryEmojiRendering(argv[1], "xterm-256color", "xterm", 24, 96);
+  TestHistoryEmojiRendering(argv[1], "screen", "screen", 24, 96);
+  TestHistoryEmojiRendering(argv[1], "screen", "screen-wide", 64, 216);
   if (argc == 3)
   {
     // Actual compiled UiModel -> screen's outer tty -> Kitty -> NSDockTile ACK.

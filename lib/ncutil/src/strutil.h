@@ -50,6 +50,7 @@ public:
   static std::wstring ToWString(const std::string& p_Str);
   static void Trim(std::string& p_Str);
   static std::wstring TrimPadWString(const std::wstring& p_Str, int p_Len);
+  static std::wstring TrimWString(const std::wstring& p_Str, int p_Len);
   static std::vector<std::wstring> WordWrap(std::wstring p_Text, unsigned p_LineLength, bool p_ProcessFormatFlowed,
                                             bool p_OutputFormatFlowed, bool p_QuoteWrap, int p_ExpandTabSize);
   static std::vector<std::wstring> WordWrap(std::wstring p_Text, unsigned p_LineLength, bool p_ProcessFormatFlowed,

@@ -56,13 +56,15 @@ void UiEntryView::Draw()
     {
       line = lines.at(i + yoffs).c_str();
       line.erase(std::remove(line.begin(), line.end(), EMOJI_PAD), line.end());
-      mvwaddwstr(m_Win, i, 0, line.c_str());
+      UiCursesText::Draw(m_Win, i, 0, line.c_str(), line.size());
     }
   }
 
   wattroff(m_Win, attribute | colorPair);
 
-  m_CursX = cx;
+  std::wstring cursorPrefix = (cy < static_cast<int>(lines.size())) ? lines[cy].substr(0, cx) : L"";
+  cursorPrefix.erase(std::remove(cursorPrefix.begin(), cursorPrefix.end(), EMOJI_PAD), cursorPrefix.end());
+  m_CursX = std::min(std::max(0, m_W - 1), UiCursesText::Width(cursorPrefix));
   m_CursY = (cy - yoffs);
 
   wmove(m_Win, m_CursY, m_CursX);

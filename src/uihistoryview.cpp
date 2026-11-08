@@ -34,40 +34,6 @@ namespace
   uint64_t s_ThumbnailRevision = 0;
   const std::wstring s_ThumbnailLine = L"\x1";
 
-  int DrawHistoryText(WINDOW* p_Window, int p_Y, const std::wstring& p_Text, int p_Limit)
-  {
-    if (wmove(p_Window, p_Y, 0) == ERR) return ERR;
-    const auto limit = std::min(p_Text.size(), static_cast<size_t>(p_Limit));
-    size_t position = 0;
-    while (position < limit)
-    {
-      size_t modifier = position + 1;
-      if (modifier < limit && p_Text[modifier] == L'\ufe0f') ++modifier;
-      if (modifier < limit && wcwidth(p_Text[position]) == 2 &&
-          p_Text[modifier] >= L'\U0001f3fb' && p_Text[modifier] <= L'\U0001f3ff')
-      {
-        // libc counts the tone as another spacing character. Store it in the
-        // base glyph's cchar_t so curses and the terminal both advance two cells.
-        cchar_t glyph = {};
-        const wchar_t base[] = {p_Text[position], L'\0'};
-        attr_t attributes = 0;
-        short color = 0;
-        wattr_get(p_Window, &attributes, &color, nullptr);
-        if (setcchar(&glyph, base, attributes, color, nullptr) == ERR) return ERR;
-        size_t length = modifier - position + 1;
-        std::copy_n(p_Text.data() + position, length, glyph.chars);
-        if (wadd_wch(p_Window, &glyph) == ERR) return ERR;
-        position += length;
-      }
-      else
-      {
-        if (waddnwstr(p_Window, p_Text.data() + position, 1) == ERR) return ERR;
-        ++position;
-      }
-    }
-    return OK;
-  }
-
   std::string ThumbnailCommand()
   {
     const std::string configured = UiConfig::GetStr("thumbnail_command");
@@ -499,7 +465,7 @@ void UiHistoryView::Draw()
         // rows, but an inserted trailing space splits a long URL at every wrap.
         const std::wstring wdisp = (isReaction || (!isAttachment && !isQuote)) ?
           *wline : StrUtil::TrimPadWString(*wline, m_PaddedW);
-        DrawHistoryText(m_PaddedWin, y, wdisp, m_PaddedW);
+        UiCursesText::Draw(m_PaddedWin, y, 0, wdisp.c_str(), m_PaddedW);
       }
 
       if (!isThumbnail && isAttachment)
@@ -582,7 +548,7 @@ void UiHistoryView::Draw()
     }
 
     std::wstring wdisp = StrUtil::TrimPadWString(wheader, m_PaddedW);
-    DrawHistoryText(m_PaddedWin, y, wdisp, m_PaddedW);
+    UiCursesText::Draw(m_PaddedWin, y, 0, wdisp.c_str(), m_PaddedW);
 
     wattroff(m_PaddedWin, attributeName | colorPairName);
 

@@ -73,7 +73,7 @@ void UiTopView::Draw()
   int topStrRightWidth = StrUtil::WStringWidth(topWStrRight);
 
   std::wstring topWStr = topWStrLeft + std::wstring(m_W - topStrLeftWidth - topStrRightWidth, ' ') + topWStrRight;
-  mvwaddnwstr(m_Win, 0, 0, topWStr.c_str(), topWStr.size());
+  UiCursesText::Draw(m_Win, 0, 0, topWStr.c_str(), topWStr.size());
 
   wattroff(m_Win, attribute | colorPair);
   wrefresh(m_Win);

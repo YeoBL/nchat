@@ -80,7 +80,7 @@ void UiDialog::DrawBorder()
   std::wstring wtitle = StrUtil::ToWString(title);
   int titlex = std::max(0, (m_W - (int)wtitle.size()) / 2) + 2;
   int titlew = std::min((int)wtitle.size(), m_W);
-  mvwaddnwstr(m_BorderWin, 0, titlex, wtitle.c_str(), titlew);
+  UiCursesText::Draw(m_BorderWin, 0, titlex, wtitle.c_str(), titlew);
 
   if (!m_Footer.empty())
   {
@@ -88,7 +88,7 @@ void UiDialog::DrawBorder()
     std::wstring wfooter = StrUtil::ToWString(footer);
     int footerx = std::max(0, (m_W - (int)wfooter.size()) / 2) + 2;
     int footerw = std::min((int)wfooter.size(), m_W);
-    mvwaddnwstr(m_BorderWin, m_H + 1, footerx, wfooter.c_str(), footerw);
+    UiCursesText::Draw(m_BorderWin, m_H + 1, footerx, wfooter.c_str(), footerw);
   }
 
   wattroff(m_BorderWin, attribute | colorPair);

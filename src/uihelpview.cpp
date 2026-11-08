@@ -213,7 +213,7 @@ void UiHelpView::Draw()
   }
 
   wstr = L" " + wstr + std::wstring(std::max(m_W - (int)wstr.size(), 0), L' ');
-  mvwaddnwstr(m_Win, 0, 0, wstr.c_str(), std::min((int)wstr.size(), m_W));
+  UiCursesText::Draw(m_Win, 0, 0, wstr.c_str(), std::min((int)wstr.size(), m_W));
 
   wattroff(m_Win, attribute | colorPair);
   wrefresh(m_Win);

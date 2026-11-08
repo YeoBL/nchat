@@ -93,7 +93,7 @@ void UiListView::Draw()
         name = StrUtil::Textize(name);
       }
 
-      std::wstring wname = StrUtil::ToWString(name).substr(0, m_PaddedW);
+      std::wstring wname = StrUtil::ToWString(name);
       wname = StrUtil::TrimPadWString(wname, m_PaddedW);
 
       if (unreads[i])
@@ -101,13 +101,13 @@ void UiListView::Draw()
         wattron(m_PaddedWin, colorPairUnread);
       }
 
-      mvwaddnwstr(m_PaddedWin, y, 0, wname.c_str(), wname.size());
+      UiCursesText::Draw(m_PaddedWin, y, 0, wname.c_str(), wname.size());
 
       if (unreads[i])
       {
         static const std::string unreadIndicator = " " + UiConfig::GetStr("unread_indicator");
         static const std::wstring wunread = StrUtil::ToWString(unreadIndicator);
-        mvwaddnwstr(m_PaddedWin, y, (m_PaddedW - StrUtil::WStringWidth(wunread)), wunread.c_str(), wunread.size());
+        UiCursesText::Draw(m_PaddedWin, y, (m_PaddedW - StrUtil::WStringWidth(wunread)), wunread.c_str(), wunread.size());
 
         wattron(m_PaddedWin, colorPair);
       }

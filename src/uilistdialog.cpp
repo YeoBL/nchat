@@ -204,7 +204,7 @@ void UiListDialog::Draw()
       wattron(m_Win, attributeSelected);
     }
 
-    mvwaddnwstr(m_Win, (i - offset), 0, wdisp.c_str(), std::min((int)wdisp.size(), m_W));
+    UiCursesText::Draw(m_Win, (i - offset), 0, wdisp.c_str(), std::min((int)wdisp.size(), m_W));
 
     if (i == m_Index)
     {

@@ -136,7 +136,7 @@ void UiTextInputDialog::Draw()
   }
 
   int w = std::min((int)wdisp.size(), m_W - 2);
-  mvwaddnwstr(m_Win, 1, 1, wdisp.c_str(), w);
+  UiCursesText::Draw(m_Win, 1, 1, wdisp.c_str(), w);
   wmove(m_Win, 1, promptWidth + m_EntryPos - offset);
 
   wattroff(m_Win, attribute | colorPair);

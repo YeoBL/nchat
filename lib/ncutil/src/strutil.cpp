@@ -427,6 +427,13 @@ void StrUtil::Trim(std::string& p_Str)
 std::wstring StrUtil::TrimPadWString(const std::wstring& p_Str, int p_Len)
 {
   p_Len = std::max(p_Len, 0);
+  std::wstring str = TrimWString(p_Str, p_Len);
+  return str + std::wstring(std::max(0, p_Len - WStringWidth(str)), L' ');
+}
+
+std::wstring StrUtil::TrimWString(const std::wstring& p_Str, int p_Len)
+{
+  p_Len = std::max(p_Len, 0);
   std::wstring str = p_Str;
   if (WStringWidth(str) > p_Len)
   {
@@ -437,9 +444,14 @@ std::wstring StrUtil::TrimPadWString(const std::wstring& p_Str, int p_Len)
       str = str.substr(0, --subLen);
     }
   }
-  else if (WStringWidth(str) < p_Len)
+  if (str.size() < p_Str.size())
   {
-    str = str + std::wstring(p_Len - WStringWidth(str), ' ');
+    // Regional indicators form flag pairs. A clipped half has a different
+    // terminal width, so back up to the beginning of that pair.
+    size_t start = str.size();
+    while (start > 0 && p_Str[start - 1] >= L'\U0001f1e6' && p_Str[start - 1] <= L'\U0001f1ff') --start;
+    if ((str.size() - start) % 2 && p_Str[str.size()] >= L'\U0001f1e6' && p_Str[str.size()] <= L'\U0001f1ff')
+      str.pop_back();
   }
   return str;
 }
@@ -615,7 +627,19 @@ std::vector<std::wstring> StrUtil::WordWrap(std::wstring p_Text, unsigned p_Line
         for (size_t i = 0; i < linePart.size(); ++i)
         {
           wchar_t wc = linePart[i];
-          unsigned char_width = std::max(wcwidth(wc), 1);
+          size_t charLength = 1;
+          if (wc >= L'\U0001f1e6' && wc <= L'\U0001f1ff' && i + 1 < linePart.size() &&
+              linePart[i + 1] >= L'\U0001f1e6' && linePart[i + 1] <= L'\U0001f1ff') charLength = 2;
+          else if (wcwidth(wc) == 2)
+          {
+            size_t modifier = i + 1;
+            if (modifier < linePart.size() && linePart[modifier] == L'\ufe0f') ++modifier;
+            if (modifier < linePart.size() && linePart[modifier] >= L'\U0001f3fb' &&
+                linePart[modifier] <= L'\U0001f3ff') charLength = modifier - i + 1;
+          }
+          unsigned char_width = 0;
+          for (size_t part = 0; part < charLength; ++part)
+            char_width += std::max(wcwidth(linePart[i + part]), 1);
 
           // Track the most recent space for wrapping
           if (wc == L' ')
@@ -636,7 +660,9 @@ std::vector<std::wstring> StrUtil::WordWrap(std::wstring p_Text, unsigned p_Line
             {
               // No space found, hard wrap at current character (single width char) or
               // previous (double width char)
-              const int lenOffset = (char_width == 1) ? 1 : 0;
+              // Keep flags/modifiers together, and always advance even when a
+              // glyph is wider than a very narrow wrapping column.
+              const int lenOffset = i == 0 ? static_cast<int>(charLength) : ((char_width == 1) ? 1 : 0);
               lines.push_back(linePart.substr(0, i + lenOffset));
               linePart = linePart.substr(i + lenOffset);
             }
@@ -646,8 +672,9 @@ std::vector<std::wstring> StrUtil::WordWrap(std::wstring p_Text, unsigned p_Line
             break;
           }
 
-          tmpline += wc;
+          tmpline += linePart.substr(i, charLength);
           current_width += char_width;
+          i += charLength - 1;
         }
 
         if (!lineWrapped)

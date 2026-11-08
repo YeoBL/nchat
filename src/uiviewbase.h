@@ -9,7 +9,7 @@
 
 #include <mutex>
 
-#include <ncurses.h>
+#include "uicursestext.h"
 
 class UiModel;
 

@@ -52,7 +52,7 @@ void UiStatusView::Draw()
 
     std::string chatStatus = m_Model->GetChatStatusLocked(currentChat.first, currentChat.second);
     wstatus = std::wstring(statusVPad, ' ') +
-      StrUtil::ToWString(name).substr(0, m_W / 2) +
+      StrUtil::TrimWString(StrUtil::ToWString(name), m_W / 2) +
       StrUtil::ToWString(profileDisplayName) +
       StrUtil::ToWString(chatStatus);
 
@@ -90,7 +90,7 @@ void UiStatusView::Draw()
     wstatus = StrUtil::TrimPadWString(wstatus, m_W);
   }
 
-  mvwaddnwstr(m_Win, 0, 0, wstatus.c_str(), wstatus.size());
+  UiCursesText::Draw(m_Win, 0, 0, wstatus.c_str(), wstatus.size());
 
   wattroff(m_Win, attribute | colorPair);
   wrefresh(m_Win);

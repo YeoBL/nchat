@@ -195,13 +195,13 @@ private:
     wattron(m_Win, attr | color);
     auto labels = StrUtil::WordWrap(StrUtil::ToWString(m_Label), std::max(1, m_W), false, false, false, 2);
     const int labelRows = std::min(std::max(1, m_H / 3), static_cast<int>(labels.size()));
-    for (int i = 0; i < labelRows; ++i) mvwaddnwstr(m_Win, i, 0, labels[i].c_str(), m_W);
+    for (int i = 0; i < labelRows; ++i) UiCursesText::Draw(m_Win, i, 0, labels[i].c_str(), m_W);
     const int start = std::min(m_H - 1, labelRows + 1);
     const int height = std::max(1, m_H - start);
     const auto layout = LayoutField(m_Entry, std::max(1, m_W - 1), m_Pos);
     const int offset = std::max(0, layout.row - height + 1);
     for (int i = offset; i < std::min(static_cast<int>(layout.lines.size()), offset + height); ++i)
-      mvwaddnwstr(m_Win, start + i - offset, 0, layout.lines[i].c_str(), m_W);
+      UiCursesText::Draw(m_Win, start + i - offset, 0, layout.lines[i].c_str(), m_W);
     wmove(m_Win, std::min(m_H - 1, start + layout.row - offset),
       std::min(std::max(0, m_W - 1), layout.col));
     wattroff(m_Win, attr | color);

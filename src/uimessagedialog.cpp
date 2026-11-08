@@ -121,7 +121,7 @@ void UiMessageDialog::Draw()
     const std::wstring& wdisp = wlines.at(i);
     int w = std::min((int)wdisp.size(), m_W);
     int x = std::max(0, ((m_W - w) / 2));
-    mvwaddnwstr(m_Win, i + 1, x, wdisp.c_str(), w);
+    UiCursesText::Draw(m_Win, i + 1, x, wdisp.c_str(), w);
   }
 
   wattroff(m_Win, attribute | colorPair);
