@@ -896,6 +896,7 @@ type WmEventHandler struct {
 	importedHistory bool
 	notifyMessage messageNotifyFunc // Optional per-handler sink for offline bridge fixtures.
 	notifyStatus func(int, string, int, int) // Optional offline presence sink.
+	notifyContact func(int, string, string, string, int, int, int) // Optional offline contact sink.
 }
 
 func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
@@ -1005,6 +1006,9 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 
 	case *events.JoinedGroup:
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
+		if evt != nil {
+			handler.PublishGroupName(&evt.GroupInfo)
+		}
 
 	case *events.OfflineSyncCompleted:
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
@@ -1277,7 +1281,34 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 	}
 }
 
+func (handler *WmEventHandler) PublishGroupName(group *types.GroupInfo) {
+	if group == nil || group.JID.IsEmpty() || group.JID.Server != types.GroupServer {
+		return
+	}
+	groupID := StrFromJid(group.JID)
+	name := SanitizeName(GetGroupDisplayName(handler.connId, group))
+	// Partial metadata must not replace a name already learned from the service.
+	if group.Name == "" {
+		knownName := GetContactName(handler.connId, groupID)
+		if knownName != "" && knownName != groupID && knownName != "Unnamed Group" {
+			name = knownName
+		}
+	}
+	AddContactName(handler.connId, groupID, name)
+	notify := handler.notifyContact
+	if notify == nil {
+		notify = CWmNewContactsNotify
+	}
+	notify(handler.connId, groupID, name, "", 0, 0, NotifyDirect)
+}
+
 func (handler *WmEventHandler) HandleGroupInfo(groupInfo *events.GroupInfo) {
+	if groupInfo == nil || groupInfo.JID.IsEmpty() || groupInfo.JID.Server != types.GroupServer {
+		return
+	}
+	if groupInfo.Name != nil {
+		handler.PublishGroupName(&types.GroupInfo{JID: groupInfo.JID, GroupName: *groupInfo.Name})
+	}
 	connId := handler.connId
 	client := GetClient(connId)
 	if client == nil {
@@ -1378,7 +1409,7 @@ func (handler *WmEventHandler) HandleGroupInfo(groupInfo *events.GroupInfo) {
 	ResetTypingStatus(connId, chatId, senderId, fromMe, isSyncRead)
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: %s", chatId, text))
-	CWmNewMessagesNotify(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
+	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
 		BoolToInt(isRead), BoolToInt(isEdited))
 }
 

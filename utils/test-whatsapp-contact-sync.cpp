@@ -85,6 +85,27 @@ int main()
   fetch->profileId = profile;
   MessageCache::PerformRequest(fetch);
   MessageCache::m_MessageHandler = nullptr;
+  // A live join/rename uses NotifyDirect and must merge into the durable cache.
+  *db << "INSERT INTO contacts2 VALUES('12030004@g.us','12030004@g.us','',0,0);";
+  for (const std::string title : {"New Study Group", "Renamed Study Group"})
+  {
+    notify(-801, strdup("12030004@g.us"), strdup(title.c_str()), strdup(""), 0, 0, 0);
+    assert(provider->m_RequestsQueue.size() == 1);
+    auto deferred = std::static_pointer_cast<DeferNotifyRequest>(provider->m_RequestsQueue.front());
+    provider->m_RequestsQueue.pop_front();
+    auto event = std::static_pointer_cast<NewContactsNotify>(deferred->serviceMessage);
+    assert(!event->fullSync && event->contactInfos.size() == 1);
+    assert(event->contactInfos.front().id == "12030004@g.us" && event->contactInfos.front().name == title);
+    assert(!event->contactInfos.front().isSelf && !event->contactInfos.front().isAlias);
+    auto update = std::make_shared<MessageCache::AddContactsRequest>();
+    update->profileId = profile; update->fullSync = event->fullSync;
+    update->contactInfos = event->contactInfos;
+    MessageCache::PerformRequest(update);
+    *db << "SELECT name FROM contacts2 WHERE id='12030004@g.us';" >> name;
+    assert(name == title);
+    *db << "SELECT name FROM contacts2 WHERE id='older@g.us';" >> name;
+    assert(name == "Earlier Group");
+  }
   for (const auto seconds : {1793872800, 0})
   {
     statusNotify(-801, strdup("person@s.whatsapp.net"), 0, seconds);
@@ -118,4 +139,5 @@ int main()
   std::cout << "WhatsApp contact bridge: partial refresh preserves group names, updates names/aliases, and cache reload retains them\n";
   std::cout << "WhatsApp status bridge: exact seconds-to-milliseconds conversion and unknown timestamp sentinel passed\n";
   std::cout << "WhatsApp reconnect bridge: initial login unchanged, repeated transport reconnects notify the UI\n";
+  std::cout << "WhatsApp live group names: direct join/rename updates persist while unrelated names survive\n";
 }

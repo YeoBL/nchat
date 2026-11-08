@@ -276,6 +276,30 @@ int main(int argc, char** argv)
   TestPresenceStatus();
   {
     UiModel::Impl model(nullptr);
+    const std::string profile = "WhatsAppMd_live_group_names", chat = "12030004@g.us";
+    model.m_TerminalActive = false;
+    incoming(model, "before-metadata", "Group message", false, profile, chat);
+    const auto chats = model.m_ChatVec;
+    const auto pending = model.m_Notifications.PendingChats();
+    const bool unread = model.m_ChatInfos[profile][chat].isUnread;
+    assert(model.GetContactListName(profile, chat, true, true) == chat);
+    for (const std::string title : {"Study Group 🇸🇬", "Renamed Study Group"})
+    {
+      auto event = std::make_shared<NewContactsNotify>(profile);
+      event->fullSync = false;
+      ContactInfo contact;
+      contact.id = chat; contact.name = title;
+      event->contactInfos.push_back(contact);
+      model.MessageHandler(event);
+      assert(model.GetContactListName(profile, chat, true, true) == title);
+      assert(model.m_ChatVec == chats && model.m_Notifications.PendingChats() == pending);
+      assert(model.m_ChatInfos[profile][chat].isUnread == unread);
+      assert(!model.m_Messages[profile][chat].at("before-metadata").isRead);
+    }
+    std::cout << "PASS: live group name replaces numeric ID after message arrival, renames refresh the list and preserve unread state\n";
+  }
+  {
+    UiModel::Impl model(nullptr);
     const std::string profile = "WhatsAppMd_channel_metadata_test";
     ChatInfo existing;
     existing.id = "existing@g.us"; existing.isPinned = true; existing.isArchived = true;
