@@ -974,8 +974,13 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
     case GetPresenceRequestType:
       {
-        // Background presence sampling: read TDLib's cached user status,
-        // which is kept fresh by updateUserStatus pushes for recent dialogs.
+        // Background presence sampling: read TDLib's cached user status.
+        // This is a LOCAL cache read (getUser is an offline method); the
+        // server side already refreshes every contact's status through the
+        // single contacts.getStatuses request TDLib issues on login,
+        // online-privacy and contact-sync events, plus updateUserStatus
+        // pushes for contacts and recent dialogs while this account is
+        // online. No per-user server request exists in this poll path.
         std::shared_ptr<GetPresenceRequest> getPresenceRequest =
           std::static_pointer_cast<GetPresenceRequest>(p_RequestMessage);
 

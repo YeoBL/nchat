@@ -80,20 +80,26 @@ history. In `ui.conf`:
 
 ```ini
 presence_poll_enabled=1
-presence_poll_interval=60
-presence_poll_count=30
+presence_poll_interval=120
+presence_poll_fast_interval=5
+presence_poll_fast_count=10
+presence_poll_count=50
 presence_poll_heartbeat_sec=300
 presence_poll_hidden_detect_sec=172800
 ```
 
 - `presence_poll_enabled` (1/0) turns the poller on or off.
 - `presence_poll_interval` is the nominal seconds between polls of each
-  contact (floored at 10). Every contact starts at a random offset inside
-  the interval and drifts by +/-20% per reschedule, so requests never arrive
-  in one burst. After a long pause the requests are re-phased instead of
-  firing at once.
+  contact outside the fast tier (floored at 10; default 120). Every contact
+  starts at a random offset inside its interval and drifts by +/-20% per
+  reschedule, so requests never arrive in one burst. After a long pause the
+  requests are re-phased instead of firing at once.
+- `presence_poll_fast_interval` / `presence_poll_fast_count`: the first
+  `presence_poll_fast_count` most-recently-spoken-to contacts poll every
+  `presence_poll_fast_interval` seconds (defaults 10 contacts / 5 s), and
+  the rest every `presence_poll_interval` seconds.
 - `presence_poll_count` is the number of most recent private chats polled per
-  account (30 by default); setting it to 0 disables polling. Groups, self
+  account (50 by default); setting it to 0 disables polling. Groups, self
   chats, status/newsletter ids and protocols without background presence
   support are excluded.
 - `presence_poll_heartbeat_sec` re-records the last known status of a contact
@@ -127,11 +133,13 @@ values 1 and 2 mean Telegram's coarse "last month"/"last week" status, 0 is
 reserved, and -1 means unknown or hidden; heartbeat re-affirmations add
 `"hb":1`. Lines with `"mark":"hidden"` record when a contact was skipped.
 Only genuine service observations are recorded, never guesses derived from
-the UI display state. Telegram samples use the status TDLib already keeps
-for recent chats; WhatsApp samples come from presence subscriptions, so
-WhatsApp data only flows while this installation is online (see
-`online_status_share`). The files stay on this machine and are never
-uploaded.
+the UI display state. Telegram sampling reads TDLib's local user cache (an
+offline read — no per-user server request); the server-side freshness comes
+from the single `contacts.getStatuses` request TDLib already issues on
+login/online-privacy/contact-sync events plus status pushes while online.
+WhatsApp samples come from presence subscriptions, so WhatsApp data only
+flows while this installation is online (see `online_status_share`). The
+files stay on this machine and are never uploaded.
 
 ### Latest reported status screen
 

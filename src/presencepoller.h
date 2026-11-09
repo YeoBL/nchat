@@ -83,14 +83,20 @@ public:
   // private chats first, already truncated by the caller). p_SteadyMs must be
   // monotonic; p_WallMs is used only for stored timestamps. p_CanObserve is
   // false while the account is disconnected or announced offline; no eligible
-  // time accrues then. Registers first-seen times, accumulates eligible time
-  // for continuously selected users, marks never-observed users hidden after
-  // p_HiddenDetectMs of eligible time, and returns the user ids due for a
-  // poll request now (bounded by a small per-tick dispatch budget).
+  // time accrues then. The first p_FastCount candidates poll on
+  // p_FastIntervalMs and the rest on p_PollIntervalMs (both with a random
+  // phase and +/-20% jitter), so frequently spoken-to contacts are sampled
+  // more often without bursting. Registers first-seen times, accumulates
+  // eligible time for continuously selected users, marks never-observed
+  // users hidden after p_HiddenDetectMs of eligible time, and returns the
+  // user ids due for a poll request now (bounded by a small per-tick
+  // dispatch budget).
   std::vector<std::string> Tick(int64_t p_SteadyMs, int64_t p_WallMs,
                                 const std::string& p_ProfileId,
                                 const std::vector<std::string>& p_Candidates,
                                 int64_t p_PollIntervalMs,
+                                int64_t p_FastIntervalMs,
+                                size_t p_FastCount,
                                 int64_t p_HiddenDetectMs,
                                 bool p_CanObserve);
 
@@ -306,12 +312,21 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
                                                      const std::string& p_ProfileId,
                                                      const std::vector<std::string>& p_Candidates,
                                                      int64_t p_PollIntervalMs,
+                                                     int64_t p_FastIntervalMs,
+                                                     size_t p_FastCount,
                                                      int64_t p_HiddenDetectMs,
                                                      bool p_CanObserve)
 {
   if (!m_Initialized) return std::vector<std::string>();
 
   if (p_PollIntervalMs < 1000) p_PollIntervalMs = 1000;
+  if (p_FastIntervalMs < 1000) p_FastIntervalMs = 1000;
+  if (p_FastIntervalMs > p_PollIntervalMs) p_FastIntervalMs = p_PollIntervalMs;
+
+  // Per-user tier: the first p_FastCount candidates poll faster.
+  auto userInterval = [&](size_t p_Rank) -> int64_t {
+    return (p_Rank < p_FastCount) ? p_FastIntervalMs : p_PollIntervalMs;
+  };
 
   auto& states = m_UserStates[p_ProfileId];
   bool dirty = false;
@@ -393,34 +408,42 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
     }
   }
 
-  // New users start at a random offset inside the interval so the whole set
-  // does not fire at once.
+  // New users start at a random offset inside their tier's interval so the
+  // whole set does not fire at once.
+  std::unordered_map<std::string, size_t> rank;
+  rank.reserve(p_Candidates.size());
+  for (size_t i = 0; i < p_Candidates.size(); ++i)
+  {
+    rank[p_Candidates[i]] = i;
+  }
   for (const std::string& userId : nowSelected)
   {
     if (!nextPoll.count(userId))
     {
-      nextPoll[userId] = p_SteadyMs + UniformInt(0, p_PollIntervalMs - 1);
+      const int64_t interval = userInterval(rank[userId]);
+      nextPoll[userId] = p_SteadyMs + UniformInt(0, interval - 1);
     }
   }
 
-  // Users due now; reschedule with a +/-20% jitter around the interval.
-  // Long-overdue users are re-phased instead of firing a catch-up burst, and
-  // only the per-tick dispatch budget is actually fired and rescheduled; the
-  // rest stay overdue and fire on later ticks.
+  // Users due now; reschedule with a +/-20% jitter around their tier's
+  // interval. Long-overdue users are re-phased instead of firing a catch-up
+  // burst, and only the per-tick dispatch budget is actually fired and
+  // rescheduled; the rest stay overdue and fire on later ticks.
   std::vector<std::string> due;
-  const int64_t jitter = std::max<int64_t>(1000, p_PollIntervalMs / 5);
   for (const std::string& userId : nowSelected)
   {
     int64_t& t = nextPoll[userId];
     if (t > p_SteadyMs) continue;
-    if (t < p_SteadyMs - 2 * p_PollIntervalMs)
+    const int64_t interval = userInterval(rank[userId]);
+    if (t < p_SteadyMs - 2 * interval)
     {
-      t = p_SteadyMs + UniformInt(0, p_PollIntervalMs - 1);
+      t = p_SteadyMs + UniformInt(0, interval - 1);
       continue;
     }
     if (due.size() >= s_MaxDispatchPerTick) break;
     due.push_back(userId);
-    t = p_SteadyMs + p_PollIntervalMs + UniformInt(-jitter, jitter);
+    const int64_t jitter = std::max<int64_t>(1000, interval / 5);
+    t = p_SteadyMs + interval + UniformInt(-jitter, jitter);
     if (t <= p_SteadyMs) t = p_SteadyMs + 1000;
   }
 
