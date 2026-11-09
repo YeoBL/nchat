@@ -156,10 +156,13 @@ Use arrows or j/k to select, Tab to cycle All/WhatsApp/Telegram, / to search nam
 or identifiers, Enter to finish entering a query, Esc to clear, r to read the
 cache again and q to quit. Page Up/Page Down and g/G move through longer lists.
 Tab filters people who have the selected service while preserving both columns.
-The layout uses columns from 45 terminal columns and compact person cards below
-that width. `--plain` prints the paired-column snapshot and
-is selected automatically for piped output. `NO_COLOR=1` requests monochrome.
-The screen updates displayed ages between refreshes. Press r for newer records.
+Press **Enter** on a selected contact to browse their full presence history
+(merged across services, newest last, with `~` marking heartbeat rows; q or
+Esc returns to the list). The layout uses columns from 45 terminal columns and
+compact person cards below that width. `--plain` prints the paired-column
+snapshot and is selected automatically for piped output. `NO_COLOR=1` requests
+monochrome. The screen updates displayed ages between refreshes. Press r for
+newer records.
 
 When phone metadata is missing, select a person and press **m**. Choose their
 contact on the other service and press Enter to confirm. Matching names appear
