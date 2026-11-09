@@ -134,11 +134,18 @@ WhatsApp data only flows while this installation is online (see
 uploaded.
 
 Read the history with the `nchat-presence` helper:
-`nchat-presence list` shows every tracked contact with its latest state,
-`nchat-presence summary <number-or-id>` summarizes one contact (first/last
-record, current state, online events), and
-`nchat-presence show <number-or-id>` prints its full history (use
-`--no-heartbeats` to hide the periodic re-affirmation lines). WhatsApp
-contacts are matched by their full JID (`<number>@s.whatsapp.net`) or a
-substring of it. The helper only reads the local files; it never contacts
-any service.
+`nchat-presence list [pattern]` shows every tracked contact with its latest
+state; `nchat-presence summary [pattern]` summarizes one contact (first
+sample, last record, last state, genuine online events, heartbeat count,
+hidden mark); and `nchat-presence show <pattern>` prints the history rows
+(identity, state, seen time) in file order, capped at 200 rows unless
+`--all` is given. Patterns match user ids/numbers and, when the local cache
+is readable, display names (case-insensitive); `--no-names` skips the cache
+lookup, `--profile` filters by account, `--dir`/`--appdir` override the
+locations, `--since`/`--until` take `YYYY-MM-DD [HH:MM]`, and
+`--no-heartbeats`/`--online-only` filter rows. Heartbeat rows re-affirm the
+last genuine observation and are never counted as new online events, and
+the samples are historical records: they cannot establish that someone is
+online right now. WhatsApp contacts are matched by their full JID
+(`<number>@s.whatsapp.net`) or a substring of it. The helper only reads the
+local files; it never contacts any service.
