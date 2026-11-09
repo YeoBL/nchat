@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "appconfig.h"
+#include "cacheutil.h"
 #include "messagecache.h"
 #include "apputil.h"
 #include "clipboard.h"
