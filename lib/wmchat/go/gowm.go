@@ -938,6 +938,9 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 		// disconnected
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
 		CWmClearStatus(handler.connId, FlagOnline)
+		// Do not keep displaying a stale away state while disconnected;
+		// Connected re-marks the profile away until the next announce.
+		CWmClearStatus(handler.connId, FlagAway)
 
 	case *events.StreamReplaced:
 		// TODO: find out when exactly this happens and how to handle it

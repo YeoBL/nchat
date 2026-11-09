@@ -886,7 +886,17 @@ inline void PresencePoller::WorkerLoop()
       std::unique_lock<std::mutex> lock(m_WorkMutex);
       if (!m_WorkerErrorPending)
       {
-        m_WorkerError = passError.empty() ? std::string("presence persistence failed") : passError;
+        std::string message = passError.empty() ? std::string("presence persistence failed") : passError;
+        if (m_StopWorker && !m_BlockedLines.empty())
+        {
+          size_t lost = 0;
+          for (const auto& blocked : m_BlockedLines)
+          {
+            lost += blocked.second.size();
+          }
+          message += " (" + std::to_string(lost) + " blocked lines lost at shutdown)";
+        }
+        m_WorkerError = message;
         m_WorkerErrorPending = true;
       }
       m_WorkerIdle = false;

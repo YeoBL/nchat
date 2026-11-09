@@ -305,24 +305,55 @@ int main(int argc, char* argv[])
     assert(poller.Init(dir, 51));
     std::vector<std::string> candidates = { "e", "f" };
     assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 600000, false).empty());
-    // Long unobservable gap: polling continues but no eligible time accrues.
+    // Long unobservable gap: polling continues (requests still fire) but no
+    // eligible time accrues.
+    bool polledWhileUnobservable = false;
     for (int64_t t = 1000; t <= 300000; t += 1000)
     {
-      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 600000, false);
+      if (!poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 600000, false).empty())
+      {
+        polledWhileUnobservable = true;
+      }
     }
-    // Observable: eligible time accrues 1000 ms per tick, so the 600s window
-    // is reached at t = 301000 + 599000 = 900000. Until then e/f poll
-    // normally; afterwards they must be hidden.
-    for (int64_t t = 301000; t <= 1000000; t += 1000)
+    assert(polledWhileUnobservable);
+    // Observable: eligible time accrues 1000 ms per tick from the second
+    // observable tick, so at t=900000 each user has accrued EXACTLY 599000
+    // ms (one tick short of the 600s window); the window is reached at
+    // t=901000, where they must be hidden.
+    for (int64_t t = 301000; t <= 900000; t += 1000)
+    {
+      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 600000, true);
+    }
+    assert(poller.Flush(true));
+    assert(poller.Drain());
+    {
+      const std::string stateMid = ReadFile(statePath);
+      const size_t pos = stateMid.find(profile + "\te\t");
+      assert(pos != std::string::npos);
+      const std::string line = stateMid.substr(pos, stateMid.find('\n', pos) - pos);
+      std::vector<std::string> fields;
+      size_t fieldStart = 0;
+      for (;;)
+      {
+        const size_t tab = line.find('\t', fieldStart);
+        if (tab == std::string::npos)
+        {
+          fields.push_back(line.substr(fieldStart));
+          break;
+        }
+        fields.push_back(line.substr(fieldStart, tab - fieldStart));
+        fieldStart = tab + 1;
+      }
+      assert(fields.size() == 6);
+      assert(fields[3] == "599000"); // exact accrual: no unobservable-gap credit
+    }
+    for (int64_t t = 901000; t <= 1000000; t += 1000)
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 600000, true);
       for (const std::string& u : due)
       {
-        if (t >= 901000)
-        {
-          assert(u != "e" && u != "f");
-        }
+        assert(u != "e" && u != "f");
       }
     }
     // Newcomer "g" joins after the window would have elapsed: it must not
