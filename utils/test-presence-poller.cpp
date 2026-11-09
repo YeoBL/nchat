@@ -392,9 +392,9 @@ int main(int argc, char* argv[])
     // One interval later everyone is due, but the per-tick budget caps it.
     std::vector<std::string> due =
       poller.Tick(kBase + 60000, kBase + kWallOffset + 60000, profile, many, 60000, 60000, 0, true);
-    assert(due.size() == 3);
+    assert(due.size() == 5);
     due = poller.Tick(kBase + 61000, kBase + kWallOffset + 61000, profile, many, 60000, 60000, 0, true);
-    assert(due.size() == 3);
+    assert(due.size() == 5);
 
     // A long gap re-phases overdue users instead of firing a burst.
     PresencePoller paused;
@@ -408,7 +408,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 602000; t <= 700000; t += 1000)
     {
       due = paused.Tick(kBase + t, kBase + kWallOffset + t, profile, five, 60000, 60000, 0, true);
-      assert(due.size() <= 3);
+      assert(due.size() <= 5);
       for (const std::string& u : due)
       {
         fired.insert(u);
@@ -874,9 +874,25 @@ int main(int argc, char* argv[])
 
   {
     // Interval gradient: rank 0 polls at the fast interval and the last
-    // candidate at the slow interval, interpolated linearly, each with a
-    // random phase and jitter. Fire counts must be monotone non-increasing
+    // candidate at the slow interval, interpolated exponentially, each with
+    // a random phase and jitter. Fire counts must be monotone non-increasing
     // by rank, with the endpoints near their nominal cadences.
+    {
+      // Direct gradient-shape checks: exponential spacing (the gap between
+      // neighbouring ranks grows with the rank).
+      assert(PresencePoller::GradientInterval(5000, 120000, 0, 50) == 5000);
+      assert(PresencePoller::GradientInterval(5000, 120000, 49, 50) == 120000);
+      for (size_t i = 1; i < 50; ++i)
+      {
+        assert(PresencePoller::GradientInterval(5000, 120000, i - 1, 50) <
+               PresencePoller::GradientInterval(5000, 120000, i, 50));
+      }
+      const int64_t earlyGap = PresencePoller::GradientInterval(5000, 120000, 1, 50) -
+        PresencePoller::GradientInterval(5000, 120000, 0, 50);
+      const int64_t lateGap = PresencePoller::GradientInterval(5000, 120000, 49, 50) -
+        PresencePoller::GradientInterval(5000, 120000, 48, 50);
+      assert(earlyGap < lateGap / 2); // rank 0->1 spreads far less than 48->49
+    }
     PresencePoller poller;
     assert(poller.Init(dir, 77));
     std::vector<std::string> tiered;
@@ -895,7 +911,7 @@ int main(int argc, char* argv[])
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, profile, tiered,
                     120000, 5000, 0, true);
-      assert(due.size() <= 3); // dispatch budget holds in every tick
+      assert(due.size() <= 5); // dispatch budget holds in every tick
       for (const std::string& u : due)
       {
         if (!firstFire.count(u))
@@ -903,7 +919,8 @@ int main(int argc, char* argv[])
           firstFire[u] = kBase + t;
         }
         const int rankIdx = std::stoi(u.substr(1));
-        const int64_t interval = 5000 + (120000 - 5000) * (int64_t)rankIdx / 49;
+        const int64_t interval =
+          PresencePoller::GradientInterval(5000, 120000, rankIdx, 50);
         if (lastFire.count(u))
         {
           // minimum gap: interval minus the +/-20% jitter, exact

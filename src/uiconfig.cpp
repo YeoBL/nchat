@@ -69,6 +69,7 @@ void UiConfig::Init()
     { "presence_poll_heartbeat_sec", "300" },
     { "presence_poll_hidden_detect_sec", "172800" },
     { "presence_poll_interval", "120" },
+    { "presence_poll_telegram_interval", "5" },
     { "proxy_indicator", "\xF0\x9F\x94\x92" },
     { "read_indicator", "\xe2\x9c\x93" },
     { "record_app", "" },

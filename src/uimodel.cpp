@@ -2738,6 +2738,13 @@ void UiModel::Impl::ProcessPresencePoll()
   const int64_t pollIntervalMs = pollIntervalSec * 1000;
   const int64_t fastIntervalSec = std::max<int64_t>(5, UiConfig::GetNum("presence_poll_fast_interval"));
   const int64_t fastIntervalMs = fastIntervalSec * 1000;
+  // Telegram sampling is a local TDLib cache read with no per-user server
+  // request (server freshness comes from TDLib's single contacts.getStatuses
+  // plus status pushes), so every Telegram contact polls at one flat,
+  // frequent cadence instead of the WhatsApp gradient.
+  const int64_t telegramIntervalSec =
+    std::max<int64_t>(5, UiConfig::GetNum("presence_poll_telegram_interval"));
+  const int64_t telegramIntervalMs = telegramIntervalSec * 1000;
   const int64_t pollCountRaw = UiConfig::GetNum("presence_poll_count");
   if (pollCountRaw <= 0)
   {
@@ -2823,9 +2830,19 @@ void UiModel::Impl::ProcessPresencePoll()
       orderedIds.resize(pollCount);
     }
 
+    // WhatsApp uses the exponential gradient; Telegram polls everyone at
+    // one flat cadence (a local cache read per contact, no server request).
+    int64_t profileSlowMs = pollIntervalMs;
+    int64_t profileFastMs = fastIntervalMs;
+    if (StrUtil::GetProtocolName(profileId) == "Telegram")
+    {
+      profileSlowMs = telegramIntervalMs;
+      profileFastMs = telegramIntervalMs;
+    }
+
     const std::vector<std::string> due =
-      m_PresencePoller.Tick(steadyMs, nowMs, profileId, orderedIds, pollIntervalMs,
-                            fastIntervalMs, hiddenDetectMs, canObserve);
+      m_PresencePoller.Tick(steadyMs, nowMs, profileId, orderedIds, profileSlowMs,
+                            profileFastMs, hiddenDetectMs, canObserve);
 
     for (const std::string& userId : due)
     {
