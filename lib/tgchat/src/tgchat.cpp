@@ -994,6 +994,11 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
           if (!tuser) return;
 
+          // TDLib synthesizes an always-online status for bots; skip them
+          // here so they cannot occupy poll slots or pollute the history.
+          // (The visible-chat path through ProcessStatusUpdate is untouched.)
+          if (tuser->type_ && tuser->type_->get_id() == td::td_api::userTypeBot::ID) return;
+
           ProcessStatusUpdate(tuser->id_, std::move(tuser->status_));
         });
       }

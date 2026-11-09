@@ -2725,8 +2725,12 @@ void UiModel::Impl::ProcessPresencePoll()
 
   const int64_t pollIntervalSec = std::max<int64_t>(10, UiConfig::GetNum("presence_poll_interval"));
   const int64_t pollIntervalMs = pollIntervalSec * 1000;
-  const size_t pollCount =
-    static_cast<size_t>(std::max<int64_t>(1, UiConfig::GetNum("presence_poll_count")));
+  const int64_t pollCountRaw = UiConfig::GetNum("presence_poll_count");
+  if (pollCountRaw <= 0)
+  {
+    return; // a non-positive count disables polling
+  }
+  const size_t pollCount = static_cast<size_t>(pollCountRaw);
   const int64_t hiddenDetectMs =
     1000 * std::max<int64_t>(0, UiConfig::GetNum("presence_poll_hidden_detect_sec"));
   const int64_t heartbeatSec =
@@ -3414,7 +3418,17 @@ void UiModel::Impl::ProtocolSetCurrentChat()
 void UiModel::Impl::SetStatusOnline(const std::string& p_ProfileId, bool p_IsOnline)
 {
   static const bool onlineStatusShare = UiConfig::GetBool("online_status_share");
-  if (!onlineStatusShare) return;
+  if (!onlineStatusShare)
+  {
+    // No announce is ever sent with sharing off, so a WhatsApp away flag
+    // set at connect would stay stuck for the whole session; keep the
+    // display truthful instead.
+    if (HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline))
+    {
+      Status::Clear(p_ProfileId, Status::FlagAway);
+    }
+    return;
+  }
 
   std::shared_ptr<SetStatusRequest> setStatusRequest = std::make_shared<SetStatusRequest>();
   setStatusRequest->isOnline = p_IsOnline;

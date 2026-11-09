@@ -93,8 +93,9 @@ presence_poll_hidden_detect_sec=172800
   in one burst. After a long pause the requests are re-phased instead of
   firing at once.
 - `presence_poll_count` is the number of most recent private chats polled per
-  account (30 by default). Groups, self chats, status/newsletter ids and
-  protocols without background presence support are excluded.
+  account (30 by default); setting it to 0 disables polling. Groups, self
+  chats, status/newsletter ids and protocols without background presence
+  support are excluded.
 - `presence_poll_heartbeat_sec` re-records the last known status of a contact
   this often (`"hb":1` lines). Heartbeat lines are cached re-affirmations of
   the most recent genuine observation: they prove the poller kept running,
