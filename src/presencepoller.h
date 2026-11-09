@@ -45,6 +45,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -83,14 +84,14 @@ public:
   // private chats first, already truncated by the caller). p_SteadyMs must be
   // monotonic; p_WallMs is used only for stored timestamps. p_CanObserve is
   // false while the account is disconnected or announced offline; no eligible
-  // time accrues then. Poll intervals form a gradient across the candidate
-  // list: the most recent contact polls on p_FastIntervalMs and the least
-  // recent on p_PollIntervalMs, with each contact's interval linearly
-  // interpolated by rank (each with a random phase and +/-20% jitter).
-  // Registers first-seen times, accumulates eligible time for continuously
-  // selected users, marks never-observed users hidden after
-  // p_HiddenDetectMs of eligible time, and returns the user ids due for a
-  // poll request now (bounded by a small per-tick dispatch budget).
+  // time accrues then. Poll intervals follow an exponential gradient across
+  // the candidate list: the most recent contact polls on p_FastIntervalMs
+  // and the least recent on p_PollIntervalMs, so neighbouring ranks differ
+  // less at the fast end than at the slow end (each with a random phase and
+  // +/-20% jitter). Registers first-seen times, accumulates eligible time
+  // for continuously selected users, marks never-observed users hidden
+  // after p_HiddenDetectMs of eligible time, and returns the user ids due
+  // for a poll request now (bounded by a small per-tick dispatch budget).
   std::vector<std::string> Tick(int64_t p_SteadyMs, int64_t p_WallMs,
                                 const std::string& p_ProfileId,
                                 const std::vector<std::string>& p_Candidates,
@@ -98,6 +99,14 @@ public:
                                 int64_t p_FastIntervalMs,
                                 int64_t p_HiddenDetectMs,
                                 bool p_CanObserve);
+
+  // Exponential interpolation between the fast and slow intervals at a
+  // candidate rank. Rank 0 returns the fast interval, the last rank the
+  // slow interval; the gap between neighbouring ranks grows with the rank.
+  static int64_t GradientInterval(int64_t p_FastIntervalMs,
+                                  int64_t p_SlowIntervalMs,
+                                  size_t p_Rank,
+                                  size_t p_Count);
 
   // Record a genuine protocol observation (service-pushed update or poll
   // response). p_SteadyMs is monotonic (heartbeat cadence), p_WallMs is the
@@ -157,7 +166,7 @@ private:
   };
 
   static const size_t s_MaxPendingLines = 20000;
-  static const size_t s_MaxDispatchPerTick = 3;
+  static const size_t s_MaxDispatchPerTick = 5;
   static const int64_t s_MaxEligibleDeltaMs = 5 * 60 * 1000; // cap per-tick gap
   static const int64_t s_StateSaveIntervalMs = 60 * 1000;    // soft-dirty checkpoint
   static const int64_t s_MinDispatchGapMs = 150; // floor between dispatch bursts
@@ -245,6 +254,24 @@ inline int64_t PresencePoller::SteadyNow()
     std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+inline int64_t PresencePoller::GradientInterval(int64_t p_FastIntervalMs,
+                                                int64_t p_SlowIntervalMs,
+                                                size_t p_Rank,
+                                                size_t p_Count)
+{
+  if (p_FastIntervalMs < 1000) p_FastIntervalMs = 1000;
+  if (p_SlowIntervalMs < p_FastIntervalMs) p_SlowIntervalMs = p_FastIntervalMs;
+  if (p_Count <= 1 || p_FastIntervalMs == p_SlowIntervalMs)
+  {
+    return p_SlowIntervalMs;
+  }
+  const double t = static_cast<double>(p_Rank) / static_cast<double>(p_Count - 1);
+  const double ratio = static_cast<double>(p_SlowIntervalMs) /
+    static_cast<double>(p_FastIntervalMs);
+  const double value = static_cast<double>(p_FastIntervalMs) * std::pow(ratio, t);
+  return static_cast<int64_t>(std::llround(value));
+}
+
 inline bool PresencePoller::Init(const std::string& p_BaseDir, uint32_t p_RandomSeed)
 {
   if (m_Initialized) return true; // idempotent: never reload over live state
@@ -325,13 +352,10 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
   if (p_FastIntervalMs > p_PollIntervalMs) p_FastIntervalMs = p_PollIntervalMs;
 
   // Interval gradient: rank 0 (most recent) polls at the fast interval and
-  // the last candidate at the slow interval, interpolated linearly.
+  // the last candidate at the slow interval, interpolated exponentially.
   auto userInterval = [&](size_t p_Rank) -> int64_t {
-    const size_t n = p_Candidates.size();
-    if (n <= 1) return p_PollIntervalMs;
-    const int64_t span = p_PollIntervalMs - p_FastIntervalMs;
-    const int64_t offset = (span * static_cast<int64_t>(p_Rank)) / static_cast<int64_t>(n - 1);
-    return p_FastIntervalMs + offset;
+    return GradientInterval(p_FastIntervalMs, p_PollIntervalMs, p_Rank,
+                            p_Candidates.size());
   };
 
   auto& states = m_UserStates[p_ProfileId];
