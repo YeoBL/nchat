@@ -394,6 +394,34 @@ their own truthful verification status.
 
 ## Incidents and constraints to preserve
 
+### Complete emoji rendering in Kitty
+
+The `codex/full-emoji-rendering` feature replaces split-component rendering in
+Kitty with intact Unicode glyphs. Implementation commit `f1f714dd` adds
+`lib/ncutil/src/textglyph.h`, `src/uicursestext.cpp`, `utils/nchat_emoji.py`
+and `utils/nchat_terminal_auth.py`. The layout iterator is shared by width,
+clipping, wrapping and cursor positioning. All terminal view refreshes use
+`UiCursesText` so cell overlays are invalidated when windows redraw or overlap.
+
+GNU Screen corrupts non-ASCII DCS payloads and miscounts joined emoji and some
+combining accents. The core reserves protected ASCII/ideographic-space cells,
+then sends ASCII-escaped JSON in bounded Screen passthrough chunks. A fixed Kitty
+kitten paints whole glyphs in the originating window and restores cursor and
+style state. Calls are batched, bounded and refreshed after Screen redisplays.
+The authorization helper preserves existing badge permissions and additionally
+allows only validated glyph painting. The installer includes the new helpers.
+
+Load `nchat_terminal_auth.py` through the `remote_control_password` setting and
+reload Kitty configuration before starting the patched core. File presence and
+Kitty's window environment activate this path. `NCHAT_FULL_EMOJI=0` disables it.
+The legacy fallback below still applies in other terminals. This is tested with
+Kitty 0.48.2 and Screen 5.0.2, and is not general complex-script shaping.
+Screen hardcopy and Screen copy mode retain placeholders. Kitty's actual text
+grid and selection contain the rendered Unicode. The native grid/Screen replay
+tests use synthetic data and never send service messages or read requests.
+
+Activation status and final checks are recorded in `changes.md`.
+
 ### Joined emoji rendering follow-up
 
 On 9 November 2026, two adjacent U+1F642 U+200D U+2194 U+FE0F
