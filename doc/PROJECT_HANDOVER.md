@@ -486,11 +486,10 @@ publish titles and refresh the visible list while preserving unread state.
 
 The user most recently requested continuous presence polling for roughly the
 last 50 private contacts on both services, persisted as an activity history while
-nchat runs, with hidden statuses skipped. **No implementation was made.** The
-assistant raised the need for contacts' consent and offered a latest-status cache
-or an explicitly opted-in history. The user then moved to backup and handover.
-Confirm the permitted scope before treating presence-history logging as an
-approved implementation task. Ordinary active-chat presence refresh already exists.
+nchat runs, with hidden statuses skipped. No implementation had been made at the
+time of this handover. The user has since explicitly re-requested and approved
+this feature, and it is being implemented on this branch. Ordinary active-chat
+presence refresh already exists.
 
 Older birthday-gift research and individual chat-deletion tasks belonged to
 separate user requests. They confer no authorization for new message mutations
