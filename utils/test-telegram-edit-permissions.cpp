@@ -94,6 +94,18 @@ struct TelegramMuteHandlerTest
       impl.ProcessResponse({0, impl.m_Handlers.begin()->first, std::move(message)});
       assert(delivered == 1 && impl.m_Handlers.empty());
     }
+    {
+      TgChat::Impl impl;
+      impl.m_Config.Set("markdown_enabled", "0");
+      impl.m_Config.Set("markdown_version", "2");
+      auto request = std::make_shared<SetCurrentChatRequest>();
+      request->chatId = StrUtil::NumToHex(int64_t(1001));
+      impl.PerformRequest(request);
+      assert(impl.m_CurrentChat == 1001 && impl.m_CurrentQueryId == 2);
+      assert(impl.m_Handlers.size() == 2); // openChat + recent history, no viewMessages.
+      impl.PerformRequest(request);
+      assert(impl.m_CurrentQueryId == 2); // Same-chat status refreshes do not repeat history reads.
+    }
     std::cout << "PASS: Telegram content/edit updates fetch and deliver the exact edited message without view/read queries\n";
     std::cout << "PASS: Telegram edit permission follows can_be_edited for old text/captions, rejects denied/missing/unsupported content and errors; no edits or read queries\n";
   }

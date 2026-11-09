@@ -1266,18 +1266,17 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         if (!getMessagesRequest->fromMsgId.empty() ||
             (getMessagesRequest->limit == std::numeric_limits<int>::max()))
         {
-          if (MessageCache::FetchMessagesFrom(m_ProfileId, getMessagesRequest->chatId,
-                                              getMessagesRequest->fromMsgId,
-                                              getMessagesRequest->limit, false /* p_Sync */))
-          {
-            return;
-          }
+          // Display the local page immediately, then reconcile its content
+          // with TDLib. A cache hit alone cannot confirm later edits.
+          MessageCache::FetchMessagesFrom(m_ProfileId, getMessagesRequest->chatId,
+                                         getMessagesRequest->fromMsgId,
+                                         getMessagesRequest->limit, false /* p_Sync */);
         }
 
         int64_t chatId = StrUtil::NumFromHex<int64_t>(getMessagesRequest->chatId);
         int64_t fromMsgId = StrUtil::NumFromHex<int64_t>(getMessagesRequest->fromMsgId);
         int32_t offset = 0;
-        int32_t limit = getMessagesRequest->limit;
+        int32_t limit = std::min(getMessagesRequest->limit, 100); // TDLib history page maximum.
         bool sequence = true; // in-sequence history request
         GetChatHistory(chatId, fromMsgId, offset, limit, sequence);
       }
@@ -2033,6 +2032,9 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
                 return;
               }
             });
+            // The UI may already have enough cached rows to skip pagination.
+            // Reopening a chat still needs a recent-content reconciliation.
+            GetChatHistory(chatId, 0, 0, 50, true);
           }
 
           m_CurrentChat = chatId;
