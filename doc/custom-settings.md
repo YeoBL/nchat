@@ -82,6 +82,7 @@ history. In `ui.conf`:
 presence_poll_enabled=1
 presence_poll_interval=120
 presence_poll_fast_interval=5
+presence_poll_telegram_interval=5
 presence_poll_count=50
 presence_poll_heartbeat_sec=300
 presence_poll_hidden_detect_sec=172800
@@ -91,12 +92,17 @@ presence_poll_hidden_detect_sec=172800
 - `presence_poll_interval` is the seconds between polls of the least-recent
   contact (floored at 10; default 120) and `presence_poll_fast_interval` is
   the seconds between polls of the most-recent contact (floored at 5,
-  clamped to the slow interval). Every contact in between gets a linearly
-  interpolated interval by rank, so the people you speak to most are
-  sampled most often. Each poll has a random phase and +/-20% jitter and
-  requests are dispatched in small bounded batches; overdue work is
-  re-phased after pauses. A contact promoted up the ranking (for example by
-  a new message) has its next poll brought forward into the faster cadence.
+  clamped to the slow interval). Every contact in between gets an
+  exponentially interpolated interval by rank, so neighbouring ranks differ
+  far less at the fast end than at the slow end. Each poll has a random
+  phase and +/-20% jitter and requests are dispatched in small bounded
+  batches; overdue work is re-phased after pauses. A contact promoted up
+  the ranking (for example by a new message) has its next poll brought
+  forward into the faster cadence.
+- `presence_poll_telegram_interval`: Telegram ignores the gradient and
+  polls every contact at this one flat cadence (default 5 s). Each
+  Telegram poll is a local TDLib cache read — no per-user server request —
+  so the frequent flat rate costs no server load.
 - `presence_poll_count` is the number of most recent private chats polled per
   account (50 by default); setting it to 0 disables polling. Groups, self
   chats, status/newsletter ids and protocols without background presence
