@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+# nchat-presence
+#
+# Copyright (c) 2026 Bing Lin
+# All rights reserved.
+#
+# Read-only CLI for the nchat continuous presence polling history.
+# Parses the local JSONL files written by the presence poller under
+# <config>/nchat/presence/ and never contacts any service.
+#
+# Usage:
+#   nchat-presence list [--dir DIR] [--profile NAME]
+#   nchat-presence show PATTERN [--dir DIR] [--profile NAME] [-n N] [--no-heartbeats]
+#   nchat-presence summary [PATTERN] [--dir DIR] [--profile NAME]
+#   nchat-presence --self-test
+
+import argparse
+import datetime
+import glob
+import json
+import os
+import sys
+import tempfile
+
+HEARTBEAT_SEC = 300
+
+
+def default_dir():
+    env = os.environ.get("NCHAT_CONFIG_DIR")
+    if env:
+        return os.path.join(env, "presence")
+    return os.path.join(os.environ.get("HOME", "."), ".config", "nchat", "presence")
+
+
+def decode_profile(filename):
+    base = filename.rsplit("history.", 1)[1].rsplit(".jsonl", 1)[0]
+    try:
+        return bytes.fromhex(base).decode("utf-8", errors="replace")
+    except ValueError:
+        return base
+
+
+def fmt(ms):
+    return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def seen_text(seen):
+    if seen == -1:
+        return "hidden/unknown"
+    if seen == 1:
+        return "last month"
+    if seen == 2:
+        return "last week"
+    return fmt(seen)
+
+
+def iter_records(directory, profile_filter=None):
+    if not os.path.isdir(directory):
+        sys.exit("no presence directory at %s" % directory)
+    for path in sorted(glob.glob(os.path.join(directory, "history.*.jsonl"))):
+        profile = decode_profile(os.path.basename(path))
+        if profile_filter and profile_filter not in profile:
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # torn tail being repaired by the poller
+                yield profile, record
+
+
+def normalize_uid(profile, uid):
+    # Telegram user ids are stored hex-encoded (ASCII of the numeric id).
+    if profile.startswith("Telegram") and uid and all(c in "0123456789abcdef" for c in uid):
+        try:
+            return bytes.fromhex(uid).decode("ascii")
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return uid
+
+
+def match_uid(profile, uid, pattern):
+    if pattern in uid or pattern in normalize_uid(profile, uid):
+        return True
+    return False
+
+
+def cmd_list(args):
+    stats = {}
+    for profile, record in iter_records(args.dir, args.profile):
+        if "mark" in record:
+            continue
+        key = (profile, record["u"])
+        s = stats.get(key)
+        if s is None:
+            s = stats[key] = {"count": 0, "online": 0, "last_ts": 0, "last_on": None,
+                              "last_seen": None, "marked_hidden": False}
+        s["count"] += 1
+        if record.get("on"):
+            s["online"] += 1
+        if record["ts"] > s["last_ts"]:
+            s["last_ts"] = record["ts"]
+            s["last_on"] = bool(record.get("on"))
+            s["last_seen"] = record.get("seen")
+    for profile, record in iter_records(args.dir, args.profile):
+        if record.get("mark") == "hidden":
+            s = stats.get((profile, record["u"]))
+            if s is not None:
+                s["marked_hidden"] = True
+    if not stats:
+        print("no presence history found")
+        return
+    for (profile, uid), s in sorted(stats.items(), key=lambda kv: -kv[1]["last_ts"]):
+        nuid = normalize_uid(profile, uid)
+        if s["last_on"]:
+            state = "online"
+        else:
+            state = "offline, seen " + seen_text(s["last_seen"])
+        state += ", skipped (hidden)" if s["marked_hidden"] else ""
+        print("%-24s %-24s %s  %s  (%d records, %d online)"
+              % (profile, nuid, fmt(s["last_ts"]), state, s["count"], s["online"]))
+
+
+def cmd_show(args):
+    shown = 0
+    for profile, record in iter_records(args.dir, args.profile):
+        if not match_uid(profile, record["u"], args.pattern):
+            continue
+        if record.get("mark") == "hidden":
+            print("%s  %s  marked hidden (skipped)" % (fmt(record["ts"]), profile))
+            shown += 1
+            continue
+        if args.no_heartbeats and record.get("hb"):
+            continue
+        if shown >= args.n:
+            break
+        kind = "hb " if record.get("hb") else "   "
+        if record.get("on"):
+            state = "ONLINE"
+        else:
+            state = "offline"
+        print("%s  %s %-7s seen %s" % (fmt(record["ts"]), kind, state,
+                                        seen_text(record.get("seen", -1))))
+        shown += 1
+    if shown == 0:
+        sys.exit("no records match %r" % args.pattern)
+
+
+def cmd_summary(args):
+    contacts = {}
+    for profile, record in iter_records(args.dir, args.profile):
+        if args.pattern and not match_uid(profile, record["u"], args.pattern):
+            continue
+        key = (profile, record["u"])
+        s = contacts.get(key)
+        if s is None:
+            s = contacts[key] = {"first_ts": None, "last_ts": None, "online": 0,
+                                 "hidden": False, "last_on": None, "last_seen": None}
+        if record.get("mark") == "hidden":
+            s["hidden"] = True
+            continue
+        ts = record["ts"]
+        s["first_ts"] = ts if s["first_ts"] is None else min(s["first_ts"], ts)
+        if s["last_ts"] is None or ts > s["last_ts"]:
+            s["last_ts"] = ts
+            s["last_on"] = bool(record.get("on"))
+            s["last_seen"] = record.get("seen")
+        if record.get("on"):
+            s["online"] += 1
+    if not contacts:
+        print("no records match")
+        return
+    for (profile, uid), s in sorted(contacts.items(), key=lambda kv: -(kv[1]["last_ts"] or 0)):
+        nuid = normalize_uid(profile, uid)
+        print("%s / %s" % (profile, nuid))
+        print("  first record : %s" % (fmt(s["first_ts"]) if s["first_ts"] else "never"))
+        print("  last record  : %s" % (fmt(s["last_ts"]) if s["last_ts"] else "never"))
+        if s["last_on"]:
+            state = "online"
+        else:
+            state = "offline, seen " + seen_text(s["last_seen"])
+        print("  current state: %s" % state)
+        print("  online events: %d" % s["online"])
+        if s["hidden"]:
+            print("  skipped     : yes (no observable data across the window)")
+
+
+def self_test():
+    with tempfile.TemporaryDirectory(prefix="nchat-presence-self-test.") as tmp:
+        profile = "Telegram_test"
+        path = os.path.join(tmp, "history." + profile.encode().hex() + ".jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"ts":1700000000000,"u":"3631323334","on":0,"seen":1699990000000,"recent":0}\n')
+            fh.write('{"ts":1700000300000,"u":"3631323334","on":0,"seen":1699990000000,"recent":0,"hb":1}\n')
+            fh.write('{"ts":1700000600000,"u":"3631323334","on":1,"seen":-1,"recent":0}\n')
+        saved = sys.argv
+        sys.argv = ["nchat-presence", "list", "--dir", tmp]
+        cmd_list(argparse.Namespace(dir=tmp, profile=None))
+        print("self-test: list and show completed without errors")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="nchat-presence",
+                                     description="Read the local nchat presence polling history")
+    parser.add_argument("command", nargs="?", choices=["list", "show", "summary"],
+                        help="list contacts / show one contact's history / summarize")
+    parser.add_argument("pattern", nargs="?", default="",
+                        help="user id (or substring) to filter; for show, required")
+    parser.add_argument("--dir", default=default_dir(), help="presence directory (default %(default)s)")
+    parser.add_argument("--profile", default=None, help="only match profiles containing this text")
+    parser.add_argument("-n", type=int, default=200, help="max records for show (default 200)")
+    parser.add_argument("--no-heartbeats", action="store_true",
+                        help="hide heartbeat re-affirmation lines in show")
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
+    if args.command == "list" or args.command is None:
+        cmd_list(args)
+    elif args.command == "show":
+        if not args.pattern:
+            sys.exit("show needs a user id pattern")
+        cmd_show(args)
+    elif args.command == "summary":
+        cmd_summary(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
