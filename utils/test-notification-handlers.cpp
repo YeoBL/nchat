@@ -483,7 +483,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
       if (frame < 8) latest.timeSent += 60000;
       latest.text = "Frame " + std::to_string(contentFrame) + " Body " +
         (contentFrame == 5 ? "plain" : emoji) + " tail 漢字 é 🥺 https://example.test/path";
-      if (frame == 0) for (int count = 0; count < 30; ++count) latest.text += "🙂‍↔️";
+      if (frame == 0) for (int count = 0; count < 180; ++count) latest.text += "🙂‍↔️";
       impl.m_SelectMessageActive = (frame % 2) != 0;
       if (frame < 8) impl.m_CurrentChatIndex = frame % 2 == 0 ? 0 : 70;
       const int scrollOffsets[] = {0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0, 1};
@@ -517,7 +517,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
           ++combined;
           ++x; // Skip the second cell of this two-column glyph.
         }
-      if (frame == 0) assert(headShakes >= 30);
+      if (frame == 0) assert(headShakes >= (columns > 100 ? 180 : 30));
       if (frame < 8) assert(combined == (renderedFrame % 3 == 0 ? 2 : 0));
       assert(protocol->requests.empty());
       assert(impl.m_Messages[profile][chat].at("older-0").text == emojiCases[0]);
