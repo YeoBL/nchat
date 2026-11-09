@@ -35,6 +35,7 @@
 #include "../src/uiview.h"
 #include "../src/uiconfig.h"
 #include "fileutil.h"
+#include "status.h"
 #include "../src/terminalbadge.h"
 #include "test-message-info-dialog.h"
 #include "sysutil.h"
@@ -213,6 +214,7 @@ static void TestPresencePollModel()
   UiModel::Impl model(nullptr);
   auto protocol = std::make_shared<PollTestProtocol>();
   model.m_Protocols[profile] = protocol;
+  Status::Set(profile, Status::FlagOnline); // eligibility accrues only while online
 
   // Recent private chats plus a group and a self chat that must not consume
   // poll slots.
@@ -258,6 +260,19 @@ static void TestPresencePollModel()
   stranger->timeSeen = -1;
   model.MessageHandler(stranger);
 
+  // Group and self chats are filtered out of the candidate list, so their
+  // observations must not be recorded either.
+  auto groupStatus = std::make_shared<ReceiveStatusNotify>(profile);
+  groupStatus->userId = "group-one";
+  groupStatus->isOnline = true;
+  groupStatus->timeSeen = -1;
+  model.MessageHandler(groupStatus);
+  auto selfStatus = std::make_shared<ReceiveStatusNotify>(profile);
+  selfStatus->userId = "selfchat";
+  selfStatus->isOnline = true;
+  selfStatus->timeSeen = -1;
+  model.MessageHandler(selfStatus);
+
   // Bypass the once-per-second flush throttle so this tick persists the
   // queued history line, then wait for the persistence worker to finish.
   model.m_LastPresenceFlushMs = 0;
@@ -277,6 +292,8 @@ static void TestPresencePollModel()
   globfree(&globResult);
   assert(history.find("\"u\":\"user4\"") != std::string::npos);
   assert(history.find("stranger") == std::string::npos);
+  assert(history.find("group-one") == std::string::npos);
+  assert(history.find("selfchat") == std::string::npos);
   size_t lineCount = 0;
   for (char ch : history)
   {
@@ -284,6 +301,7 @@ static void TestPresencePollModel()
   }
   assert(lineCount == 1);
 
+  Status::Clear(profile, Status::FlagOnline);
   UiConfig::SetNum("presence_poll_enabled", 0);
   std::cout << "PASS: presence poll wiring, candidate gating and history flush through the production model\n";
 }

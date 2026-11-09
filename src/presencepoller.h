@@ -168,6 +168,8 @@ private:
   void StartWorker();
   void StopWorker();
   void WorkerLoop();
+  void AddBlockedLines(const std::string& p_ProfileId,
+                       const std::vector<PendingLine>& p_Lines);
   bool AppendHistory(const std::string& p_ProfileId,
                      const std::vector<std::string>& p_Lines,
                      std::string& p_Error,
@@ -187,6 +189,7 @@ private:
   std::unordered_map<std::string, std::unordered_set<std::string>> m_Tracked;
   std::unordered_map<std::string, std::unordered_set<std::string>> m_PrevSelected;
   std::unordered_map<std::string, int64_t> m_LastTickMs;
+  std::unordered_map<std::string, bool> m_LastObserved;
   std::vector<PendingLine> m_Pending;
   bool m_StateDirty = false;
   bool m_StateDirtySoft = false;
@@ -201,6 +204,7 @@ private:
   bool m_StopWorker = false;
   bool m_WorkerIdle = true;
   uint64_t m_WorkVersion = 0;
+  uint64_t m_StateGeneration = 0;
   std::vector<PendingLine> m_WorkerQueue;
   std::string m_WorkerStateData;
   bool m_WorkerWriteState = false;
@@ -302,18 +306,20 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
     }
   }
 
-  // Eligible observation time for the elapsed gap, only while the account
-  // can actually receive presence. The cap keeps downtime from fast-forwarding
-  // the window; when observation is impossible the baseline resets so the
-  // next gap starts fresh.
+  // Eligible observation time for the elapsed gap. It accrues only when the
+  // account could observe presence in BOTH the previous and the current
+  // tick, so a false->true transition never credits the unobservable gap.
+  // The cap keeps downtime from fast-forwarding the window.
   int64_t delta = 0;
   int64_t& lastTick = m_LastTickMs[p_ProfileId];
-  if (p_CanObserve && lastTick != 0 && p_SteadyMs >= lastTick)
+  const bool lastObserved = m_LastObserved[p_ProfileId];
+  if (p_CanObserve && lastObserved && lastTick != 0 && p_SteadyMs >= lastTick)
   {
     delta = p_SteadyMs - lastTick;
     if (delta > s_MaxEligibleDeltaMs) delta = s_MaxEligibleDeltaMs;
   }
   lastTick = p_SteadyMs;
+  m_LastObserved[p_ProfileId] = p_CanObserve;
 
   // Selected = non-hidden candidates. Eligible time accrues only to users
   // that were already selected in the previous tick, so newcomers never
@@ -326,8 +332,15 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
     if (st.hidden) continue;
     if (delta > 0 && prev.count(userId))
     {
-      const int64_t next = st.eligibleMs + delta;
-      st.eligibleMs = (next < st.eligibleMs) ? st.eligibleMs : next; // overflow clamp
+      // Overflow-safe accumulation: saturate instead of wrapping.
+      if (st.eligibleMs > INT64_MAX - delta)
+      {
+        st.eligibleMs = INT64_MAX;
+      }
+      else
+      {
+        st.eligibleMs += delta;
+      }
       softDirty = true;
     }
     if (st.dataMs == 0 && p_HiddenDetectMs > 0 && st.eligibleMs >= p_HiddenDetectMs)
@@ -538,6 +551,10 @@ inline bool PresencePoller::Flush(bool p_ForceState)
     m_StateDirtySoft = false;
   }
 
+  // The version bump (which wakes the worker's failure backoff) must happen
+  // only when THIS call actually transfers work, never because the worker's
+  // own retained retry lines still sit in the queue.
+  const bool transferred = !m_Pending.empty() || !stateData.empty();
   {
     std::unique_lock<std::mutex> lock(m_WorkMutex);
     if (!m_Pending.empty())
@@ -570,8 +587,9 @@ inline bool PresencePoller::Flush(bool p_ForceState)
     {
       m_WorkerStateData = stateData;
       m_WorkerWriteState = true;
+      ++m_StateGeneration; // newer snapshot supersedes any in-flight save
     }
-    if (!m_WorkerQueue.empty() || m_WorkerWriteState)
+    if (transferred)
     {
       ++m_WorkVersion;
       m_WorkerIdle = false;
@@ -728,26 +746,11 @@ inline void PresencePoller::WorkerLoop()
       }
     }
 
-    // (2) Take a private copy of the queue and state snapshot so the UI
-    // thread can keep filling without touching worker-owned data. The state
-    // buffer is COPIED, not swapped: it stays intact until the save
-    // succeeds, so a transient failure can never write an empty state file.
-    std::vector<PendingLine> lines;
-    std::string stateData;
-    bool writeState = false;
-    {
-      std::unique_lock<std::mutex> lock(m_WorkMutex);
-      lines.swap(m_WorkerQueue);
-      writeState = m_WorkerWriteState;
-      if (writeState)
-      {
-        stateData = m_WorkerStateData;
-      }
-    }
-
-    // (3) Release blocked lines whose rollback has since succeeded. They are
-    // older than anything else in the queue, so they go to the FRONT,
-    // preserving both their own order and per-profile timestamp order.
+    // (2) Fold in blocked lines whose rollback has since succeeded. They are
+    // older than anything in the queue, so they go to the FRONT of this
+    // pass's batch, before any newer lines are appended, preserving
+    // per-profile timestamp order.
+    std::vector<PendingLine> releasedLines;
     if (!m_BlockedLines.empty())
     {
       for (auto it = m_BlockedLines.begin(); it != m_BlockedLines.end(); )
@@ -757,13 +760,33 @@ inline void PresencePoller::WorkerLoop()
           ++it;
           continue;
         }
-        {
-          std::unique_lock<std::mutex> lock(m_WorkMutex);
-          m_WorkerQueue.insert(m_WorkerQueue.begin(), it->second.begin(), it->second.end());
-          ++m_WorkVersion;
-        }
+        releasedLines.insert(releasedLines.end(), it->second.begin(), it->second.end());
         it = m_BlockedLines.erase(it);
       }
+    }
+
+    // (3) Take a private copy of the queue and state snapshot so the UI
+    // thread can keep filling without touching worker-owned data. The state
+    // buffer is COPIED, not swapped: it stays intact until the save
+    // succeeds, so a transient failure can never write an empty state file.
+    std::vector<PendingLine> lines;
+    std::string stateData;
+    bool writeState = false;
+    uint64_t stateGeneration = 0;
+    {
+      std::unique_lock<std::mutex> lock(m_WorkMutex);
+      lines.swap(m_WorkerQueue);
+      writeState = m_WorkerWriteState;
+      stateGeneration = m_StateGeneration;
+      if (writeState)
+      {
+        stateData = m_WorkerStateData;
+      }
+    }
+
+    if (!releasedLines.empty())
+    {
+      lines.insert(lines.begin(), releasedLines.begin(), releasedLines.end());
     }
 
     // Append history per profile. A profile whose rollback could not be
@@ -780,8 +803,7 @@ inline void PresencePoller::WorkerLoop()
       {
         if (m_RollbackPending.count(batch.first))
         {
-          m_BlockedLines[batch.first].insert(m_BlockedLines[batch.first].end(),
-                                             batch.second.begin(), batch.second.end());
+          AddBlockedLines(batch.first, batch.second);
           continue;
         }
         std::vector<std::string> texts;
@@ -798,7 +820,7 @@ inline void PresencePoller::WorkerLoop()
           passError = batchError;
           if (profileBlocked)
           {
-            m_BlockedLines[batch.first] = batch.second;
+            AddBlockedLines(batch.first, batch.second);
           }
           else
           {
@@ -826,8 +848,9 @@ inline void PresencePoller::WorkerLoop()
 
     // (5) State only after ALL history lines are durable, so a hidden
     // decision can never be persisted without its marker line. Lines that
-    // were just released from a blocked profile are still in the queue (or
-    // freshly re-queued after a failure), which defers this to a later pass.
+    // were just released from a blocked profile are folded into this pass's
+    // batch (appended in step 3); a failure there skips this. A newer
+    // snapshot handed over while this one was in flight stays pending.
     if (writeState && !failed && m_BlockedLines.empty() && m_RollbackPending.empty())
     {
       bool queueEmpty = false;
@@ -840,8 +863,13 @@ inline void PresencePoller::WorkerLoop()
         if (SaveStateTo(stateData, passError))
         {
           std::unique_lock<std::mutex> lock(m_WorkMutex);
-          m_WorkerWriteState = false;
-          m_WorkerStateData.clear();
+          if (m_StateGeneration == stateGeneration)
+          {
+            // Only retire the snapshot the worker actually saved; a newer
+            // one installed meanwhile must stay pending.
+            m_WorkerWriteState = false;
+            m_WorkerStateData.clear();
+          }
         }
         else
         {
@@ -884,6 +912,39 @@ inline void PresencePoller::WorkerLoop()
         m_WorkCv.notify_all();
       }
     }
+  }
+}
+
+inline void PresencePoller::AddBlockedLines(const std::string& p_ProfileId,
+                                            const std::vector<PendingLine>& p_Lines)
+{
+  // Worker-owned: no lock needed for the map. The blocked set must stay
+  // bounded too, or repeated rollback failures would grow it without limit;
+  // the oldest held lines are dropped and reported.
+  m_BlockedLines[p_ProfileId].insert(m_BlockedLines[p_ProfileId].end(),
+                                     p_Lines.begin(), p_Lines.end());
+  size_t total = 0;
+  for (const auto& blocked : m_BlockedLines)
+  {
+    total += blocked.second.size();
+  }
+  while (total > s_MaxPendingLines)
+  {
+    auto dropProfile = m_BlockedLines.end();
+    for (auto it = m_BlockedLines.begin(); it != m_BlockedLines.end(); ++it)
+    {
+      if (!it->second.empty())
+      {
+        dropProfile = it;
+        break;
+      }
+    }
+    if (dropProfile == m_BlockedLines.end()) break;
+    dropProfile->second.erase(dropProfile->second.begin());
+    --total;
+    std::unique_lock<std::mutex> lock(m_WorkMutex);
+    ++m_DroppedLines;
+    lock.unlock();
   }
 }
 
@@ -984,17 +1045,19 @@ inline bool PresencePoller::AppendHistory(const std::string& p_ProfileId,
     return false;
   }
 
+  if (created)
+  {
+    // The directory entry must be synced whether or not the close below
+    // succeeds; set the flag before the close handling.
+    m_DirSyncNeeded = true;
+  }
+
   if (close(fd) != 0)
   {
     // Rare deferred close failure: the data is already fsynced, so retrying
     // could duplicate lines. Report and treat the batch as written.
     p_Error = "close failed on presence history " + path + ": " + std::to_string(errno);
     return true;
-  }
-
-  if (created)
-  {
-    m_DirSyncNeeded = true;
   }
 
   return true;

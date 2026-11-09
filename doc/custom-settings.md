@@ -96,8 +96,9 @@ presence_poll_hidden_detect_sec=172800
   account (30 by default). Groups, self chats, status/newsletter ids and
   protocols without background presence support are excluded.
 - `presence_poll_heartbeat_sec` re-records the last known status of a contact
-  this often (`"hb":1` lines), so the history keeps proving continued
-  observation even when the status never changes.
+  this often (`"hb":1` lines). Heartbeat lines are cached re-affirmations of
+  the most recent genuine observation: they prove the poller kept running,
+  not that the status was freshly confirmed at that moment.
 - `presence_poll_hidden_detect_sec` is the observation window (default 2
   days) after which contacts that never showed any online/last-seen data are
   treated as having their status hidden and are skipped from polling. Setting
@@ -105,13 +106,16 @@ presence_poll_hidden_detect_sec=172800
   while the account can receive presence counts toward the window (pauses,
   disconnects and announced-offline periods do not); if such a contact later
   shows data (for example, through a service push), it returns to the poll
-  set. Deleting the contents of `~/.config/nchat/presence/` re-detects
-  everyone from scratch.
+  set. To re-detect everyone from scratch, stop nchat and delete the
+  contents of `~/.config/nchat/presence/` (deleting them while nchat runs
+  does not reset its in-memory bookkeeping).
 
 The history is stored under `~/.config/nchat/presence/` as one JSONL file per
 account (`history.<hex-encoded-profile>.jsonl`) plus a small state file.
 Writes happen on a private background thread with fsync, partial-append
-rollback and crash-tail repair, so slow storage never stalls the interface.
+rollback and crash-tail repair, so slow storage does not stall the
+interface; the state file is read once at startup (or on the next poller
+enable) and again on clean shutdown, which waits for pending writes.
 Each sample line is
 `{"ts":<ms>,"u":"<userId>","on":0|1,"seen":<ms|-1>,"recent":0|1}` where `seen`
 values 1 and 2 mean Telegram's coarse "last month"/"last week" status, 0 is

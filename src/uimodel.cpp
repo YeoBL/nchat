@@ -82,7 +82,11 @@ UiModel::Impl::Impl(UiModel* p_UiModel)
 {
   m_DeferInitialChat = std::getenv("NCHAT_NO_AUTO_SELECT") != nullptr;
   m_View = std::make_shared<UiView>(p_UiModel);
-  if (!m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
+  // Initialization reads the (small) state file synchronously, so it is
+  // skipped when the poller is disabled; the timer retry covers enabling
+  // later.
+  if (UiConfig::GetNum("presence_poll_enabled") != 0 &&
+      !m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
   {
     LOG_WARNING("presence poller init failed: %s", m_PresencePoller.GetError().c_str());
     // Do not re-log the same failure on the next timer tick.
@@ -2695,9 +2699,10 @@ void UiModel::Impl::ProcessPresencePoll()
 
   if (!m_PresencePoller.IsInitialized())
   {
-    // Retry initialization periodically; the poller stays inert until the
-    // state file can be read safely.
-    if (steadyMs >= m_NextPresenceInitRetryMs)
+    // Retry initialization periodically while the poller is enabled; the
+    // poller stays inert until the state file can be read safely.
+    if (UiConfig::GetNum("presence_poll_enabled") != 0 &&
+        steadyMs >= m_NextPresenceInitRetryMs)
     {
       m_NextPresenceInitRetryMs = steadyMs + 60000;
       if (!m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
@@ -2730,11 +2735,18 @@ void UiModel::Impl::ProcessPresencePoll()
     {
       continue; // protocol cannot sample presence in the background
     }
-    // Presence can only be observed while the account is connected and, for
-    // WhatsApp, announced online; otherwise eligible time must not accrue.
+    // Presence can only be observed while the account is connected. For
+    // WhatsApp, presence additionally requires that this installation has
+    // announced availability (online_status_share) and is not announced
+    // away; Telegram's cached statuses remain usable regardless of the local
+    // online option, so only transport readiness is required there.
     const uint32_t profileFlags = Status::GetProfileFlags(profileId);
-    const bool canObserve = (profileFlags & Status::FlagOnline) &&
-      !(profileFlags & Status::FlagAway);
+    bool canObserve = (profileFlags & Status::FlagOnline) != 0;
+    if (profile.second->HasFeature(FeaturePresenceRequiresOnline))
+    {
+      canObserve = canObserve && !(profileFlags & Status::FlagAway) &&
+        (UiConfig::GetNum("online_status_share") != 0);
+    }
     const std::string selfId = profile.second->GetSelfId();
     const auto chatInfosIt = m_ChatInfos.find(profileId);
     if (chatInfosIt == m_ChatInfos.end())

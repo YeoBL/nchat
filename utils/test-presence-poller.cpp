@@ -203,14 +203,23 @@ int main(int argc, char* argv[])
     assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 120000, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, profile, "b", true, -1, false);
 
-    // Spread across the interval, at least 48s between consecutive fires.
+    // One continuous timeline: spread across the interval, at least 48s
+    // between consecutive fires, and after exactly 120s of eligible time the
+    // never-observed users are hidden ("a"/"c"/"d"; "b" showed data and keeps
+    // polling). Eligible accrues 1000 ms per tick from t=1000, so the window
+    // is reached at t=120000.
     std::unordered_map<std::string, int64_t> lastFire;
-    for (int64_t t = 1000; t <= 80000; t += 1000)
+    bool bSeen = false;
+    for (int64_t t = 1000; t <= 121000; t += 1000)
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 120000, true);
       for (const std::string& u : due)
       {
+        if (t >= 120000)
+        {
+          assert(u != "a" && u != "c" && u != "d");
+        }
         const auto it = lastFire.find(u);
         if (it == lastFire.end())
         {
@@ -221,26 +230,10 @@ int main(int argc, char* argv[])
           assert(kBase + t - it->second >= 47000);
           it->second = kBase + t;
         }
-      }
-    }
-    assert(lastFire.size() == 4);
-
-    // After 120s of eligible time, every never-observed user is hidden:
-    // "a", "c" and "d" (only "b" ever showed data). "b" keeps polling.
-    bool bSeen = false;
-    for (int64_t t = 47000; t <= 121000; t += 1000)
-    {
-      std::vector<std::string> due =
-        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 120000, true);
-      for (const std::string& u : due)
-      {
-        if (t >= 120000)
-        {
-          assert(u != "a" && u != "c" && u != "d");
-        }
         if (u == "b") bSeen = true;
       }
     }
+    assert(lastFire.size() == 4);
     assert(bSeen);
 
     // Observable data for a hidden user returns it to the poll set.
@@ -511,17 +504,17 @@ int main(int argc, char* argv[])
   }
 
   {
-    // Crash-tail repair, including a torn fragment larger than one 64 KiB
-    // scan chunk: complete lines beyond the chunk must survive.
+    // Crash-tail repair with an unterminated fragment LARGER than one 64 KiB
+    // scan chunk: the complete line before it must survive (the old
+    // single-chunk scan erased the whole file in this case).
     const std::string pd = "Telegram_d";
     const std::string pathD = dir + "/history." + Hex(pd) + ".jsonl";
     {
       std::ofstream out(pathD, std::ios::binary);
-      std::string bigUserId(200000, 'a'); // > 64 KiB torn fragment
-      out << "{\"ts\":999,\"u\":\"" << bigUserId << "\",\"on\":0,\"seen\":-1,\"recent\":0}\n";
-      out << "{\"ts\":100"; // torn line, no newline
+      out << "{\"ts\":999,\"u\":\"old\",\"on\":0,\"seen\":-1,\"recent\":0}\n";
+      const std::string torn(120000, 'x'); // > 64 KiB, no newline
+      out.write(torn.data(), static_cast<std::streamsize>(torn.size()));
     }
-    const size_t completeLineSize = ReadFile(pathD).find('\n') + 1;
 
     PresencePoller poller;
     assert(poller.Init(dir, 11));
@@ -531,11 +524,10 @@ int main(int argc, char* argv[])
     assert(poller.Drain());
 
     const std::string repaired = ReadFile(pathD);
-    assert(repaired.find("{\"ts\":999,") == 0); // complete line preserved
+    assert(repaired.find("{\"ts\":999,\"u\":\"old\",\"on\":0,\"seen\":-1,\"recent\":0}\n") == 0);
     assert(CountLines(repaired) == 2);
     assert(repaired.back() == '\n');
-    assert(repaired.find("100{\"ts\":") == std::string::npos); // torn fragment removed
-    assert(static_cast<size_t>(repaired.find('\n') + 1) == completeLineSize);
+    assert(repaired.find("xxxx") == std::string::npos); // torn fragment removed
   }
 
   {
@@ -554,24 +546,39 @@ int main(int argc, char* argv[])
       out << "Telegram_x\tu5\t123\t456\t-9\t0\n";    // negative data
       out << "Telegram_x\tu6\t123\t45\t789\t0\n";    // trailing field count
       out << "Telegram_x\tu7\t123\t456\t789\t0\tx\n"; // too many fields
-      out << "Telegram_x\tu8\t123\t456\t789\x00garbage\t0\n"; // embedded NUL
+      // Embedded NUL written as raw bytes, so the parser really sees it.
+      const std::string nulLine = std::string("Telegram_x\tu8\t123\t456\t789") + '\0' +
+        std::string("garbage\t0\n");
+      out.write(nulLine.data(), static_cast<std::streamsize>(nulLine.size()));
+      out << "Telegram_x\tu9\t123\t9223372036854775600\t0\t0\n"; // near INT64_MAX
       out << "Telegram_x\tu3\textra\n";              // wrong field count
     }
 
     PresencePoller poller;
     assert(poller.Init(corruptDir, 5));
     assert(poller.IsInitialized());
-    // u3 was loaded as hidden; u2/u4..u8 are fresh and polled normally.
-    bool u2Seen = false;
-    for (int64_t t = 6000; t <= 200000; t += 1000)
+    // u3 was loaded as hidden and u9 carries near-maximum eligible time with
+    // no data, so both are excluded from the very first tick (the latter
+    // through overflow-safe saturation, not signed-arithmetic UB). Every
+    // rejected/malformed row (u2, u4..u8) must instead be a fresh, polled
+    // user: each fires at least once within one interval.
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> fresh = { "u2", "u4", "u5", "u6", "u7", "u8" };
+    for (int64_t t = 6000; t <= 120000; t += 1000)
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, "Telegram_x",
-                    { "u2", "u3", "u4", "u5", "u6", "u7", "u8" }, 60000, 0, true);
-      assert(!Contains(due, "u3"));
-      if (Contains(due, "u2")) u2Seen = true;
+                    { "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9" }, 60000, 60000, true);
+      for (const std::string& u : due)
+      {
+        assert(u != "u3" && u != "u9");
+        seen.insert(u);
+      }
     }
-    assert(u2Seen);
+    for (const std::string& u : fresh)
+    {
+      assert(seen.count(u) == 1);
+    }
 
     // An unreadable state file fails initialization and keeps the poller
     // inert instead of overwriting the file with an empty reconstruction.
