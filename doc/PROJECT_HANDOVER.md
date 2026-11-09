@@ -425,12 +425,12 @@ tools-dialog UX and UI integration suites passed. Dialog/integration tests also
 passed with full rendering explicitly enabled. Dense replay includes 180 joined
 emoji and multiple bounded paint calls. On 9 November the core was restarted in
 Screen `15976.nchat`, window `0`, shell `15977`, terminal `ttys002`, PID `44174`.
-It returned Online. The Screen session was detached. Kitty helpers and the narrow
-authorization setting are installed with a private configuration backup. The
-user attempted the reload shortcut and was given Ctrl+Cmd+, as the macOS
-alternative. Actual helper acceptance and live appearance await reattachment
-and user confirmation. Do not treat the native parser checks as visual proof
-of the user's running Kitty window.
+It returned Online. The Screen session was initially detached. Kitty helpers and
+the narrow authorization setting are installed with a private configuration
+backup. After reattachment and the Kitty configuration reload, the user
+confirmed “Complete emoji and aligned text”. This confirms acceptance of the
+helper and the actual live appearance, in addition to the native parser and
+isolated Screen replay checks.
 
 ### Joined emoji rendering follow-up
 
