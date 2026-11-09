@@ -87,6 +87,12 @@ Screen server can also leave `screen -Q` clients waiting.
   mutations need authorization for that action. Restart permission covers
   restarts. Use fake providers for send and vote tests and preserve ambiguous
   send outcomes for the user to resolve.
+- Create a separate `codex/` feature branch and isolated worktree for each task.
+  Other agents may work concurrently. Integrate the latest commits from
+  `codex/personal-features`, resolve conflicts and rerun checks before merging
+  back there. This is the fork's integration/default branch, called main by the
+  user. Push the completed merge and clean up only your own worktree. Never
+  discard another agent's uncommitted changes or remove their worktree.
 - Commit each completed feature or later fix separately. Include helper scripts,
   widget changes, tests and documentation. Update the root `changes.md` table
   with description, implementation commit, access, checks and limitations.
@@ -539,13 +545,17 @@ runtime state.
 The `nchat-presence` helper now opens a current-status browser by default.
 It combines matching people into one row with separate Telegram/WhatsApp columns,
 using complete cached phone numbers or the same service identity across accounts.
-For missing metadata, m opens a counterpart picker and Enter confirms a local
-link. u removes manual links. Private display preferences live in
+For missing metadata, m opens a cached-private-contact picker. Type a name or
+number immediately, use arrows to choose, and Enter once confirms a local link.
+Escape cancels. Cached counterparts without observations show No report. u removes manual links. Private display preferences live in
 `<config>/presence-contact-links.json`, with atomic writes and a separate lock.
-Same-name contacts require explicit confirmation. Search includes linked aliases.
+Same-name contacts require explicit confirmation. Search includes linked aliases
+and complete cached numbers, including formatted number queries.
 Its source is `utils/nchat-presence` and its installed entry point is
 `/Users/bingl/.local/bin/nchat-presence`. Use `current --plain` for grouped text.
-Tab changes service, / searches names/IDs, r reloads the cache and q quits.
+Tab changes service, / or Ctrl+F (also f) searches names/numbers, r reloads the
+cache and q quits. Search filters while typing. Arrow/page keys leave text-entry
+mode and navigate results.
 The view labels stale reports after five minutes and ignores heartbeat records
 for freshness. Regression coverage is `python3 utils/test-presence-current.py`.
 The weighted acceptance review is `doc/nchat-presence-ui-review.md`. This helper
