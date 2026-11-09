@@ -19,6 +19,7 @@ import datetime
 import glob
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 
@@ -30,6 +31,61 @@ def default_dir():
     if env:
         return os.path.join(env, "presence")
     return os.path.join(os.environ.get("HOME", "."), ".config", "nchat", "presence")
+
+
+def default_appdir(directory):
+    # <appdir>/presence -> <appdir>
+    parent = os.path.dirname(directory.rstrip("/"))
+    return parent if parent else directory
+
+
+def load_contacts(appdir, profile):
+    """Read the local nchat cache's contact names (id -> (name, phone))."""
+    contacts = {}
+    db_path = os.path.join(appdir, "history", profile, "db.sqlite")
+    if not os.path.isfile(db_path):
+        return contacts
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
+        try:
+            rows = con.execute("SELECT id, name, phone FROM contacts2")
+            for contact_id, name, phone in rows:
+                contacts[contact_id] = (name or "", phone or "")
+        finally:
+            con.close()
+    except sqlite3.Error:
+        pass  # locked or unreadable cache: fall back to raw ids
+    return contacts
+
+
+def short_id(uid):
+    # WhatsApp JID -> phone-like part; leave other ids unchanged
+    for suffix in ("@s.whatsapp.net", "@lid", "@newsletter", "@broadcast"):
+        if uid.endswith(suffix):
+            return uid[: -len(suffix)]
+    return uid
+
+
+def resolve_name(profile, uid, contacts):
+    if profile.startswith("Telegram"):
+        entry = contacts.get(uid)
+        if entry:
+            name, phone = entry
+            return name or phone
+        return None
+    # WhatsApp: exact JID match first, then by the numeric part (the cache
+    # may key contacts by LID while the history stores the phone JID).
+    entry = contacts.get(uid)
+    if entry:
+        name, phone = entry
+        if name:
+            return name
+    digits = "".join(c for c in uid if c.isdigit())
+    if digits:
+        for contact_id, (name, phone) in contacts.items():
+            if name and "".join(c for c in contact_id if c.isdigit()) == digits:
+                return name
+    return None
 
 
 def decode_profile(filename):
@@ -89,6 +145,27 @@ def match_uid(profile, uid, pattern):
     return False
 
 
+def load_all_contacts(appdir, directory):
+    """Contact names per profile, keyed by profile id."""
+    result = {}
+    if not appdir:
+        return result
+    for path in glob.glob(os.path.join(directory, "history.*.jsonl")):
+        profile = decode_profile(os.path.basename(path))
+        result[profile] = load_contacts(appdir, profile)
+    return result
+
+
+def display_id(profile, uid, contacts_by_profile, args):
+    """Show the display name when the local cache has one, else the id."""
+    id_text = normalize_uid(profile, uid) if profile.startswith("Telegram") else short_id(uid)
+    if not args.no_names:
+        name = resolve_name(profile, uid, contacts_by_profile.get(profile, {}))
+        if name:
+            return "%s <%s>" % (name, id_text)
+    return id_text
+
+
 def cmd_list(args):
     stats = {}
     for profile, record in iter_records(args.dir, args.profile):
@@ -114,24 +191,27 @@ def cmd_list(args):
     if not stats:
         print("no presence history found")
         return
+    contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
     for (profile, uid), s in sorted(stats.items(), key=lambda kv: -kv[1]["last_ts"]):
-        nuid = normalize_uid(profile, uid)
         if s["last_on"]:
             state = "online"
         else:
             state = "offline, seen " + seen_text(s["last_seen"])
         state += ", skipped (hidden)" if s["marked_hidden"] else ""
-        print("%-24s %-24s %s  %s  (%d records, %d online)"
-              % (profile, nuid, fmt(s["last_ts"]), state, s["count"], s["online"]))
+        print("%-24s %-28s %s  %s  (%d records, %d online)"
+              % (profile, display_id(profile, uid, contacts, args),
+                 fmt(s["last_ts"]), state, s["count"], s["online"]))
 
 
 def cmd_show(args):
+    contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
     shown = 0
     for profile, record in iter_records(args.dir, args.profile):
         if not match_uid(profile, record["u"], args.pattern):
             continue
+        who = display_id(profile, record["u"], contacts, args)
         if record.get("mark") == "hidden":
-            print("%s  %s  marked hidden (skipped)" % (fmt(record["ts"]), profile))
+            print("%s  %s  marked hidden (skipped)" % (fmt(record["ts"]), who))
             shown += 1
             continue
         if args.no_heartbeats and record.get("hb"):
@@ -151,15 +231,16 @@ def cmd_show(args):
 
 
 def cmd_summary(args):
-    contacts = {}
+    contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
+    aggregates = {}
     for profile, record in iter_records(args.dir, args.profile):
         if args.pattern and not match_uid(profile, record["u"], args.pattern):
             continue
         key = (profile, record["u"])
-        s = contacts.get(key)
+        s = aggregates.get(key)
         if s is None:
-            s = contacts[key] = {"first_ts": None, "last_ts": None, "online": 0,
-                                 "hidden": False, "last_on": None, "last_seen": None}
+            s = aggregates[key] = {"first_ts": None, "last_ts": None, "online": 0,
+                                   "hidden": False, "last_on": None, "last_seen": None}
         if record.get("mark") == "hidden":
             s["hidden"] = True
             continue
@@ -171,12 +252,11 @@ def cmd_summary(args):
             s["last_seen"] = record.get("seen")
         if record.get("on"):
             s["online"] += 1
-    if not contacts:
+    if not aggregates:
         print("no records match")
         return
-    for (profile, uid), s in sorted(contacts.items(), key=lambda kv: -(kv[1]["last_ts"] or 0)):
-        nuid = normalize_uid(profile, uid)
-        print("%s / %s" % (profile, nuid))
+    for (profile, uid), s in sorted(aggregates.items(), key=lambda kv: -(kv[1]["last_ts"] or 0)):
+        print("%s / %s" % (profile, display_id(profile, uid, contacts, args)))
         print("  first record : %s" % (fmt(s["first_ts"]) if s["first_ts"] else "never"))
         print("  last record  : %s" % (fmt(s["last_ts"]) if s["last_ts"] else "never"))
         if s["last_on"]:
@@ -190,17 +270,51 @@ def cmd_summary(args):
 
 
 def self_test():
-    with tempfile.TemporaryDirectory(prefix="nchat-presence-self-test.") as tmp:
+    import io
+    import contextlib
+    with tempfile.TemporaryDirectory(prefix="nchat-presence-self-test.") as appdir:
         profile = "Telegram_test"
-        path = os.path.join(tmp, "history." + profile.encode().hex() + ".jsonl")
-        with open(path, "w", encoding="utf-8") as fh:
+        presence_dir = os.path.join(appdir, "presence")
+        os.makedirs(presence_dir)
+        history_path = os.path.join(presence_dir,
+                                    "history." + profile.encode().hex() + ".jsonl")
+        with open(history_path, "w", encoding="utf-8") as fh:
             fh.write('{"ts":1700000000000,"u":"3631323334","on":0,"seen":1699990000000,"recent":0}\n')
             fh.write('{"ts":1700000300000,"u":"3631323334","on":0,"seen":1699990000000,"recent":0,"hb":1}\n')
             fh.write('{"ts":1700000600000,"u":"3631323334","on":1,"seen":-1,"recent":0}\n')
-        saved = sys.argv
-        sys.argv = ["nchat-presence", "list", "--dir", tmp]
-        cmd_list(argparse.Namespace(dir=tmp, profile=None))
-        print("self-test: list and show completed without errors")
+        # Synthetic contact cache: the hex uid resolves to a display name.
+        history_dir = os.path.join(appdir, "history", profile)
+        os.makedirs(history_dir)
+        con = sqlite3.connect(os.path.join(history_dir, "db.sqlite"))
+        con.execute("CREATE TABLE contacts2 (id TEXT, name TEXT, phone TEXT, "
+                    "isSelf INT, isAlias INT, UNIQUE(id) ON CONFLICT REPLACE)")
+        con.execute("INSERT INTO contacts2 VALUES ('3631323334', 'Test Name', '61234', 0, 0)")
+        con.commit()
+        con.close()
+
+        args = argparse.Namespace(dir=presence_dir, appdir=appdir, profile=None,
+                                  pattern="61234", n=200, no_names=False, no_heartbeats=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_list(args)
+        listing = output.getvalue()
+        assert "Test Name <61234>" in listing, listing
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_summary(args)
+        summary = output.getvalue()
+        assert "Test Name <61234>" in summary, summary
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_show(args)
+        shown = output.getvalue()
+        assert "offline" in shown and "ONLINE" in shown, shown
+        args.no_names = True
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_list(args)
+        assert "Test Name" not in output.getvalue()
+    print("self-test: list, show, summary and name resolution all passed")
     return 0
 
 
@@ -212,12 +326,19 @@ def main():
     parser.add_argument("pattern", nargs="?", default="",
                         help="user id (or substring) to filter; for show, required")
     parser.add_argument("--dir", default=default_dir(), help="presence directory (default %(default)s)")
+    parser.add_argument("--appdir", default=None,
+                        help="nchat config dir for display-name lookup (default: parent of --dir)")
     parser.add_argument("--profile", default=None, help="only match profiles containing this text")
     parser.add_argument("-n", type=int, default=200, help="max records for show (default 200)")
     parser.add_argument("--no-heartbeats", action="store_true",
                         help="hide heartbeat re-affirmation lines in show")
+    parser.add_argument("--no-names", action="store_true",
+                        help="do not resolve display names from the local cache")
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.appdir is None:
+        args.appdir = default_appdir(args.dir)
 
     if args.self_test:
         return self_test()
