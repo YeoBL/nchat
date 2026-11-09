@@ -394,6 +394,27 @@ their own truthful verification status.
 
 ## Incidents and constraints to preserve
 
+### Joined emoji rendering follow-up
+
+On 9 November 2026, two adjacent U+1F642 U+200D U+2194 U+FE0F
+head-shaking emoji exposed another cursor-width mismatch. Curses allocates
+columns for the component symbols while Kitty combines the sequence. Incremental
+redraws can then shift text and leave old divider/header fragments behind.
+
+`src/uicursestext.h` applies a display fallback shared by history, sidebar,
+status, dialogs and composer. It omits joiners, presentation selectors, keycap
+decoration and emoji tag characters during drawing. Component symbols use their
+default widths. Existing skin-tone behavior still applies. Message storage,
+clipboard and outgoing text use the original source. Combined-emoji appearance
+is simplified in the terminal. Do not remove this fallback without an equivalent
+end-to-end curses/Screen/Kitty width test.
+
+`sh utils/test-notifications.sh` includes the expanded rendering fixtures with
+head shakes, family/profession combinations, presentation selectors, keycaps and
+emoji tags. The regression failed on the original drawing path. The repaired
+path passed every frame in native Kitty and an isolated Screen relay, including
+scrolling and independently dirty panels. No private message fixture is stored.
+
 ### Screen freeze during scrolling
 
 On 8 November, Screen 5.0.2 consumed 100% CPU in
