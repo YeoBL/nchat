@@ -371,7 +371,8 @@ bool TgChat::Impl::HasFeature(ProtocolFeature p_ProtocolFeature) const
     FeatureAutoGetContactsOnLogin |
     FeaturePinChat |
     FeatureArchiveChat |
-    FeaturePinMessage;
+    FeaturePinMessage |
+    FeatureBackgroundPresencePoll;
   return (p_ProtocolFeature & customFeatures);
 }
 
@@ -960,6 +961,33 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         {
           Status::Clear(m_ProfileId, Status::FlagFetching);
 
+          if (object->get_id() == td::td_api::error::ID) return;
+
+          auto tuser = td::move_tl_object_as<td::td_api::user>(object);
+
+          if (!tuser) return;
+
+          ProcessStatusUpdate(tuser->id_, std::move(tuser->status_));
+        });
+      }
+      break;
+
+    case GetPresenceRequestType:
+      {
+        // Background presence sampling: read TDLib's cached user status,
+        // which is kept fresh by updateUserStatus pushes for recent dialogs.
+        std::shared_ptr<GetPresenceRequest> getPresenceRequest =
+          std::static_pointer_cast<GetPresenceRequest>(p_RequestMessage);
+
+        std::int64_t userId = StrUtil::NumFromHex<int64_t>(getPresenceRequest->userId);
+
+        if (IsGroup(userId) || IsSelf(userId)) return;
+
+        auto get_user = td::td_api::make_object<td::td_api::getUser>();
+        get_user->user_id_ = userId;
+        SendQuery(std::move(get_user),
+                  [this](Object object)
+        {
           if (object->get_id() == td::td_api::error::ID) return;
 
           auto tuser = td::move_tl_object_as<td::td_api::user>(object);
@@ -2848,6 +2876,7 @@ void TgChat::Impl::ProcessStatusUpdate(int64_t p_UserId,
 
   bool isOnline = false;
   int64_t timeSeen = TimeSeenNone;
+  bool recently = false;
   std::int32_t statusId = p_Status->get_id();
   switch (statusId)
   {
@@ -2875,6 +2904,7 @@ void TgChat::Impl::ProcessStatusUpdate(int64_t p_UserId,
       break;
 
     case td::td_api::userStatusRecently::ID:
+      recently = true;
       break;
 
     default:
@@ -2886,6 +2916,7 @@ void TgChat::Impl::ProcessStatusUpdate(int64_t p_UserId,
   receiveStatusNotify->userId = StrUtil::NumToHex(p_UserId);
   receiveStatusNotify->isOnline = isOnline;
   receiveStatusNotify->timeSeen = timeSeen;
+  receiveStatusNotify->recently = recently;
   CallMessageHandler(receiveStatusNotify);
 }
 

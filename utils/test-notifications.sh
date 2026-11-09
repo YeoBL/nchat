@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 /usr/bin/python3 utils/test-kitty-badge-auth.py
 /usr/bin/python3 utils/test-telegram-archive.py
 notification_test_dir=$(mktemp -d /tmp/nchat-notifications.XXXXXX)
-trap 'rm -rf "$notification_test_dir/history-render"; rm -f "$notification_test_dir/state" "$notification_test_dir/forum" "$notification_test_dir/membership" "$notification_test_dir/cache" "$notification_test_dir/badge" "$notification_test_dir/handlers" "$notification_test_dir/ui.conf" "$notification_test_dir/app.conf" "$notification_test_dir/color.conf" "$notification_test_dir/history-render.raw" "$notification_test_dir/history-render.expected"; rmdir "$notification_test_dir"' EXIT
+trap 'rm -rf "$notification_test_dir/history-render" "$notification_test_dir/presence"; rm -f "$notification_test_dir/state" "$notification_test_dir/forum" "$notification_test_dir/membership" "$notification_test_dir/cache" "$notification_test_dir/badge" "$notification_test_dir/handlers" "$notification_test_dir/ui.conf" "$notification_test_dir/app.conf" "$notification_test_dir/color.conf" "$notification_test_dir/history-render.raw" "$notification_test_dir/history-render.expected"; rmdir "$notification_test_dir"' EXIT
 clang++ -std=c++17 -Ilib/tgchat/ext/td/td/generate/auto -Ilib/tgchat/ext/td \
   utils/test-telegram-membership.cpp build/lib/libtdapi.a build/lib/libtdutils.a \
   /opt/homebrew/opt/openssl@3/lib/libcrypto.dylib -o "$notification_test_dir/membership"

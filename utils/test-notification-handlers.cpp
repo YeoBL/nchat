@@ -13,9 +13,11 @@
 #include <deque>
 #include <thread>
 #include <cassert>
+#include <cstring>
 #include <clocale>
 #include <iostream>
 #include <fstream>
+#include <glob.h>
 #include <sqlite_modern_cpp.h>
 #include "protocol.h"
 #include "protocolutil.h"
@@ -128,6 +130,18 @@ public:
   bool IsGroupChat(const std::string&) const override { return false; }
 };
 
+// Advertises background presence polling and filters groups/self by id, so
+// the production candidate-selection path can be exercised end to end.
+class PollTestProtocol : public HistoricalTestProtocol
+{
+public:
+  bool HasFeature(ProtocolFeature feature) const override
+  { return feature == FeatureBackgroundPresencePoll; }
+  bool IsGroupChat(const std::string& p_ChatId) const override
+  { return p_ChatId.rfind("group", 0) == 0; }
+  std::string GetSelfId() const override { return "selfchat"; }
+};
+
 static void TestPresenceStatus()
 {
   AppConfig::Init(); // Date rendering uses the real timestamp-format setting.
@@ -189,6 +203,88 @@ static void TestPresenceStatus()
   second.RequestUserStatus({profile, peer});
   assert(protocol->requests.size() == 2); // The guard belongs to the model, not the process.
   std::cout << "PASS: WhatsApp presence refresh on chat/focus, supplied last-seen rendering, hidden timestamps, and Telegram isolation\n";
+}
+
+static void TestPresencePollModel()
+{
+  UiConfig::SetNum("presence_poll_enabled", 1);
+
+  const std::string profile = "Telegram_presence_poll";
+  UiModel::Impl model(nullptr);
+  auto protocol = std::make_shared<PollTestProtocol>();
+  model.m_Protocols[profile] = protocol;
+
+  // Recent private chats plus a group and a self chat that must not consume
+  // poll slots.
+  for (int i = 0; i < 5; ++i)
+  {
+    ChatInfo info;
+    info.lastMessageTime = 1000 + i;
+    model.m_ChatInfos[profile]["user" + std::to_string(i)] = info;
+  }
+  ChatInfo groupInfo;
+  groupInfo.lastMessageTime = 999999;
+  model.m_ChatInfos[profile]["group-one"] = groupInfo;
+  ChatInfo selfInfo;
+  selfInfo.lastMessageTime = 999998;
+  model.m_ChatInfos[profile]["selfchat"] = selfInfo;
+
+  // A profile without the capability is never polled.
+  auto other = std::make_shared<PresenceTestProtocol>();
+  model.m_Protocols["WhatsAppMd_other"] = other;
+  ChatInfo otherInfo;
+  otherInfo.lastMessageTime = 5000;
+  model.m_ChatInfos["WhatsAppMd_other"]["peer@s.whatsapp.net"] = otherInfo;
+
+  // Running the poller must not throw with the default configuration (this
+  // previously crashed on a config-key mismatch) and must not fire anything
+  // immediately (fresh random phases).
+  model.ProcessPresencePoll();
+  assert(protocol->requests.empty());
+  assert(other->requests.empty());
+
+  // A protocol observation for a tracked candidate is recorded and flushed
+  // to the history file.
+  auto status = std::make_shared<ReceiveStatusNotify>(profile);
+  status->userId = "user4";
+  status->isOnline = true;
+  status->timeSeen = -1;
+  model.MessageHandler(status);
+
+  // An observation for a user outside the poll set is never recorded.
+  auto stranger = std::make_shared<ReceiveStatusNotify>(profile);
+  stranger->userId = "stranger";
+  stranger->isOnline = true;
+  stranger->timeSeen = -1;
+  model.MessageHandler(stranger);
+
+  // Bypass the once-per-second flush throttle so this tick persists the
+  // queued history line.
+  model.m_LastPresenceFlushMs = 0;
+  model.ProcessPresencePoll();
+
+  const std::string presenceDir = FileUtil::GetApplicationDir() + "/presence";
+  glob_t globResult;
+  memset(&globResult, 0, sizeof(globResult));
+  const std::string pattern = presenceDir + "/history.*.jsonl";
+  assert(glob(pattern.c_str(), 0, nullptr, &globResult) == 0);
+  assert(globResult.gl_pathc == 1);
+  std::ifstream file(globResult.gl_pathv[0]);
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  const std::string history = buffer.str();
+  globfree(&globResult);
+  assert(history.find("\"u\":\"user4\"") != std::string::npos);
+  assert(history.find("stranger") == std::string::npos);
+  size_t lineCount = 0;
+  for (char ch : history)
+  {
+    if (ch == '\n') ++lineCount;
+  }
+  assert(lineCount == 1);
+
+  UiConfig::SetNum("presence_poll_enabled", 0);
+  std::cout << "PASS: presence poll wiring, candidate gating and history flush through the production model\n";
 }
 
 static void TestViewOnceTerminal(const std::string& root)
@@ -449,7 +545,11 @@ int main(int argc, char** argv)
   UiConfig::SetBool("online_status_dynamic", false);
   UiConfig::SetBool("typing_status_share", false);
   UiConfig::SetNum("auto_select_chat_timeout_sec", 0);
+  // The presence poller is opt-in per test; real-time ticking must not
+  // inject GetPresenceRequest into unrelated request-sequence assertions.
+  UiConfig::SetNum("presence_poll_enabled", 0);
   TestPresenceStatus();
+  TestPresencePollModel();
   {
     UiModel::Impl model(nullptr);
     const std::string profile = "WhatsAppMd_live_group_names", chat = "12030004@g.us";

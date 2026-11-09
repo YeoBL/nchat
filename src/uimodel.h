@@ -19,6 +19,7 @@
 #include "notificationstate.h"
 #include "protocol.h"
 #include "localfeatures.h"
+#include "presencepoller.h"
 
 class UiView;
 
@@ -99,6 +100,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Protocol>> GetProtocols();
     bool Process();
     void ProcessTimers();
+    void ProcessPresencePoll();
 
     std::string GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId);
     void UpdateChatInfoLastMessageTime(const std::string& p_ProfileId, const std::string& p_ChatId);
@@ -297,7 +299,12 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, std::set<std::string>>> m_UsersTyping;
     std::unordered_map<std::string, std::unordered_map<std::string, bool>> m_UserOnline;
     std::unordered_map<std::string, std::unordered_map<std::string, int64_t>> m_UserTimeSeen;
+    std::unordered_map<std::string, std::unordered_map<std::string, bool>> m_UserRecently;
     std::set<std::pair<std::string, std::string>> m_RequestedUserStatuses;
+    PresencePoller m_PresencePoller;
+    int64_t m_NextPresenceInitRetryMs = 0;
+    int64_t m_LastPresenceFlushMs = 0;
+    int64_t m_NextPresenceFlushRetryMs = 0;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> m_GroupMembers;
     int64_t m_GroupMembersUpdateTime = 0;

@@ -131,7 +131,8 @@ bool WmChat::HasFeature(ProtocolFeature p_ProtocolFeature) const
     FeatureAutoGetContactsOnLogin |
     FeaturePinChat |
     FeatureArchiveChat |
-    FeaturePresenceRequiresOnline;
+    FeaturePresenceRequiresOnline |
+    FeatureBackgroundPresencePoll;
   return (p_ProtocolFeature & customFeatures);
 }
 
@@ -418,6 +419,19 @@ void WmChat::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage)
         std::shared_ptr<GetStatusRequest> getStatusRequest =
           std::static_pointer_cast<GetStatusRequest>(p_RequestMessage);
         std::string userId = getStatusRequest->userId;
+
+        CWmGetStatus(m_ConnId, const_cast<char*>(userId.c_str()));
+      }
+      break;
+
+    case GetPresenceRequestType:
+      {
+        // Background presence sampling: renew the presence subscription for
+        // this contact so the server pushes its current status.
+        LOG_DEBUG("get presence");
+        std::shared_ptr<GetPresenceRequest> getPresenceRequest =
+          std::static_pointer_cast<GetPresenceRequest>(p_RequestMessage);
+        std::string userId = getPresenceRequest->userId;
 
         CWmGetStatus(m_ConnId, const_cast<char*>(userId.c_str()));
       }

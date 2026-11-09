@@ -8,6 +8,7 @@
 #include "uimodel.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <sstream>
@@ -61,10 +62,24 @@
 
 const std::pair<std::string, std::string> UiModel::Impl::s_ChatNone;
 
+// Monotonic clock source for presence poll scheduling. Record timestamps in
+// the history keep using the wall clock; only scheduling and the eligible
+// observation window use this, so sleeps and clock steps cannot stall polls
+// or fast-forward hidden detection.
+static int64_t SteadyTimeMSec()
+{
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 UiModel::Impl::Impl(UiModel* p_UiModel)
 {
   m_DeferInitialChat = std::getenv("NCHAT_NO_AUTO_SELECT") != nullptr;
   m_View = std::make_shared<UiView>(p_UiModel);
+  if (!m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
+  {
+    LOG_WARNING("presence poller init failed: %s", m_PresencePoller.GetError().c_str());
+  }
 }
 
 UiModel::Impl::~Impl()
@@ -86,6 +101,10 @@ void UiModel::Impl::Cleanup()
       m_LocalFeatures.SetDraft({profile.first, chat.first}, StrUtil::ToString(chat.second), false);
     }
   if (!m_LocalFeatures.Flush()) LOG_WARNING("draft save failed: %s", m_LocalFeatures.GetError().c_str());
+  if (m_PresencePoller.IsInitialized())
+  {
+    if (!m_PresencePoller.Flush()) LOG_WARNING("presence poller save failed: %s", m_PresencePoller.GetError().c_str());
+  }
   m_View->ClearTerminalBadge();
 }
 
@@ -2239,18 +2258,25 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         std::string userId = receiveStatusNotify->userId;
         bool isOnline = receiveStatusNotify->isOnline;
         int64_t timeSeen = receiveStatusNotify->timeSeen;
+        bool recently = receiveStatusNotify->recently;
         LOG_TRACE("received user %s is %s seen %lld", userId.c_str(),
                   (isOnline ? "online" : "away"), timeSeen);
         m_UserOnline[profileId][userId] = isOnline;
+        m_UserRecently[profileId][userId] = recently;
         if (timeSeen != -1)
         {
           m_UserTimeSeen[profileId][userId] = timeSeen;
         }
-        else if (!isOnline && HasProtocolFeature(profileId, FeaturePresenceRequiresOnline))
+        else if (!isOnline)
         {
-          // An unavailable/hidden timestamp must not leave an old last-seen
+          // A hidden/unavailable timestamp must not leave an old last-seen
           // value presented as the peer's current shared status.
           m_UserTimeSeen[profileId].erase(userId);
+        }
+        if (UiConfig::GetNum("presence_poll_enabled") != 0)
+        {
+          m_PresencePoller.RecordStatus(TimeUtil::GetCurrentTimeMSec(), profileId, userId,
+                                        isOnline, timeSeen, recently);
         }
         UpdateStatus();
       }
@@ -2630,6 +2656,8 @@ void UiModel::Impl::ProcessTimers()
   {
     lastTimeMs = nowTimeMs;
 
+    ProcessPresencePoll();
+
     static const int autoSelectChatTimeoutSec = UiConfig::GetNum("auto_select_chat_timeout_sec");
     if (!IsCurrentChatSet() && (autoSelectChatTimeoutSec != 0) && (m_LastSyncMessageTime != 0))
     {
@@ -2641,6 +2669,143 @@ void UiModel::Impl::ProcessTimers()
           LOG_TRACE("set current chat on old msg sync timeout");
         }
       }
+    }
+  }
+}
+
+void UiModel::Impl::ProcessPresencePoll()
+{
+  const int64_t nowMs = TimeUtil::GetCurrentTimeMSec();
+
+  if (!m_PresencePoller.IsInitialized())
+  {
+    // Retry initialization periodically; the poller stays inert until the
+    // state file can be read safely.
+    if (nowMs >= m_NextPresenceInitRetryMs)
+    {
+      m_NextPresenceInitRetryMs = nowMs + 60000;
+      if (!m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
+      {
+        LOG_WARNING("presence poller init failed: %s", m_PresencePoller.GetError().c_str());
+      }
+    }
+    return;
+  }
+
+  if (UiConfig::GetNum("presence_poll_enabled") == 0)
+  {
+    return;
+  }
+
+  const int64_t tickMs = SteadyTimeMSec();
+  const int64_t pollIntervalSec = std::max<int64_t>(10, UiConfig::GetNum("presence_poll_interval"));
+  const int64_t pollIntervalMs = pollIntervalSec * 1000;
+  const size_t pollCount =
+    static_cast<size_t>(std::max<int64_t>(1, UiConfig::GetNum("presence_poll_count")));
+  const int64_t hiddenDetectMs =
+    1000 * std::max<int64_t>(0, UiConfig::GetNum("presence_poll_hidden_detect_sec"));
+  const int64_t heartbeatSec =
+    std::max<int64_t>(pollIntervalSec, UiConfig::GetNum("presence_poll_heartbeat_sec"));
+  const int64_t heartbeatMs = heartbeatSec * 1000;
+
+  for (const auto& profile : m_Protocols)
+  {
+    const std::string& profileId = profile.first;
+    if (!profile.second->HasFeature(FeatureBackgroundPresencePoll))
+    {
+      continue; // protocol cannot sample presence in the background
+    }
+    const std::string selfId = profile.second->GetSelfId();
+    const auto chatInfosIt = m_ChatInfos.find(profileId);
+    if (chatInfosIt == m_ChatInfos.end())
+    {
+      continue;
+    }
+
+    // The most recent private chats of this account. Self chats and
+    // WhatsApp status/newsletter ids cannot carry contact presence and are
+    // filtered out so they do not consume poll slots.
+    std::vector<std::pair<std::string, int64_t>> candidates;
+    for (const auto& chat : chatInfosIt->second)
+    {
+      const std::string& chatId = chat.first;
+      if (GetChatInfoIsGroup(profileId, chatId))
+      {
+        continue;
+      }
+      if (!selfId.empty() && chatId == selfId)
+      {
+        continue;
+      }
+      if (chatId.size() >= 11 &&
+          chatId.compare(chatId.size() - 11, 11, "@newsletter") == 0)
+      {
+        continue;
+      }
+      if (chatId.size() >= 10 &&
+          chatId.compare(chatId.size() - 10, 10, "@broadcast") == 0)
+      {
+        continue;
+      }
+      const auto contactIt = m_ContactInfos.find(profileId);
+      if (contactIt != m_ContactInfos.end())
+      {
+        const auto it = contactIt->second.find(chatId);
+        if (it != contactIt->second.end() && it->second.isSelf)
+        {
+          continue;
+        }
+      }
+      candidates.push_back(std::make_pair(chatId, chat.second.lastMessageTime));
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const std::pair<std::string, int64_t>& p_A, const std::pair<std::string, int64_t>& p_B)
+              {
+                if (p_A.second != p_B.second) return p_A.second > p_B.second;
+                return p_A.first < p_B.first;
+              });
+    std::vector<std::string> orderedIds;
+    orderedIds.reserve(candidates.size());
+    for (const auto& candidate : candidates)
+    {
+      orderedIds.push_back(candidate.first);
+    }
+    if (orderedIds.size() > pollCount)
+    {
+      orderedIds.resize(pollCount);
+    }
+
+    const std::vector<std::string> due =
+      m_PresencePoller.Tick(tickMs, profileId, orderedIds, pollIntervalMs, hiddenDetectMs);
+
+    for (const std::string& userId : due)
+    {
+      // Re-affirm the last genuine observation so the history keeps proving
+      // continued observation. Display-state guesses are never recorded, so
+      // this does nothing for users with no observation yet.
+      m_PresencePoller.RecordHeartbeat(nowMs, profileId, userId, heartbeatMs);
+
+      std::shared_ptr<GetPresenceRequest> request = std::make_shared<GetPresenceRequest>();
+      request->userId = userId;
+      SendProtocolRequest(profileId, request);
+    }
+  }
+
+  // Flush at most once per second; on failure back off so a persistently
+  // failing device is not hammered from the UI thread.
+  if (m_PresencePoller.HasPending() &&
+      nowMs >= m_NextPresenceFlushRetryMs &&
+      nowMs - m_LastPresenceFlushMs >= 1000)
+  {
+    m_LastPresenceFlushMs = nowMs;
+    if (!m_PresencePoller.Flush())
+    {
+      LOG_WARNING("presence poller save failed: %s", m_PresencePoller.GetError().c_str());
+      m_NextPresenceFlushRetryMs = nowMs + 5000;
+    }
+    else
+    {
+      m_NextPresenceFlushRetryMs = 0;
     }
   }
 }
@@ -2995,8 +3160,14 @@ std::string UiModel::Impl::GetChatStatus(const std::string& p_ProfileId, const s
     }
     else
     {
+      const bool recently = m_UserRecently[p_ProfileId].count(p_ChatId) &&
+        m_UserRecently[p_ProfileId][p_ChatId];
       int64_t timeSeen = m_UserTimeSeen[p_ProfileId].count(p_ChatId) ? m_UserTimeSeen[p_ProfileId][p_ChatId] : -1;
-      switch (timeSeen)
+      if (recently)
+      {
+        chatStatus = "seen recently";
+      }
+      else switch (timeSeen)
       {
         case TimeSeenNone:
           chatStatus = HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline)

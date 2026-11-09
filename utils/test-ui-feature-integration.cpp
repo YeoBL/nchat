@@ -284,6 +284,8 @@ int main()
   UiConfig::SetBool("terminal_bell_active", false);
   UiConfig::SetBool("terminal_bell_inactive", false);
   UiConfig::SetBool("typing_status_share", false);
+  // Keep the background presence poller out of focused UI-sequence tests.
+  UiConfig::SetNum("presence_poll_enabled", 0);
   MessageCache::Init();
   MessageCache::AddProfile(Profile, false, 1, false, false);
   ChatMessage unread;

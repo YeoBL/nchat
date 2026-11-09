@@ -35,6 +35,7 @@ enum ProtocolFeature
   FeaturePinMessage = (1 << 9),
   FeaturePresenceRequiresOnline = (1 << 10),
   FeatureEditMessagePermissions = (1 << 11), // Query service permissions; no blanket age limit.
+  FeatureBackgroundPresencePoll = (1 << 12), // Supports GetPresenceRequest presence sampling
 };
 
 class Protocol
@@ -74,6 +75,7 @@ enum MessageType
   GetContactsRequestType,
   GetChatsRequestType,
   GetStatusRequestType,
+  GetPresenceRequestType,
   GetMessageRequestType,
   GetMessagesRequestType,
   SendMessageRequestType,
@@ -285,6 +287,15 @@ class GetStatusRequest : public RequestMessage
 {
 public:
   virtual MessageType GetMessageType() const { return GetStatusRequestType; }
+  std::string userId;
+};
+
+// Background presence poller request: sample one user's online/last-seen
+// status without the visible-chat bookkeeping of GetStatusRequest.
+class GetPresenceRequest : public RequestMessage
+{
+public:
+  virtual MessageType GetMessageType() const { return GetPresenceRequestType; }
   std::string userId;
 };
 
@@ -757,6 +768,7 @@ public:
   std::string userId;
   bool isOnline = false;
   int64_t timeSeen = -1;
+  bool recently = false; // coarse "seen recently" status (Telegram), no exact time
 };
 
 class NewMessageStatusNotify : public ServiceMessage
