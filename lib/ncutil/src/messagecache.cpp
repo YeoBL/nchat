@@ -163,11 +163,11 @@ void MessageCache::AddFromServiceMessage(const std::string& p_ProfileId,
         std::shared_ptr<NewMessagesNotify> newMessagesNotify =
           std::static_pointer_cast<NewMessagesNotify>(p_ServiceMessage);
         if (newMessagesNotify->success && !newMessagesNotify->cached &&
-            newMessagesNotify->sequence)
+            (newMessagesNotify->sequence || newMessagesNotify->contentUpdate))
         {
           MessageCache::AddMessages(p_ProfileId, newMessagesNotify->chatId,
                                     newMessagesNotify->fromMsgId, newMessagesNotify->chatMessages,
-                                    newMessagesNotify->historical);
+                                    newMessagesNotify->historical, newMessagesNotify->sequence);
         }
       }
       break;
@@ -606,7 +606,7 @@ void MessageCache::InitSearch(const std::string& p_ProfileId)
 
 void MessageCache::AddMessages(const std::string& p_ProfileId, const std::string& p_ChatId,
                                const std::string& p_FromMsgId,
-                               const std::vector<ChatMessage>& p_ChatMessages, bool historical)
+                               const std::vector<ChatMessage>& p_ChatMessages, bool historical, bool sequence)
 {
   if (!m_CacheEnabled) return;
 
@@ -616,6 +616,7 @@ void MessageCache::AddMessages(const std::string& p_ProfileId, const std::string
   addMessagesRequest->fromMsgId = p_FromMsgId;
   addMessagesRequest->chatMessages = p_ChatMessages;
   addMessagesRequest->historical = historical;
+  addMessagesRequest->sequence = sequence;
   EnqueueRequest(addMessagesRequest);
 }
 
@@ -1561,7 +1562,7 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
         LOG_DEBUG("cache add %s %s %d", chatId.c_str(), fromMsgId.c_str(),
                   addMessagesRequest->chatMessages.size());
 
-        if (m_CheckSequence[profileId])
+        if (addMessagesRequest->sequence && m_CheckSequence[profileId])
         {
           if (!m_UpdatedSequence[profileId][chatId])
           {
@@ -1634,16 +1635,39 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
             PerformFetchOneMessage(profileId, chatId, msg.id, previous);
             PreserveHistoricalState(msg, previous);
           }
+          // A single-message edit/lookup updates content without declaring a
+          // history gap filled. Preserve an existing boundary, or create one.
+          int sequence = addMessagesRequest->sequence ? 1 : 0;
+          if (!addMessagesRequest->sequence)
+          {
+            try
+            {
+              *m_Dbs[profileId] << "SELECT isSequence, isRead, timeSent FROM " + s_TableMessages +
+                " WHERE chatId = ? AND id = ?;" << chatId << msg.id >>
+                [&](int storedSequence, bool isRead, int64_t timeSent)
+                {
+                  sequence = storedSequence;
+                  msg.isRead = isRead;
+                  msg.timeSent = timeSent;
+                };
+            }
+            catch (const sqlite::sqlite_exception& ex)
+            {
+              HANDLE_SQLITE_EXCEPTION(ex);
+            }
+          }
           // Telegram omits permanently deleted messages from history. Keep a
           // cached deletion marker if stale history ever supplies that ID.
           int wasDeleted = 0;
+          int wasEdited = 0;
           try
           {
-            *m_Dbs[profileId] << "SELECT COALESCE(isDeleted, 0) FROM " + s_TableMessages +
+            *m_Dbs[profileId] << "SELECT COALESCE(isDeleted, 0), COALESCE(isEdited, 0) FROM " + s_TableMessages +
               " WHERE chatId = ? AND id = ?;" << chatId << msg.id >>
-              [&](const int& isDeleted)
+              [&](int isDeleted, int isEdited)
               {
                 wasDeleted = isDeleted;
+                wasEdited = isEdited;
               };
           }
           catch (const sqlite::sqlite_exception& ex)
@@ -1651,6 +1675,12 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
             HANDLE_SQLITE_EXCEPTION(ex);
           }
           if (wasDeleted && !msg.isDeleted) continue;
+          if (wasEdited && !msg.isEdited && !msg.isDeleted)
+          {
+            std::vector<ChatMessage> previous;
+            PerformFetchOneMessage(profileId, chatId, msg.id, previous);
+            if (!previous.empty()) CacheUtil::PreserveEditedContent(previous.front(), msg);
+          }
 
           // Fetch already cached message reactions
           Reactions oldReactions;
@@ -1689,10 +1719,10 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
             try
             {
               *m_Dbs[profileId] << "INSERT INTO " + s_TableMessages + " "
-                "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, isEdited, isDeleted, isPinned, reactions) VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);" <<
+                "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, isEdited, isDeleted, isPinned, reactions, isSequence) VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);" <<
                 chatId << msg.id << msg.senderId << msg.text << msg.quotedId << msg.quotedText << msg.quotedSender <<
-                msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << msg.isEdited << msg.isDeleted << msg.isPinned << reactionsBytes;
+                msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << msg.isEdited << msg.isDeleted << msg.isPinned << reactionsBytes << sequence;
             }
             catch (const sqlite::sqlite_exception& ex)
             {
@@ -1714,10 +1744,10 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
             try
             {
               *m_Dbs[profileId] << "INSERT INTO " + s_TableMessages + " "
-                "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, isEdited, isDeleted, isPinned, reactions) VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);" <<
+                "(chatId, id, senderId, text, quotedId, quotedText, quotedSender, fileInfo, timeSent, isOutgoing, isRead, isEdited, isDeleted, isPinned, reactions, isSequence) VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);" <<
                 chatId << msg.id << msg.senderId << msg.text << msg.quotedId << msg.quotedText << msg.quotedSender <<
-                msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << msg.isEdited << msg.isDeleted << msg.isPinned << reactionsBytes;
+                msg.fileInfo << msg.timeSent << msg.isOutgoing << msg.isRead << msg.isEdited << msg.isDeleted << msg.isPinned << reactionsBytes << sequence;
             }
             catch (const sqlite::sqlite_exception& ex)
             {

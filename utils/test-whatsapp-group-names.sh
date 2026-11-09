@@ -20,4 +20,4 @@ EOF
 cc -c "$test_dir/logs.c" -o "$test_dir/logs.o"
 cd lib/wmchat/go
 NCHAT_TEST_NATIVE_LOGS=1 go test -race -count=1 -ldflags "-extldflags=$test_dir/logs.o" \
-  -run 'TestLiveGroupNamesOnJoinAndRename|TestCachedNamesPublishedBeforeNetwork|TestPreferKnownName' .
+  -run 'TestLiveGroupNamesOnJoinAndRename|TestCachedNamesPublishedBeforeNetwork|TestPreferKnownName|TestMessageEdits' .

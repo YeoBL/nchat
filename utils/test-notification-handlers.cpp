@@ -1030,6 +1030,28 @@ int main(int argc, char** argv)
   }
   {
     UiModel::Impl model(nullptr);
+    for (const std::string profile : {"Telegram_edits", "WhatsAppMd_edits"})
+    {
+      incoming(model, "edit-message", "original", false, profile);
+      auto edited = model.m_Messages[profile]["chat"].at("edit-message");
+      edited.text = "updated ✓"; edited.isEdited = true;
+      auto event = std::make_shared<NewMessagesNotify>(profile);
+      event->success = true; event->chatId = "chat"; event->contentUpdate = true;
+      auto original = edited; original.text = "updated ✓"; original.isRead = !edited.isRead;
+      original.timeSent += 5000;
+      event->chatMessages = {original};
+      model.MessageHandler(event);
+      auto stale = edited; stale.text = "original"; stale.isEdited = false;
+      event->cached = true; event->chatMessages = {stale};
+      model.MessageHandler(event);
+      const auto& shown = model.m_Messages[profile]["chat"].at("edit-message");
+      assert(shown.isEdited && shown.text == "updated ✓" && shown.timeSent == edited.timeSent);
+      assert(model.m_MessageVec[profile]["chat"].size() == 1);
+    }
+    std::cout << "PASS: Telegram and WhatsApp live edits survive stale cached replay without duplicate rows\n";
+  }
+  {
+    UiModel::Impl model(nullptr);
     const std::string profile = "WhatsAppMd_requestedhistory";
     incoming(model, "pending", "live unread", false, profile);
     model.Process();

@@ -953,7 +953,11 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 		if evt.IsViewOnce {
 			message = markDeliveredViewOnce(message)
 		}
-		handler.HandleMessage(evt.Info, message, false /*isSyncRead*/)
+		info := evt.Info
+		if evt.IsEdit {
+			info.Edit = types.EditAttributeMessageEdit
+		}
+		handler.HandleMessage(info, message, false /*isSyncRead*/)
 		if evt.SourceWebMsg != nil {
 			handler.RecoverHistoricalReceipts(evt.Info.Chat, evt.SourceWebMsg)
 			handler.RecoverHistoricalPollVotes(evt.Info, evt.SourceWebMsg)
@@ -2618,9 +2622,10 @@ func (handler *WmEventHandler) HandleProtocolMessage(messageInfo types.MessageIn
 	if protocol.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
 		// handle message edit
 		editedMsg := protocol.GetEditedMessage()
-		if editedMsg != nil {
+		if editedMsg != nil && protocol.GetKey().GetID() != "" {
 			newMessageInfo := messageInfo
 			newMessageInfo.ID = protocol.GetKey().GetID()
+			newMessageInfo.Edit = types.EditAttributeMessageEdit
 			handler.HandleMessage(newMessageInfo, editedMsg, isSyncRead)
 		} else {
 			LOG_WARNING(fmt.Sprintf("get edited message failed"))

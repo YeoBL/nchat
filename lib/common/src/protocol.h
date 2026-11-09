@@ -662,6 +662,7 @@ public:
   std::string fromMsgId;
   bool cached = false;
   bool historical = false; // Requested old history; not fresh unread/chat metadata.
+  bool contentUpdate = false; // Persist an exact message refresh without claiming contiguous history.
   bool sequence = false;
 };
 

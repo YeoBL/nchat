@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -120,5 +124,44 @@ func TestHistoricalNotificationContext(t *testing.T) {
 	handler.NotifyNewMessage(-127, "chat", "message", "sender", "text", 0, "", "", "", 0, 100, 1, 0)
 	if len(readStates) != 3 || readStates[0] != 0 || readStates[1] != -1 || readStates[2] != 1 {
 		t.Fatalf("history context escaped into live notifications: %v", readStates)
+	}
+}
+
+func TestMessageEdits(t *testing.T) {
+	if os.Getenv("NCHAT_TEST_NATIVE_LOGS") != "1" {
+		t.Skip("run utils/test-whatsapp-group-names.sh for native event routing")
+	}
+	const connID = -809
+	self := types.NewJID("447700900100", types.DefaultUserServer)
+	chat := types.NewJID("12030009", types.GroupServer)
+	path := t.TempDir()
+	clients[connID] = &whatsmeow.Client{Store: &store.Device{ID: &self}}
+	paths[connID] = path
+	t.Cleanup(func() {
+		closeActionMessages(path)
+		delete(clients, connID)
+		delete(paths, connID)
+	})
+	calls := 0
+	handler := &WmEventHandler{connId: connID, notifyMessage: func(id int, chatID, msgID, senderID, text string,
+		fromMe int, quotedID, fileID, filePath string, fileStatus, timestamp, isRead, isEdited int) {
+		if id != connID || chatID != chat.String() || msgID != "original" ||
+			text != "edited text ✓" || isEdited != 1 || fromMe != 1 {
+			t.Fatalf("edit lost its original identity/content/flag: %s %q edited=%d", msgID, text, isEdited)
+		}
+		calls++
+	}}
+	info := types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: self, IsFromMe: true, IsGroup: true},
+		ID: "edit-envelope", Timestamp: time.Unix(100, 0)}
+	body := &waE2E.Message{Conversation: proto.String("edited text ✓")}
+	protocol := &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+		Key: &waCommon.MessageKey{ID: proto.String("original")}, EditedMessage: body}
+	handler.HandleEvent(&events.Message{Info: info, Message: &waE2E.Message{ProtocolMessage: protocol}})
+	info.ID = "original"
+	handler.HandleEvent(&events.Message{Info: info, Message: body, IsEdit: true})
+	protocol.Key.ID = proto.String("")
+	handler.HandleProtocolMessage(info, &waE2E.Message{ProtocolMessage: protocol}, false)
+	if calls != 2 {
+		t.Fatalf("expected two valid edits and no malformed update, got %d", calls)
 	}
 }
