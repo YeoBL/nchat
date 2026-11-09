@@ -304,7 +304,6 @@ private:
     PresencePoller m_PresencePoller;
     int64_t m_NextPresenceInitRetryMs = 0;
     int64_t m_LastPresenceFlushMs = 0;
-    int64_t m_NextPresenceFlushRetryMs = 0;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> m_GroupMembers;
     int64_t m_GroupMembersUpdateTime = 0;

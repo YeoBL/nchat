@@ -72,6 +72,12 @@ static int64_t SteadyTimeMSec()
     std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+static bool HasIdSuffix(const std::string& p_Id, const std::string& p_Suffix)
+{
+  return p_Id.size() >= p_Suffix.size() &&
+    p_Id.compare(p_Id.size() - p_Suffix.size(), p_Suffix.size(), p_Suffix) == 0;
+}
+
 UiModel::Impl::Impl(UiModel* p_UiModel)
 {
   m_DeferInitialChat = std::getenv("NCHAT_NO_AUTO_SELECT") != nullptr;
@@ -103,7 +109,13 @@ void UiModel::Impl::Cleanup()
   if (!m_LocalFeatures.Flush()) LOG_WARNING("draft save failed: %s", m_LocalFeatures.GetError().c_str());
   if (m_PresencePoller.IsInitialized())
   {
-    if (!m_PresencePoller.Flush()) LOG_WARNING("presence poller save failed: %s", m_PresencePoller.GetError().c_str());
+    m_PresencePoller.Flush(true /* force state checkpoint */);
+    m_PresencePoller.Drain();
+    std::string workerError;
+    if (m_PresencePoller.TakeWorkerError(workerError))
+    {
+      LOG_WARNING("presence poller save failed: %s", workerError.c_str());
+    }
   }
   m_View->ClearTerminalBadge();
 }
@@ -2275,8 +2287,8 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         }
         if (UiConfig::GetNum("presence_poll_enabled") != 0)
         {
-          m_PresencePoller.RecordStatus(TimeUtil::GetCurrentTimeMSec(), profileId, userId,
-                                        isOnline, timeSeen, recently);
+          m_PresencePoller.RecordStatus(SteadyTimeMSec(), TimeUtil::GetCurrentTimeMSec(),
+                                        profileId, userId, isOnline, timeSeen, recently);
         }
         UpdateStatus();
       }
@@ -2656,8 +2668,6 @@ void UiModel::Impl::ProcessTimers()
   {
     lastTimeMs = nowTimeMs;
 
-    ProcessPresencePoll();
-
     static const int autoSelectChatTimeoutSec = UiConfig::GetNum("auto_select_chat_timeout_sec");
     if (!IsCurrentChatSet() && (autoSelectChatTimeoutSec != 0) && (m_LastSyncMessageTime != 0))
     {
@@ -2671,19 +2681,25 @@ void UiModel::Impl::ProcessTimers()
       }
     }
   }
+
+  // The presence poller uses monotonic time internally, so it must not be
+  // gated by the wall-clock 200 ms window above (a backwards clock step
+  // would stall polling). Its own scheduling is cheap at the UI tick rate.
+  ProcessPresencePoll();
 }
 
 void UiModel::Impl::ProcessPresencePoll()
 {
+  const int64_t steadyMs = SteadyTimeMSec();
   const int64_t nowMs = TimeUtil::GetCurrentTimeMSec();
 
   if (!m_PresencePoller.IsInitialized())
   {
     // Retry initialization periodically; the poller stays inert until the
     // state file can be read safely.
-    if (nowMs >= m_NextPresenceInitRetryMs)
+    if (steadyMs >= m_NextPresenceInitRetryMs)
     {
-      m_NextPresenceInitRetryMs = nowMs + 60000;
+      m_NextPresenceInitRetryMs = steadyMs + 60000;
       if (!m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
       {
         LOG_WARNING("presence poller init failed: %s", m_PresencePoller.GetError().c_str());
@@ -2697,7 +2713,6 @@ void UiModel::Impl::ProcessPresencePoll()
     return;
   }
 
-  const int64_t tickMs = SteadyTimeMSec();
   const int64_t pollIntervalSec = std::max<int64_t>(10, UiConfig::GetNum("presence_poll_interval"));
   const int64_t pollIntervalMs = pollIntervalSec * 1000;
   const size_t pollCount =
@@ -2715,6 +2730,11 @@ void UiModel::Impl::ProcessPresencePoll()
     {
       continue; // protocol cannot sample presence in the background
     }
+    // Presence can only be observed while the account is connected and, for
+    // WhatsApp, announced online; otherwise eligible time must not accrue.
+    const uint32_t profileFlags = Status::GetProfileFlags(profileId);
+    const bool canObserve = (profileFlags & Status::FlagOnline) &&
+      !(profileFlags & Status::FlagAway);
     const std::string selfId = profile.second->GetSelfId();
     const auto chatInfosIt = m_ChatInfos.find(profileId);
     if (chatInfosIt == m_ChatInfos.end())
@@ -2737,13 +2757,7 @@ void UiModel::Impl::ProcessPresencePoll()
       {
         continue;
       }
-      if (chatId.size() >= 11 &&
-          chatId.compare(chatId.size() - 11, 11, "@newsletter") == 0)
-      {
-        continue;
-      }
-      if (chatId.size() >= 10 &&
-          chatId.compare(chatId.size() - 10, 10, "@broadcast") == 0)
+      if (HasIdSuffix(chatId, "@newsletter") || HasIdSuffix(chatId, "@broadcast"))
       {
         continue;
       }
@@ -2776,14 +2790,15 @@ void UiModel::Impl::ProcessPresencePoll()
     }
 
     const std::vector<std::string> due =
-      m_PresencePoller.Tick(tickMs, profileId, orderedIds, pollIntervalMs, hiddenDetectMs);
+      m_PresencePoller.Tick(steadyMs, nowMs, profileId, orderedIds, pollIntervalMs,
+                            hiddenDetectMs, canObserve);
 
     for (const std::string& userId : due)
     {
       // Re-affirm the last genuine observation so the history keeps proving
       // continued observation. Display-state guesses are never recorded, so
       // this does nothing for users with no observation yet.
-      m_PresencePoller.RecordHeartbeat(nowMs, profileId, userId, heartbeatMs);
+      m_PresencePoller.RecordHeartbeat(steadyMs, nowMs, profileId, userId, heartbeatMs);
 
       std::shared_ptr<GetPresenceRequest> request = std::make_shared<GetPresenceRequest>();
       request->userId = userId;
@@ -2791,21 +2806,24 @@ void UiModel::Impl::ProcessPresencePoll()
     }
   }
 
-  // Flush at most once per second; on failure back off so a persistently
-  // failing device is not hammered from the UI thread.
-  if (m_PresencePoller.HasPending() &&
-      nowMs >= m_NextPresenceFlushRetryMs &&
-      nowMs - m_LastPresenceFlushMs >= 1000)
+  // Hand pending data to the persistence worker at most once per second;
+  // durability failures surface asynchronously through TakeWorkerError.
+  if (m_PresencePoller.HasPending() && steadyMs - m_LastPresenceFlushMs >= 1000)
   {
-    m_LastPresenceFlushMs = nowMs;
-    if (!m_PresencePoller.Flush())
+    m_LastPresenceFlushMs = steadyMs;
+    m_PresencePoller.Flush();
+  }
+
+  {
+    std::string workerError;
+    if (m_PresencePoller.TakeWorkerError(workerError))
     {
-      LOG_WARNING("presence poller save failed: %s", m_PresencePoller.GetError().c_str());
-      m_NextPresenceFlushRetryMs = nowMs + 5000;
+      LOG_WARNING("presence poller save failed: %s", workerError.c_str());
     }
-    else
+    const size_t dropped = m_PresencePoller.TakeDroppedLineCount();
+    if (dropped > 0)
     {
-      m_NextPresenceFlushRetryMs = 0;
+      LOG_WARNING("presence history overflow: dropped %zu oldest sample lines", dropped);
     }
   }
 }
@@ -3167,25 +3185,28 @@ std::string UiModel::Impl::GetChatStatus(const std::string& p_ProfileId, const s
       {
         chatStatus = "seen recently";
       }
-      else switch (timeSeen)
+      else
       {
-        case TimeSeenNone:
-          chatStatus = HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline)
-            ? "last seen unavailable" : "away";
-          break;
+        switch (timeSeen)
+        {
+          case TimeSeenNone:
+            chatStatus = HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline)
+              ? "last seen unavailable" : "away";
+            break;
 
-        case TimeSeenLastMonth:
-          chatStatus = "seen last month";
-          break;
+          case TimeSeenLastMonth:
+            chatStatus = "seen last month";
+            break;
 
-        case TimeSeenLastWeek:
-          chatStatus = "seen last week";
-          break;
+          case TimeSeenLastWeek:
+            chatStatus = "seen last week";
+            break;
 
-        default:
-          chatStatus = (HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline) ? "last seen " : "seen ") +
-            TimeUtil::GetTimeString(timeSeen, false /* p_IsExport */);
-          break;
+          default:
+            chatStatus = (HasProtocolFeature(p_ProfileId, FeaturePresenceRequiresOnline) ? "last seen " : "seen ") +
+              TimeUtil::GetTimeString(timeSeen, false /* p_IsExport */);
+            break;
+        }
       }
     }
   }

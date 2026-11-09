@@ -259,9 +259,10 @@ static void TestPresencePollModel()
   model.MessageHandler(stranger);
 
   // Bypass the once-per-second flush throttle so this tick persists the
-  // queued history line.
+  // queued history line, then wait for the persistence worker to finish.
   model.m_LastPresenceFlushMs = 0;
   model.ProcessPresencePoll();
+  assert(model.m_PresencePoller.Drain());
 
   const std::string presenceDir = FileUtil::GetApplicationDir() + "/presence";
   glob_t globResult;
