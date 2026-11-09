@@ -544,7 +544,7 @@ int main(int argc, char* argv[])
       out << "Telegram_x\tu3\t123\t456\t789\t1\n";   // valid hidden=1
       out << "Telegram_x\tu4\t123\t-5\t789\t0\n";    // negative eligible
       out << "Telegram_x\tu5\t123\t456\t-9\t0\n";    // negative data
-      out << "Telegram_x\tu6\t123\t45\t789\t0\n";    // trailing field count
+      out << "Telegram_x\tu6\t123\t45\t789\n";       // missing field (5 fields)
       out << "Telegram_x\tu7\t123\t456\t789\t0\tx\n"; // too many fields
       // Embedded NUL written as raw bytes, so the parser really sees it.
       const std::string nulLine = std::string("Telegram_x\tu8\t123\t456\t789") + '\0' +
@@ -557,27 +557,75 @@ int main(int argc, char* argv[])
     PresencePoller poller;
     assert(poller.Init(corruptDir, 5));
     assert(poller.IsInitialized());
-    // u3 was loaded as hidden and u9 carries near-maximum eligible time with
-    // no data, so both are excluded from the very first tick (the latter
-    // through overflow-safe saturation, not signed-arithmetic UB). Every
-    // rejected/malformed row (u2, u4..u8) must instead be a fresh, polled
-    // user: each fires at least once within one interval.
+    // u3 was loaded as hidden; every rejected/malformed row (u2, u4..u8)
+    // must instead be a fresh, polled user: each fires at least once within
+    // one interval. u9 (near-maximum eligible, no data) is handled
+    // separately below.
     std::unordered_set<std::string> seen;
     std::vector<std::string> fresh = { "u2", "u4", "u5", "u6", "u7", "u8" };
     for (int64_t t = 6000; t <= 120000; t += 1000)
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, "Telegram_x",
-                    { "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9" }, 60000, 60000, true);
+                    { "u2", "u3", "u4", "u5", "u6", "u7", "u8" }, 60000, 0, true);
       for (const std::string& u : due)
       {
-        assert(u != "u3" && u != "u9");
+        assert(u != "u3");
         seen.insert(u);
       }
     }
     for (const std::string& u : fresh)
     {
       assert(seen.count(u) == 1);
+    }
+
+    // Rejected rows carry no observable data, so with hidden detection
+    // enabled they hide at the fresh-user deadline; if any malformed row
+    // had been silently ACCEPTED with its bogus dataMs, it would never
+    // hide. u8 (embedded NUL) is the sharpest case: accepted => dataMs=789.
+    for (int64_t t = 121000; t <= 200000; t += 1000)
+    {
+      std::vector<std::string> due =
+        poller.Tick(kBase + t, kBase + kWallOffset + t, "Telegram_x",
+                    { "u2", "u4", "u5", "u6", "u7", "u8" }, 60000, 60000, true);
+      for (const std::string& u : due)
+      {
+        (void)u;
+        assert(u != "u2" && u != "u4" && u != "u5" && u != "u6" && u != "u7" && u != "u8");
+      }
+    }
+
+    // Near-INT64_MAX eligible time must saturate, not overflow: with hidden
+    // detection disabled, two observable ticks accrue a delta onto the
+    // loaded near-maximum value.
+    {
+      PresencePoller saturator;
+      assert(saturator.Init(corruptDir, 6));
+      std::vector<std::string> candidates = { "u9" };
+      assert(saturator.Tick(kBase, kBase + kWallOffset, "Telegram_x", candidates, 60000, 0, true).empty());
+      saturator.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_x", candidates, 60000, 0, true);
+      saturator.Tick(kBase + 2000, kBase + kWallOffset + 2000, "Telegram_x", candidates, 60000, 0, true);
+      assert(saturator.Flush(true));
+      assert(saturator.Drain());
+      const std::string state = ReadFile(corruptDir + "/state");
+      const size_t pos = state.find("Telegram_x\tu9\t");
+      assert(pos != std::string::npos);
+      const std::string line = state.substr(pos, state.find('\n', pos) - pos);
+      std::vector<std::string> fields;
+      size_t fieldStart = 0;
+      for (;;)
+      {
+        const size_t tab = line.find('\t', fieldStart);
+        if (tab == std::string::npos)
+        {
+          fields.push_back(line.substr(fieldStart));
+          break;
+        }
+        fields.push_back(line.substr(fieldStart, tab - fieldStart));
+        fieldStart = tab + 1;
+      }
+      assert(fields.size() == 6);
+      assert(fields[3] == "9223372036854775807"); // saturated at INT64_MAX
     }
 
     // An unreadable state file fails initialization and keeps the poller
@@ -635,7 +683,8 @@ int main(int argc, char* argv[])
     }
 
     // Shutdown must not hang on a persistently failing device: it exits
-    // through the failure-tolerant worker path and reports the loss.
+    // through the failure-tolerant worker path and reports the loss. The
+    // device stays failing THROUGH the shutdown call itself.
     {
       PresencePoller poller;
       assert(poller.Init(transientDir, 22));
@@ -654,12 +703,51 @@ int main(int argc, char* argv[])
         if (!gotError) usleep(10000);
       }
       assert(gotError);
+      poller.Shutdown(); // must return promptly while the save keeps failing
       assert(chmod(transientDir.c_str(), 0700) == 0);
-      poller.Shutdown(); // must return promptly even though a save had failed
       const std::string after = ReadFile(transientState);
       assert(!after.empty()); // never wiped by the transient failure
       assert(after.find("Telegram_z\tz3\t") != std::string::npos);
     }
+  }
+
+  {
+    // A hidden user whose chat ranks outside the poll set still recovers
+    // when real data arrives: the hidden mark clears even though the user
+    // is untracked, and the user returns to the poll set without waiting
+    // out a fresh window.
+    PresencePoller poller;
+    assert(poller.Init(dir, 61));
+    std::vector<std::string> candidates = { "r1" };
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 100000, true).empty());
+    for (int64_t t = 1000; t <= 200000; t += 1000)
+    {
+      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 100000, true);
+    }
+    assert(poller.Flush(true));
+    assert(poller.Drain());
+
+    // r1 is now hidden and leaves the candidate list entirely.
+    std::vector<std::string> noCandidates;
+    poller.Tick(kBase + 201000, kBase + kWallOffset + 201000, profile, noCandidates, 60000, 100000, true);
+
+    // A pushed observation for the untracked hidden user must clear the mark.
+    poller.RecordStatus(kBase + 202000, kBase + kWallOffset + 202000, profile, "r1", true, -1, false);
+    assert(poller.Flush(true));
+    assert(poller.Drain());
+
+    // Restored to the poll set: r1 is selected again and fires, and its
+    // recovery observation made it into the history.
+    const std::string historyPath = dir + "/history." + Hex(profile) + ".jsonl";
+    assert(ReadFile(historyPath).find("\"u\":\"r1\"") != std::string::npos);
+    bool r1Seen = false;
+    for (int64_t t = 203000; t <= 300000; t += 1000)
+    {
+      std::vector<std::string> due =
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 100000, true);
+      if (Contains(due, "r1")) r1Seen = true;
+    }
+    assert(r1Seen);
   }
 
   {
@@ -688,6 +776,39 @@ int main(int argc, char* argv[])
       }
     }
     assert(seenAfterWindow);
+  }
+
+  {
+    // Queue cap under failure: more lines than the cap must be dropped and
+    // reported, and recovery must write exactly one capped batch.
+    const std::string pe = "Telegram_e";
+    const std::string pathE = dir + "/history." + Hex(pe) + ".jsonl";
+    PresencePoller poller;
+    assert(poller.Init(dir, 31));
+    assert(poller.Tick(kBase, kBase + kWallOffset, pe, { "q1" }, 60000, 0, true).empty());
+    poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pe, "q1", true, -1, false);
+    assert(poller.Flush());
+    assert(poller.Drain());
+    assert(chmod(pathE.c_str(), 0400) == 0);
+    for (int64_t i = 1; i <= 20100; ++i)
+    {
+      poller.RecordStatus(kBase + 2000 + i, kBase + kWallOffset + 2000 + i, pe, "q1",
+                          (i % 2) == 0, -1, false);
+    }
+    assert(poller.TakeDroppedLineCount() >= 100); // oldest lines dropped and reported
+    assert(poller.Flush());
+    std::string workerError;
+    bool gotError = false;
+    for (int i = 0; i < 200 && !gotError; ++i)
+    {
+      gotError = poller.TakeWorkerError(workerError);
+      if (!gotError) usleep(10000);
+    }
+    assert(gotError);
+    assert(chmod(pathE.c_str(), 0600) == 0);
+    assert(poller.Flush());
+    assert(poller.Drain());
+    assert(CountLines(ReadFile(pathE)) == 20001); // initial line + one capped batch
   }
 
   if (ownDir)

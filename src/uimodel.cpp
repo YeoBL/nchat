@@ -120,6 +120,11 @@ void UiModel::Impl::Cleanup()
     {
       LOG_WARNING("presence poller shutdown: %s", m_PresencePoller.GetError().c_str());
     }
+    const size_t dropped = m_PresencePoller.TakeDroppedLineCount();
+    if (dropped > 0)
+    {
+      LOG_WARNING("presence history overflow: dropped %zu oldest sample lines", dropped);
+    }
   }
   m_View->ClearTerminalBadge();
 }
@@ -2808,9 +2813,14 @@ void UiModel::Impl::ProcessPresencePoll()
     for (const std::string& userId : due)
     {
       // Re-affirm the last genuine observation so the history keeps proving
-      // continued observation. Display-state guesses are never recorded, so
-      // this does nothing for users with no observation yet.
-      m_PresencePoller.RecordHeartbeat(steadyMs, nowMs, profileId, userId, heartbeatMs);
+      // continued observation. This runs only while the account can
+      // actually observe; heartbeats during outages would overstate
+      // observation. Display-state guesses are never recorded, so this
+      // does nothing for users with no observation yet.
+      if (canObserve)
+      {
+        m_PresencePoller.RecordHeartbeat(steadyMs, nowMs, profileId, userId, heartbeatMs);
+      }
 
       std::shared_ptr<GetPresenceRequest> request = std::make_shared<GetPresenceRequest>();
       request->userId = userId;

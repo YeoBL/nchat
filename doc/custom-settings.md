@@ -103,8 +103,9 @@ presence_poll_hidden_detect_sec=172800
   days) after which contacts that never showed any online/last-seen data are
   treated as having their status hidden and are skipped from polling. Setting
   it to 0 disables hidden detection. Only time actually spent in the poll set
-  while the account can receive presence counts toward the window (pauses,
-  disconnects and announced-offline periods do not); if such a contact later
+  while the account can receive presence counts toward the window: pauses,
+  disconnects and (for WhatsApp) announced-offline periods do not count, and
+  a long single gap can credit at most five minutes. If such a contact later
   shows data (for example, through a service push), it returns to the poll
   set. To re-detect everyone from scratch, stop nchat and delete the
   contents of `~/.config/nchat/presence/` (deleting them while nchat runs
@@ -115,7 +116,9 @@ account (`history.<hex-encoded-profile>.jsonl`) plus a small state file.
 Writes happen on a private background thread with fsync, partial-append
 rollback and crash-tail repair, so slow storage does not stall the
 interface; the state file is read once at startup (or on the next poller
-enable) and again on clean shutdown, which waits for pending writes.
+enable) and checkpointed on clean shutdown, which waits for pending writes.
+If the pending backlog ever overflows its hard cap (a persistently failing
+disk), the oldest records are dropped and the loss is reported in the log.
 Each sample line is
 `{"ts":<ms>,"u":"<userId>","on":0|1,"seen":<ms|-1>,"recent":0|1}` where `seen`
 values 1 and 2 mean Telegram's coarse "last month"/"last week" status, 0 is

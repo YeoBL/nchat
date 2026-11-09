@@ -44,9 +44,9 @@ std::string Status::ToString(uint32_t p_Flags)
   if (p_Flags & FlagFetching) return "Fetching";
   if (p_Flags & FlagSending) return "Sending";
   if (p_Flags & FlagUpdating) return "Updating";
+  if (p_Flags & FlagConnecting) return "Connecting";
   if (p_Flags & FlagAway) return "Away";
   if (p_Flags & FlagOnline) return "Online";
-  if (p_Flags & FlagConnecting) return "Connecting";
 
   return "Offline";
 }

@@ -929,6 +929,10 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 		SetState(handler.connId, Connected)
 		CWmSetStatus(handler.connId, FlagOnline)
 		CWmClearStatus(handler.connId, FlagConnecting)
+		// Availability is unknown until the first successful announce, so
+		// the profile starts as away; SetStatusOnline clears this once an
+		// available presence has actually been transmitted.
+		CWmSetStatus(handler.connId, FlagAway)
 
 	case *events.Disconnected:
 		// disconnected
@@ -4010,6 +4014,8 @@ func WmSendStatus(connId int, isOnline int) int {
 
 	// bail out if no push name yet
 	if len(client.Store.PushName) == 0 {
+		// No announce can be sent, so peer presence cannot flow either.
+		CWmSetStatus(connId, FlagAway)
 		return -1
 	}
 
@@ -4023,6 +4029,12 @@ func WmSendStatus(connId int, isOnline int) int {
 	err := client.SendPresence(ctx, presence)
 	if err != nil {
 		LOG_WARNING("Failed to send presence")
+		if isOnline == 1 {
+			// A failed availability announce means the server will not
+			// deliver peer presence; mark away so eligibility pauses
+			// instead of accruing against a broken subscription.
+			CWmSetStatus(connId, FlagAway)
+		}
 	} else {
 		LOG_TRACE("Sent presence ok")
 		if isOnline == 1 {

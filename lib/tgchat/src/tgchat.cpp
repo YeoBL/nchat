@@ -2602,11 +2602,13 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
     {
       LOG_TRACE("update connectionStateWaitingForNetwork");
       Status::Clear(m_ProfileId, Status::FlagOnline);
+      Status::Set(m_ProfileId, Status::FlagConnecting);
     }
     else if (connection_state.state_->get_id() == td::td_api::connectionStateConnectingToProxy::ID)
     {
       LOG_TRACE("update connectionStateConnectingToProxy");
       Status::Clear(m_ProfileId, Status::FlagOnline);
+      Status::Set(m_ProfileId, Status::FlagConnecting);
     }
     else if (connection_state.state_->get_id() == td::td_api::connectionStateConnecting::ID)
     {

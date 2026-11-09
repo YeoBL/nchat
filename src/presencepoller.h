@@ -29,6 +29,9 @@
 // written only after its history lines are durable, and history records only
 // genuine protocol observations plus explicit heartbeat re-affirmations
 // ("hb":1) of the last known state; display-state guesses are never recorded.
+// If the pending backlog overflows its hard cap, the oldest records are
+// dropped (markers last) and the loss is reported; in that degraded mode the
+// history-before-state guarantee is best-effort for the dropped records.
 //
 // Persistence runs on a private worker thread, so slow storage never blocks
 // the UI thread. The worker owns all file handles and its failure state;
@@ -39,6 +42,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -168,6 +172,7 @@ private:
   void StartWorker();
   void StopWorker();
   void WorkerLoop();
+  void EnforceQueueCapLocked(); // call with m_WorkMutex held
   void AddBlockedLines(const std::string& p_ProfileId,
                        const std::vector<PendingLine>& p_Lines);
   bool AppendHistory(const std::string& p_ProfileId,
@@ -194,7 +199,7 @@ private:
   bool m_StateDirty = false;
   bool m_StateDirtySoft = false;
   int64_t m_LastStateSaveMs = 0;
-  size_t m_DroppedLines = 0;
+  std::atomic<size_t> m_DroppedLines{0}; // UI thread and worker both bump this
   std::mt19937_64 m_Rng;
 
   // Persistence worker state (guarded by m_WorkMutex).
@@ -231,6 +236,8 @@ inline int64_t PresencePoller::SteadyNow()
 
 inline bool PresencePoller::Init(const std::string& p_BaseDir, uint32_t p_RandomSeed)
 {
+  if (m_Initialized) return true; // idempotent: never reload over live state
+
   m_Dir = p_BaseDir;
   m_Error.clear();
   m_Initialized = false;
@@ -454,9 +461,24 @@ inline void PresencePoller::RecordStatus(int64_t p_SteadyMs, int64_t p_WallMs,
   if (!m_Initialized) return;
 
   // Only users in the current poll candidate set are recorded; service
-  // pushes for other chats update the UI but stay out of the history.
+  // pushes for other chats update the UI but stay out of the history. The
+  // one exception is a previously hidden user: its hidden mark must clear
+  // when real data arrives even while its chat ranks outside the poll set,
+  // otherwise a WhatsApp contact (unsubscribed while hidden) could never
+  // recover.
   const auto trackedIt = m_Tracked.find(p_ProfileId);
-  if (trackedIt == m_Tracked.end() || !trackedIt->second.count(p_UserId)) return;
+  const bool tracked = (trackedIt != m_Tracked.end()) && trackedIt->second.count(p_UserId);
+  if (!tracked)
+  {
+    bool recoverable = false;
+    const auto stateIt = m_UserStates.find(p_ProfileId);
+    if (stateIt != m_UserStates.end())
+    {
+      const auto userIt = stateIt->second.find(p_UserId);
+      recoverable = (userIt != stateIt->second.end()) && userIt->second.hidden;
+    }
+    if (!recoverable) return;
+  }
 
   UserState& st = m_UserStates[p_ProfileId][p_UserId];
   if (st.firstMs == 0)
@@ -562,26 +584,8 @@ inline bool PresencePoller::Flush(bool p_ForceState)
       m_WorkerQueue.insert(m_WorkerQueue.end(), m_Pending.begin(), m_Pending.end());
       m_Pending.clear();
       // The worker queue must stay bounded too, or a persistently failing
-      // device would grow it without limit. Drop oldest non-marker lines
-      // first, then oldest markers, reporting the loss.
-      while (m_WorkerQueue.size() > s_MaxPendingLines)
-      {
-        auto dropIt = m_WorkerQueue.end();
-        for (auto it = m_WorkerQueue.begin(); it != m_WorkerQueue.end(); ++it)
-        {
-          if (!it->marker)
-          {
-            dropIt = it;
-            break;
-          }
-        }
-        if (dropIt == m_WorkerQueue.end())
-        {
-          dropIt = m_WorkerQueue.begin();
-        }
-        m_WorkerQueue.erase(dropIt);
-        ++m_DroppedLines;
-      }
+      // device would grow it without limit.
+      EnforceQueueCapLocked();
     }
     if (!stateData.empty())
     {
@@ -646,10 +650,7 @@ inline bool PresencePoller::TakeWorkerError(std::string& p_Error)
 
 inline size_t PresencePoller::TakeDroppedLineCount()
 {
-  std::unique_lock<std::mutex> lock(m_WorkMutex);
-  const size_t count = m_DroppedLines;
-  m_DroppedLines = 0;
-  return count;
+  return m_DroppedLines.exchange(0);
 }
 
 inline void PresencePoller::StartWorker()
@@ -825,9 +826,11 @@ inline void PresencePoller::WorkerLoop()
           else
           {
             // Re-queue this batch at the front, preserving order and the
-            // marker flag of each line.
+            // marker flag of each line, then re-apply the queue cap so
+            // failure retries cannot grow the backlog without bound.
             std::unique_lock<std::mutex> lock(m_WorkMutex);
             m_WorkerQueue.insert(m_WorkerQueue.begin(), batch.second.begin(), batch.second.end());
+            EnforceQueueCapLocked();
           }
         }
       }
@@ -915,12 +918,37 @@ inline void PresencePoller::WorkerLoop()
   }
 }
 
+inline void PresencePoller::EnforceQueueCapLocked()
+{
+  // Drop the oldest non-marker lines first (markers carry hidden decisions),
+  // then oldest markers. The loss is reported through the dropped counter.
+  while (m_WorkerQueue.size() > s_MaxPendingLines)
+  {
+    auto dropIt = m_WorkerQueue.end();
+    for (auto it = m_WorkerQueue.begin(); it != m_WorkerQueue.end(); ++it)
+    {
+      if (!it->marker)
+      {
+        dropIt = it;
+        break;
+      }
+    }
+    if (dropIt == m_WorkerQueue.end())
+    {
+      dropIt = m_WorkerQueue.begin();
+    }
+    m_WorkerQueue.erase(dropIt);
+    ++m_DroppedLines;
+  }
+}
+
 inline void PresencePoller::AddBlockedLines(const std::string& p_ProfileId,
                                             const std::vector<PendingLine>& p_Lines)
 {
   // Worker-owned: no lock needed for the map. The blocked set must stay
   // bounded too, or repeated rollback failures would grow it without limit;
-  // the oldest held lines are dropped and reported.
+  // the oldest non-marker lines are dropped first (markers carry hidden
+  // decisions that must reach the history), then oldest markers, reported.
   m_BlockedLines[p_ProfileId].insert(m_BlockedLines[p_ProfileId].end(),
                                      p_Lines.begin(), p_Lines.end());
   size_t total = 0;
@@ -930,21 +958,36 @@ inline void PresencePoller::AddBlockedLines(const std::string& p_ProfileId,
   }
   while (total > s_MaxPendingLines)
   {
+    // Find the oldest droppable line: first non-marker across profiles in
+    // insertion order, else the oldest line of the first profile.
     auto dropProfile = m_BlockedLines.end();
+    auto dropIt = std::vector<PendingLine>::iterator();
+    bool foundMarker = false;
     for (auto it = m_BlockedLines.begin(); it != m_BlockedLines.end(); ++it)
     {
-      if (!it->second.empty())
+      if (it->second.empty()) continue;
+      for (auto line = it->second.begin(); line != it->second.end(); ++line)
       {
-        dropProfile = it;
-        break;
+        if (!line->marker)
+        {
+          dropProfile = it;
+          dropIt = line;
+          foundMarker = false;
+          break;
+        }
+        if (!foundMarker)
+        {
+          foundMarker = true;
+          dropProfile = it;
+          dropIt = line;
+        }
       }
+      if (dropProfile != m_BlockedLines.end() && !foundMarker) break;
     }
     if (dropProfile == m_BlockedLines.end()) break;
-    dropProfile->second.erase(dropProfile->second.begin());
+    dropProfile->second.erase(dropIt);
     --total;
-    std::unique_lock<std::mutex> lock(m_WorkMutex);
-    ++m_DroppedLines;
-    lock.unlock();
+    ++m_DroppedLines; // atomic; reported by the UI thread
   }
 }
 
