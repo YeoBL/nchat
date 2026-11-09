@@ -152,8 +152,10 @@ Reports older than five minutes are labelled old or unconfirmed. Cached
 heartbeats do not renew freshness. Flags render as country letters, with emoji
 modifiers and joiners simplified for stable terminal columns.
 
-Use arrows or j/k to select, Tab to cycle All/WhatsApp/Telegram, / to search names
-or identifiers, Enter to finish entering a query, Esc to clear, r to read the
+Use arrows or j/k to select, Tab to cycle All/WhatsApp/Telegram, and /, Ctrl+F
+or f to search names, aliases or numbers. Formatted numbers with spaces, plus
+signs, parentheses and hyphens work. Results filter as you type. Enter finishes
+the query and arrow/page keys immediately navigate its results. Esc clears, r reads the
 cache again and q to quit. Page Up/Page Down and g/G move through longer lists.
 Tab filters people who have the selected service while preserving both columns.
 Press **Enter** on a selected contact to browse their full presence history
@@ -165,9 +167,12 @@ monochrome. The screen updates displayed ages between refreshes. Press r for
 newer records.
 
 When phone metadata is missing, select a person and press **m**. Choose their
-contact on the other service and press Enter to confirm. Matching names appear
-first in the picker. Name equality alone leaves identities separate until this
-confirmation. Search matches all linked aliases and identifiers. Press **u** to
+contact on the other service by typing their name or number immediately. Use
+arrows to choose and press Enter once to link, or Escape to cancel. The picker
+includes cached private contacts that have no presence observations, excludes
+self/group identities, and places matching names first. A linked counterpart
+without an observation shows **No report**. Name equality alone leaves identities separate until this
+confirmation. Search matches all linked aliases, identifiers and full cached numbers. Press **u** to
 remove a selected person's manual links. Automatic phone/account matches still
 apply. Multiple accounts retain their records, with the newest genuine report
 chosen for each service column.

@@ -28,13 +28,15 @@ assistive-technology preferences require the user's own acceptance check.
 | Recovery and delivery review | First-use, failed refresh, theme fallback and installed-file identity needed explicit checks. | Added empty states, retained-view retry feedback, monochrome/NO_COLOR support, piped output, native terminal checks and a larger synthetic cache benchmark. Verified and backed up the installed helper. |
 | Paired-person follow-up | Separate service sections duplicated people who use both apps. Name-only pairing could associate different people. | Added automatic complete-phone/account matches, side-by-side service columns and confirmed local links with cancel/unlink. Real SQLite phone/LID fixtures, independent stale/fresh service values, safe failed saves and concurrent preference writers are tested. |
 
+| Search and assisted matching follow-up | Bare slash input obscured search, the Link picker required extra focus/confirmation, and unsampled counterparts were absent. | Labelled name/number search with Ctrl+F, formatted number matching, immediately focused picker, one-Enter confirmation, all cached private counterparts and explicit No report. Fake-terminal and native PTY regressions pass. |
+
 ## Weighted criteria
 
 | Criterion | Weight | Rating out of 5 | Acceptance requirement | Evidence and remaining limits |
 |---|---|---|---|---|
 | Current-state scope | 4 | 5 | Show one person with independently reported Telegram/WhatsApp states. Browsing is read-only, and explicit Link/Unlink saves local display preferences. | File hashes unchanged after real terminal sessions. No activity counts or timeline controls in this screen. |
 | Freshness and stale states | 6 | 5 | Distinguish fresh reports, old offline/coarse reports, unconfirmed online reports and future clock mismatches. | Explicit age boundary, stale-online and future-time cases. |
-| Unavailable and coarse data | 4 | 5 | Use honest unavailable/recent/week/month labels and preserve service uncertainty. | Hidden-state, recent-state and coarse timestamp fixtures. |
+| Unavailable and coarse data | 4 | 5 | Use honest unavailable/recent/week/month labels and preserve service uncertainty. | Hidden-state, recent-state, coarse timestamp and linked-but-unsampled No report fixtures. |
 | Heartbeat semantics | 4 | 5 | A cached heartbeat must never renew the observation time or an online claim. | A fresh heartbeat after a 15-minute-old online observation remains unconfirmed. |
 | Contact name priority | 5 | 4 | Show a readable cached name prominently with a transparent identifier fallback. | Names lead rows. Full identities move to the selected-contact panel. Name availability depends on the local cache. |
 | Identity disambiguation | 3 | 4 | Join complete matching phones or the same service identity. Require confirmation for name-only pairs and retain both service identities. | Duplicate Alex names stay separate until confirmed. Tests cover cached Telegram phones, WhatsApp LID/phone aliases, multiple accounts and manual unlink. |
@@ -52,7 +54,7 @@ assistive-technology preferences require the user's own acceptance check.
 | Unicode legibility | 4 | 4 | Clip by display cells and preserve readable CJK and accents. | Wide-name clipping and emoji fallback checks. Flags render as country letters and modifiers/joiners use stable fallbacks. |
 | Terminal text safety | 4 | 5 | Escape control and bidi characters before display. | An escape-sequence contact name cannot inject terminal controls. |
 | Keyboard coverage | 4 | 5 | Reach all current-view functions through keys. | Arrows/j/k, page keys, g/G, Tab, search, refresh, Esc and quit paths. |
-| Search feedback | 4 | 4 | Support case-insensitive name/ID search, visible input mode and useful zero-result feedback. | Live query, duplicate-name and no-match fixtures. Search is substring matching. |
+| Search feedback | 4 | 4 | Support case-insensitive name/number search, visible input mode and useful zero-result feedback. | Labelled main search, Ctrl+F, formatted cached numbers, immediate picker typing, one-Enter linking, duplicate-name and no-match fixtures. Search is substring matching. |
 | Filter clarity | 2 | 5 | Filter people by the presence of a service while preserving both columns. | All people to people with WhatsApp to people with Telegram, with an explicit filter banner. |
 | Escape and cancellation | 2 | 5 | Clear search/filter state predictably and keep search keystrokes in the search field. | Search-mode input and Escape/reset tests. A 50 ms default escape delay avoids the usual one-second pause. |
 | Paging and orientation | 2 | 4 | Support page/first/last navigation and keep the selection in view. | Page, first/last and scrolling fixtures count people instead of physical display lines. |
@@ -115,3 +117,9 @@ predecessor is retained under
 `.local/.nchat-helper-install/backups/20261109T105728Z-nchat-presence-people` in the user home directory.
 The installed source matches the tested file, both column labels load against
 the real local cache, and complete-phone matches produce combined rows.
+
+The search follow-up retains the 92/100 self-assessment. Its checks now include
+cached private candidates without observations, self/group exclusions, formatted
+phone search, a focused picker, one-Enter linking and Escape cancellation. Local
+assisted matches are saved outside the repository with a private recovery record.
+Their identities and account data are excluded from this document and Git.
