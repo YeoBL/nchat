@@ -926,13 +926,14 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 		// connected
 		LOG_TRACE(fmt.Sprintf("%#v", evt))
 		handler.HandleConnected()
+		// Availability is unknown until the first successful announce, so
+		// mark away BEFORE publishing connected/online: the reconnect
+		// notification can otherwise announce availability and clear away
+		// before this handler sets it.
+		CWmSetStatus(handler.connId, FlagAway)
 		SetState(handler.connId, Connected)
 		CWmSetStatus(handler.connId, FlagOnline)
 		CWmClearStatus(handler.connId, FlagConnecting)
-		// Availability is unknown until the first successful announce, so
-		// the profile starts as away; SetStatusOnline clears this once an
-		// available presence has actually been transmitted.
-		CWmSetStatus(handler.connId, FlagAway)
 
 	case *events.Disconnected:
 		// disconnected

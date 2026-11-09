@@ -842,6 +842,36 @@ int main(int argc, char* argv[])
     assert(CountLines(ReadFile(pathE)) == 20001); // initial line + one capped batch
   }
 
+  {
+    // Shutdown loss reporting must survive an earlier unconsumed error: the
+    // blocked-line count is appended to whatever error is pending.
+    const std::string pf = "Telegram_f";
+    const std::string pathF = dir + "/history." + Hex(pf) + ".jsonl";
+    PresencePoller poller;
+    assert(poller.Init(dir, 71));
+    assert(poller.Tick(kBase, kBase + kWallOffset, pf, { "w1" }, 60000, 0, true).empty());
+    poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pf, "w1", true, -1, false);
+    assert(poller.Flush());
+    assert(poller.Drain());
+
+    struct rlimit savedLimitF;
+    assert(getrlimit(RLIMIT_FSIZE, &savedLimitF) == 0);
+    struct rlimit smallLimitF = savedLimitF;
+    smallLimitF.rlim_cur = static_cast<rlim_t>(ReadFile(pathF).size() + 10);
+    assert(setrlimit(RLIMIT_FSIZE, &smallLimitF) == 0);
+    signal(SIGXFSZ, SIG_IGN);
+    PresencePoller::TestFailTruncate() = true;
+    poller.RecordStatus(kBase + 2000, kBase + kWallOffset + 2000, pf, "w1", false, 1234567890000LL, false);
+    assert(poller.Flush());
+    usleep(100000); // the worker fails within milliseconds; the error stays UNREAD
+    poller.Shutdown(); // stop while the device keeps failing and a line is blocked
+    const std::string shutdownError = poller.GetError();
+    assert(shutdownError.find("blocked lines lost") != std::string::npos);
+    PresencePoller::TestFailTruncate() = false;
+    assert(setrlimit(RLIMIT_FSIZE, &savedLimitF) == 0);
+    unlink(pathF.c_str()); // the blocked rollback left a torn tail; drop the file
+  }
+
   if (ownDir)
   {
     const std::string cleanup = "rm -rf " + dir;

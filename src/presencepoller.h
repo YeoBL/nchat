@@ -181,6 +181,7 @@ private:
                      bool& p_Blocked);
   bool SaveStateTo(const std::string& p_StateData, std::string& p_Error);
   bool SyncDir(std::string& p_Error);
+  bool SyncParentDir(std::string& p_Error);
   static bool RepairIncompleteTail(int p_Fd, off_t& p_Length);
 
 private:
@@ -220,6 +221,8 @@ private:
   std::map<std::string, off_t> m_RollbackPending; // profile -> length to restore
   std::map<std::string, std::vector<PendingLine>> m_BlockedLines; // wait for rollback
   bool m_DirSyncNeeded = false;
+  bool m_ParentSyncNeeded = false; // presence dir entry not yet durable in its parent
+  std::string m_ParentDir;
 };
 
 inline bool& PresencePoller::TestFailTruncate()
@@ -242,7 +245,20 @@ inline bool PresencePoller::Init(const std::string& p_BaseDir, uint32_t p_Random
   m_Error.clear();
   m_Initialized = false;
 
-  if (mkdir(m_Dir.c_str(), 0700) != 0 && errno != EEXIST)
+  {
+    // The parent directory's entry for a newly created presence dir must
+    // itself be made durable before persistence can claim crash safety.
+    const size_t slash = m_Dir.find_last_of('/');
+    m_ParentDir = (slash == std::string::npos) ? std::string(".") : m_Dir.substr(0, slash);
+    if (m_ParentDir.empty()) m_ParentDir = "/";
+  }
+
+  if (mkdir(m_Dir.c_str(), 0700) == 0)
+  {
+    // Newly created: its entry in the parent is not yet durable.
+    m_ParentSyncNeeded = true;
+  }
+  else if (errno != EEXIST)
   {
     m_Error = "cannot create presence dir " + m_Dir + ": " + std::to_string(errno);
     return false;
@@ -685,10 +701,10 @@ inline void PresencePoller::WorkerLoop()
       std::unique_lock<std::mutex> lock(m_WorkMutex);
       m_WorkCv.wait(lock, [&] {
         return m_StopWorker || !m_WorkerQueue.empty() || m_WorkerWriteState ||
-               m_DirSyncNeeded || !m_RollbackPending.empty();
+               m_DirSyncNeeded || m_ParentSyncNeeded || !m_RollbackPending.empty();
       });
       if (m_StopWorker && m_WorkerQueue.empty() && !m_WorkerWriteState &&
-          m_RollbackPending.empty() && !m_DirSyncNeeded)
+          m_RollbackPending.empty() && !m_DirSyncNeeded && !m_ParentSyncNeeded)
       {
         if (!m_BlockedLines.empty())
         {
@@ -833,6 +849,17 @@ inline void PresencePoller::WorkerLoop()
             EnforceQueueCapLocked();
           }
         }
+        else if (!batchError.empty())
+        {
+          // The batch is durable; surface a deferred close diagnostic
+          // without retrying the append.
+          std::unique_lock<std::mutex> lock(m_WorkMutex);
+          if (!m_WorkerErrorPending)
+          {
+            m_WorkerError = batchError;
+            m_WorkerErrorPending = true;
+          }
+        }
       }
     }
 
@@ -842,6 +869,20 @@ inline void PresencePoller::WorkerLoop()
       if (SyncDir(passError))
       {
         m_DirSyncNeeded = false;
+      }
+      else
+      {
+        failed = true;
+      }
+    }
+
+    // (4b) Parent-directory durability for a newly (re)created presence
+    // directory: without it, its entry could vanish on crash.
+    if (m_ParentSyncNeeded && !failed)
+    {
+      if (SyncParentDir(passError))
+      {
+        m_ParentSyncNeeded = false;
       }
       else
       {
@@ -886,18 +927,20 @@ inline void PresencePoller::WorkerLoop()
       std::unique_lock<std::mutex> lock(m_WorkMutex);
       if (!m_WorkerErrorPending)
       {
-        std::string message = passError.empty() ? std::string("presence persistence failed") : passError;
-        if (m_StopWorker && !m_BlockedLines.empty())
-        {
-          size_t lost = 0;
-          for (const auto& blocked : m_BlockedLines)
-          {
-            lost += blocked.second.size();
-          }
-          message += " (" + std::to_string(lost) + " blocked lines lost at shutdown)";
-        }
-        m_WorkerError = message;
+        m_WorkerError = passError.empty() ? std::string("presence persistence failed") : passError;
         m_WorkerErrorPending = true;
+      }
+      if (m_StopWorker && !m_BlockedLines.empty())
+      {
+        // The blocked-line loss count must be reported even when an earlier
+        // unconsumed error is still pending; append it to whatever is there.
+        size_t lost = 0;
+        for (const auto& blocked : m_BlockedLines)
+        {
+          lost += blocked.second.size();
+        }
+        m_WorkerError += " (" + std::to_string(lost) + " blocked lines lost at shutdown)";
+        m_BlockedLines.clear();
       }
       m_WorkerIdle = false;
       if (m_StopWorker)
@@ -919,7 +962,7 @@ inline void PresencePoller::WorkerLoop()
     {
       std::unique_lock<std::mutex> lock(m_WorkMutex);
       if (m_WorkerQueue.empty() && !m_WorkerWriteState && m_RollbackPending.empty() &&
-          !m_DirSyncNeeded)
+          !m_DirSyncNeeded && !m_ParentSyncNeeded)
       {
         m_WorkerIdle = true;
         m_WorkCv.notify_all();
@@ -956,9 +999,10 @@ inline void PresencePoller::AddBlockedLines(const std::string& p_ProfileId,
                                             const std::vector<PendingLine>& p_Lines)
 {
   // Worker-owned: no lock needed for the map. The blocked set must stay
-  // bounded too, or repeated rollback failures would grow it without limit;
-  // the oldest non-marker lines are dropped first (markers carry hidden
-  // decisions that must reach the history), then oldest markers, reported.
+  // bounded too, or repeated rollback failures would grow it without limit.
+  // Eviction prefers non-marker records (markers carry hidden decisions)
+  // and picks the first candidate in profile order, not a global age order;
+  // the loss is reported through the dropped counter.
   m_BlockedLines[p_ProfileId].insert(m_BlockedLines[p_ProfileId].end(),
                                      p_Lines.begin(), p_Lines.end());
   size_t total = 0;
@@ -1013,7 +1057,12 @@ inline bool PresencePoller::AppendHistory(const std::string& p_ProfileId,
   if (fd < 0)
   {
     // Recreate the directory in case it was removed while running.
-    if (mkdir(m_Dir.c_str(), 0700) == 0 || errno == EEXIST)
+    if (mkdir(m_Dir.c_str(), 0700) == 0)
+    {
+      m_ParentSyncNeeded = true; // the recreated entry needs parent durability
+      fd = open(path.c_str(), O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    }
+    else if (errno == EEXIST)
     {
       fd = open(path.c_str(), O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     }
@@ -1131,6 +1180,24 @@ inline bool PresencePoller::SyncDir(std::string& p_Error)
     return false;
   }
   close(dirFd);
+  return true;
+}
+
+inline bool PresencePoller::SyncParentDir(std::string& p_Error)
+{
+  const int parentFd = open(m_ParentDir.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (parentFd < 0)
+  {
+    p_Error = "cannot open presence parent dir for sync: " + std::to_string(errno);
+    return false;
+  }
+  if (fsync(parentFd) != 0)
+  {
+    p_Error = "cannot fsync presence parent dir: " + std::to_string(errno);
+    close(parentFd);
+    return false;
+  }
+  close(parentFd);
   return true;
 }
 

@@ -118,7 +118,8 @@ rollback and crash-tail repair, so slow storage does not stall the
 interface; the state file is read once at startup (or on the next poller
 enable) and checkpointed on clean shutdown, which waits for pending writes.
 If the pending backlog ever overflows its hard cap (a persistently failing
-disk), the oldest records are dropped and the loss is reported in the log.
+disk), records are dropped — oldest non-marker records first, per profile —
+and the loss is reported in the log.
 Each sample line is
 `{"ts":<ms>,"u":"<userId>","on":0|1,"seen":<ms|-1>,"recent":0|1}` where `seen`
 values 1 and 2 mean Telegram's coarse "last month"/"last week" status, 0 is
