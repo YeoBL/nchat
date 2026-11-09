@@ -589,6 +589,73 @@ int main(int argc, char* argv[])
   }
 
   {
+    // Transient state-save failure must not wipe the state file: the worker
+    // keeps the serialized snapshot until the save succeeds (a previous
+    // version swapped it out and later wrote an empty state file).
+    std::string transientDir = dir + "/transient";
+    mkdir(transientDir.c_str(), 0700);
+    const std::string transientState = transientDir + "/state";
+    {
+      PresencePoller poller;
+      assert(poller.Init(transientDir, 21));
+      assert(poller.Tick(kBase, kBase + kWallOffset, "Telegram_z", { "z1" }, 60000, 0, true).empty());
+      assert(poller.Flush(true));
+      assert(poller.Drain());
+      assert(ReadFile(transientState).find("Telegram_z\tz1\t") != std::string::npos);
+
+      // Make the state save fail (no mkostemp possible), add a new user so a
+      // fresh state snapshot is forced, and confirm the worker reports it.
+      assert(chmod(transientDir.c_str(), 0500) == 0);
+      poller.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_z", { "z1", "z2" }, 60000, 0, true);
+      assert(poller.Flush(true));
+      std::string workerError;
+      bool gotError = false;
+      for (int i = 0; i < 200 && !gotError; ++i)
+      {
+        gotError = poller.TakeWorkerError(workerError);
+        if (!gotError) usleep(10000);
+      }
+      assert(gotError);
+
+      // Restore the directory: the retry must write the FULL snapshot, not
+      // an empty file.
+      assert(chmod(transientDir.c_str(), 0700) == 0);
+      assert(poller.Drain());
+      const std::string state = ReadFile(transientState);
+      assert(!state.empty());
+      assert(state.find("Telegram_z\tz1\t") != std::string::npos);
+      assert(state.find("Telegram_z\tz2\t") != std::string::npos);
+    }
+
+    // Shutdown must not hang on a persistently failing device: it exits
+    // through the failure-tolerant worker path and reports the loss.
+    {
+      PresencePoller poller;
+      assert(poller.Init(transientDir, 22));
+      poller.Tick(kBase, kBase + kWallOffset, "Telegram_z", { "z3" }, 60000, 0, true);
+      assert(poller.Flush(true));
+      assert(poller.Drain());
+
+      assert(chmod(transientDir.c_str(), 0500) == 0);
+      poller.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_z", { "z3", "z4" }, 60000, 0, true);
+      assert(poller.Flush(true));
+      std::string workerError;
+      bool gotError = false;
+      for (int i = 0; i < 200 && !gotError; ++i)
+      {
+        gotError = poller.TakeWorkerError(workerError);
+        if (!gotError) usleep(10000);
+      }
+      assert(gotError);
+      assert(chmod(transientDir.c_str(), 0700) == 0);
+      poller.Shutdown(); // must return promptly even though a save had failed
+      const std::string after = ReadFile(transientState);
+      assert(!after.empty()); // never wiped by the transient failure
+      assert(after.find("Telegram_z\tz3\t") != std::string::npos);
+    }
+  }
+
+  {
     // State fields with tabs/newlines in both profile and user ids survive
     // a reload, and polling continues beyond the detection window (proving
     // the observation really was restored, not just re-registered).

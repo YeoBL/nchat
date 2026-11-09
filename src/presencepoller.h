@@ -111,6 +111,10 @@ public:
   // asynchronous; failures surface through TakeWorkerError).
   bool Flush(bool p_ForceState = false);
 
+  // Stop the persistence worker, draining what can be written with bounded
+  // retries. Used on shutdown; the destructor calls it implicitly.
+  void Shutdown();
+
   // Block until the persistence worker has no remaining work. Used by tests
   // and implicitly by the destructor.
   bool Drain();
@@ -205,7 +209,7 @@ private:
 
   // Worker-owned failure bookkeeping.
   std::map<std::string, off_t> m_RollbackPending; // profile -> length to restore
-  std::map<std::string, std::vector<std::string>> m_BlockedLines; // wait for rollback
+  std::map<std::string, std::vector<PendingLine>> m_BlockedLines; // wait for rollback
   bool m_DirSyncNeeded = false;
 };
 
@@ -399,10 +403,9 @@ inline void PresencePoller::QueueLine(const std::string& p_ProfileId, const std:
   if (m_Pending.size() > s_MaxPendingLines)
   {
     // Bounded pending data: drop the oldest non-marker lines first so state
-    // decisions (hidden markers, data-establishing records are ordinary
-    // samples but their state counterparts are checkpointed separately) are
-    // not silently discarded. If every line is a marker the queue is already
-    // bounded by the number of tracked users.
+    // decisions (hidden markers) are not silently discarded. If every line
+    // is a marker, the oldest markers are dropped instead; the state
+    // checkpoint still carries the decision, and the loss is reported.
     const size_t overflow = m_Pending.size() - s_MaxPendingLines;
     size_t dropped = 0;
     for (auto it = m_Pending.begin(); it != m_Pending.end() && dropped < overflow; )
@@ -416,6 +419,12 @@ inline void PresencePoller::QueueLine(const std::string& p_ProfileId, const std:
       {
         ++it;
       }
+    }
+    if (dropped < overflow)
+    {
+      const size_t remaining = overflow - dropped;
+      m_Pending.erase(m_Pending.begin(), m_Pending.begin() + static_cast<long>(remaining));
+      m_DroppedLines += remaining;
     }
     if (dropped > 0)
     {
@@ -535,6 +544,27 @@ inline bool PresencePoller::Flush(bool p_ForceState)
     {
       m_WorkerQueue.insert(m_WorkerQueue.end(), m_Pending.begin(), m_Pending.end());
       m_Pending.clear();
+      // The worker queue must stay bounded too, or a persistently failing
+      // device would grow it without limit. Drop oldest non-marker lines
+      // first, then oldest markers, reporting the loss.
+      while (m_WorkerQueue.size() > s_MaxPendingLines)
+      {
+        auto dropIt = m_WorkerQueue.end();
+        for (auto it = m_WorkerQueue.begin(); it != m_WorkerQueue.end(); ++it)
+        {
+          if (!it->marker)
+          {
+            dropIt = it;
+            break;
+          }
+        }
+        if (dropIt == m_WorkerQueue.end())
+        {
+          dropIt = m_WorkerQueue.begin();
+        }
+        m_WorkerQueue.erase(dropIt);
+        ++m_DroppedLines;
+      }
     }
     if (!stateData.empty())
     {
@@ -550,6 +580,33 @@ inline bool PresencePoller::Flush(bool p_ForceState)
   }
 
   return true;
+}
+
+inline void PresencePoller::Shutdown()
+{
+  if (!m_Initialized) return;
+
+  Flush(true /* force state checkpoint */);
+
+  {
+    std::unique_lock<std::mutex> lock(m_WorkMutex);
+    m_StopWorker = true;
+    m_WorkCv.notify_all();
+  }
+
+  if (m_Worker.joinable())
+  {
+    m_Worker.join();
+  }
+
+  // The failure-tolerant exit path inside WorkerLoop drains what it can;
+  // anything it could not write is reported through the worker error.
+  std::string workerError;
+  if (TakeWorkerError(workerError))
+  {
+    // Reported by the caller; the error string is non-empty.
+    m_Error = workerError;
+  }
 }
 
 inline bool PresencePoller::Drain()
@@ -571,6 +628,7 @@ inline bool PresencePoller::TakeWorkerError(std::string& p_Error)
 
 inline size_t PresencePoller::TakeDroppedLineCount()
 {
+  std::unique_lock<std::mutex> lock(m_WorkMutex);
   const size_t count = m_DroppedLines;
   m_DroppedLines = 0;
   return count;
@@ -578,6 +636,10 @@ inline size_t PresencePoller::TakeDroppedLineCount()
 
 inline void PresencePoller::StartWorker()
 {
+  // Guard against double initialization (L4): Init is only called again
+  // after a failed attempt, but never start a second thread over a joinable
+  // one.
+  if (m_Worker.joinable()) return;
   m_Worker = std::thread([this] { WorkerLoop(); });
 }
 
@@ -609,6 +671,20 @@ inline void PresencePoller::WorkerLoop()
       if (m_StopWorker && m_WorkerQueue.empty() && !m_WorkerWriteState &&
           m_RollbackPending.empty() && !m_DirSyncNeeded)
       {
+        if (!m_BlockedLines.empty())
+        {
+          // Held lines whose rollback never resolved cannot be written
+          // safely; report the loss instead of exiting silently.
+          size_t lost = 0;
+          for (const auto& blocked : m_BlockedLines)
+          {
+            lost += blocked.second.size();
+          }
+          m_WorkerError = "presence persistence: " + std::to_string(lost) +
+            " lines lost at shutdown (unresolved rollback)";
+          m_WorkerErrorPending = true;
+          m_BlockedLines.clear();
+        }
         m_WorkerIdle = true;
         m_WorkCv.notify_all();
         return;
@@ -653,7 +729,9 @@ inline void PresencePoller::WorkerLoop()
     }
 
     // (2) Take a private copy of the queue and state snapshot so the UI
-    // thread can keep filling without touching worker-owned data.
+    // thread can keep filling without touching worker-owned data. The state
+    // buffer is COPIED, not swapped: it stays intact until the save
+    // succeeds, so a transient failure can never write an empty state file.
     std::vector<PendingLine> lines;
     std::string stateData;
     bool writeState = false;
@@ -663,14 +741,13 @@ inline void PresencePoller::WorkerLoop()
       writeState = m_WorkerWriteState;
       if (writeState)
       {
-        stateData.swap(m_WorkerStateData);
+        stateData = m_WorkerStateData;
       }
     }
 
-    // (3) Release blocked lines whose rollback has since succeeded, then
-    // append history per profile. A profile whose rollback could not be
-    // restored stays blocked: its lines wait for the rollback to succeed, so
-    // a retry can never duplicate already-written records.
+    // (3) Release blocked lines whose rollback has since succeeded. They are
+    // older than anything else in the queue, so they go to the FRONT,
+    // preserving both their own order and per-profile timestamp order.
     if (!m_BlockedLines.empty())
     {
       for (auto it = m_BlockedLines.begin(); it != m_BlockedLines.end(); )
@@ -680,26 +757,24 @@ inline void PresencePoller::WorkerLoop()
           ++it;
           continue;
         }
-        std::vector<PendingLine> released;
-        for (const std::string& text : it->second)
-        {
-          released.push_back({ it->first, text, false });
-        }
         {
           std::unique_lock<std::mutex> lock(m_WorkMutex);
-          m_WorkerQueue.insert(m_WorkerQueue.end(), released.begin(), released.end());
+          m_WorkerQueue.insert(m_WorkerQueue.begin(), it->second.begin(), it->second.end());
           ++m_WorkVersion;
         }
         it = m_BlockedLines.erase(it);
       }
     }
 
+    // Append history per profile. A profile whose rollback could not be
+    // restored stays blocked: its lines wait for the rollback to succeed, so
+    // a retry can never duplicate already-written records.
     if (!lines.empty())
     {
-      std::map<std::string, std::vector<std::string>> batches;
+      std::map<std::string, std::vector<PendingLine>> batches;
       for (const PendingLine& line : lines)
       {
-        batches[line.profileId].push_back(line.text);
+        batches[line.profileId].push_back(line);
       }
       for (const auto& batch : batches)
       {
@@ -709,9 +784,15 @@ inline void PresencePoller::WorkerLoop()
                                              batch.second.begin(), batch.second.end());
           continue;
         }
+        std::vector<std::string> texts;
+        texts.reserve(batch.second.size());
+        for (const PendingLine& line : batch.second)
+        {
+          texts.push_back(line.text);
+        }
         bool profileBlocked = false;
         std::string batchError;
-        if (!AppendHistory(batch.first, batch.second, batchError, profileBlocked))
+        if (!AppendHistory(batch.first, texts, batchError, profileBlocked))
         {
           failed = true;
           passError = batchError;
@@ -721,14 +802,10 @@ inline void PresencePoller::WorkerLoop()
           }
           else
           {
-            // Re-queue this batch at the front, preserving order.
-            std::vector<PendingLine> retryLines;
-            for (const std::string& text : batch.second)
-            {
-              retryLines.push_back({ batch.first, text, false });
-            }
+            // Re-queue this batch at the front, preserving order and the
+            // marker flag of each line.
             std::unique_lock<std::mutex> lock(m_WorkMutex);
-            m_WorkerQueue.insert(m_WorkerQueue.begin(), retryLines.begin(), retryLines.end());
+            m_WorkerQueue.insert(m_WorkerQueue.begin(), batch.second.begin(), batch.second.end());
           }
         }
       }
@@ -747,17 +824,29 @@ inline void PresencePoller::WorkerLoop()
       }
     }
 
-    // (5) State only after all history lines are durable, so a hidden
-    // decision can never be persisted without its marker line.
-    if (writeState && !failed)
+    // (5) State only after ALL history lines are durable, so a hidden
+    // decision can never be persisted without its marker line. Lines that
+    // were just released from a blocked profile are still in the queue (or
+    // freshly re-queued after a failure), which defers this to a later pass.
+    if (writeState && !failed && m_BlockedLines.empty() && m_RollbackPending.empty())
     {
-      if (SaveStateTo(stateData, passError))
+      bool queueEmpty = false;
       {
-        m_WorkerWriteState = false;
+        std::unique_lock<std::mutex> lock(m_WorkMutex);
+        queueEmpty = m_WorkerQueue.empty();
       }
-      else
+      if (queueEmpty)
       {
-        failed = true;
+        if (SaveStateTo(stateData, passError))
+        {
+          std::unique_lock<std::mutex> lock(m_WorkMutex);
+          m_WorkerWriteState = false;
+          m_WorkerStateData.clear();
+        }
+        else
+        {
+          failed = true;
+        }
       }
     }
 

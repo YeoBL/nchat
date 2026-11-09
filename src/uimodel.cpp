@@ -85,6 +85,8 @@ UiModel::Impl::Impl(UiModel* p_UiModel)
   if (!m_PresencePoller.Init(FileUtil::GetApplicationDir() + "/presence"))
   {
     LOG_WARNING("presence poller init failed: %s", m_PresencePoller.GetError().c_str());
+    // Do not re-log the same failure on the next timer tick.
+    m_NextPresenceInitRetryMs = SteadyTimeMSec() + 60000;
   }
 }
 
@@ -109,12 +111,10 @@ void UiModel::Impl::Cleanup()
   if (!m_LocalFeatures.Flush()) LOG_WARNING("draft save failed: %s", m_LocalFeatures.GetError().c_str());
   if (m_PresencePoller.IsInitialized())
   {
-    m_PresencePoller.Flush(true /* force state checkpoint */);
-    m_PresencePoller.Drain();
-    std::string workerError;
-    if (m_PresencePoller.TakeWorkerError(workerError))
+    m_PresencePoller.Shutdown();
+    if (!m_PresencePoller.GetError().empty())
     {
-      LOG_WARNING("presence poller save failed: %s", workerError.c_str());
+      LOG_WARNING("presence poller shutdown: %s", m_PresencePoller.GetError().c_str());
     }
   }
   m_View->ClearTerminalBadge();
