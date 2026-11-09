@@ -187,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
             app.browse_current(window, args)
         frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
         check('WHATSAPP' in frames[2] and 'Jamie' not in frames[2], 'Tab does not filter the service')
-        check(any('/jamie_' in frame for frame in frames), 'Search does not update as typed')
+        check(any('jamie_' in frame for frame in frames), 'Search does not update as typed')
         check(any('Refreshed' in frame for frame in frames), 'Refresh completion missing')
         check(any('Alex' in frame and '123' in frame for frame in frames), 'Selected identity detail missing')
         for frame in window.frames:
@@ -214,7 +214,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     window = Window(['/', 'q', 'q', '\n', '\x1b', 'q'], 80)
     with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
         app.browse_current(window, args)
-    check(any('/qq_' in frame[2][0] for frame in window.frames), 'Typing q in search exits the browser')
+    check(any('qq_' in frame[2][0] for frame in window.frames), 'Typing q in search exits the browser')
     for colour_setup in ('disabled', 'unsupported'):
         window = Window(['q'], 80)
         environment = {'NO_COLOR': '1'} if colour_setup == 'disabled' else {}
@@ -367,6 +367,40 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     check(app.service_contact(phone_people[0], 'WhatsApp')['record']['on'] == 1,
           'Multiple account records discarded the newest service report')
     check(len(app.current_rows(phone_people, 'a.d.', 'All')) == 1, 'Search lost an alias on the second service')
+    check(len(app.current_rows(phone_people, '+44 (7700) 900-123', 'All')) == 1,
+          'Formatted phone search does not match cached phone metadata')
+    window = Window(['\x06', 'j', 'a', 'm', 'i', 'e', curses.KEY_DOWN, 'q'], 80)
+    with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+        app.browse_current(window, args)
+    check(any('SEARCH name/number' in frame[2][0] for frame in window.frames), 'Ctrl+F does not focus labelled search')
+    check(any('jamie_' in frame[2][0] for frame in window.frames), 'Ctrl+F search does not update')
+    # A saved counterpart can exist in the address book without a presence sample.
+    cached = phone_root / 'history' / 'WhatsAppMd_phone' / 'db.sqlite'
+    with sqlite3.connect(cached) as connection:
+        connection.execute('ALTER TABLE contacts2 ADD COLUMN isSelf INTEGER DEFAULT 0')
+        connection.executemany('INSERT INTO contacts2 VALUES (?, ?, ?, ?)', [
+            ('555555555@lid', 'Quinn Search', '+44 7700 900124', 0),
+            ('777777777@lid', 'Myself', '+44 7700 900125', 1),
+            ('123456789@g.us', 'Group title', '', 0),
+        ])
+    all_cached = app.current_people(phone_args, include_cached=True)
+    check(any(person['name'] == 'Quinn Search' for person in all_cached), 'Picker omits an unsampled cached contact')
+    check(not any(person['name'] in ('Myself', 'Group title') for person in all_cached), 'Picker includes self or group contacts')
+    source = dict(phone_people[0], members=[app.service_contact(phone_people[0], 'Telegram')])
+    for query in ('quinn', '+44 (7700) 900124'):
+        window = Window(list(query) + ['\n'], 80)
+        chosen = app.pick_person_link(window, source, all_cached)
+        check(chosen and chosen['name'] == 'Quinn Search', 'Typing a name/number needs extra focus or a second Enter')
+    window = Window(['q', '\x1b'], 80)
+    check(app.pick_person_link(window, source, all_cached) is None, 'Escape cannot cancel typed picker search')
+    check(any('q_' in frame[2][0] for frame in window.frames), 'Typing q in the picker cancels instead of searching')
+    target = next(person for person in all_cached if person['name'] == 'Quinn Search')
+    app.save_contact_link(phone_args, pair=(by_name['Jamie']['key'], target['members'][0]['key']))
+    with patch.object(app, 'current_contacts', return_value=[by_name['Jamie']]):
+        hydrated = app.current_people(phone_args)
+    counterpart = app.service_contact(hydrated[0], 'WhatsApp')
+    check(counterpart and counterpart['record'] is None and app.current_fields(counterpart, now)[0] == 'No report',
+          'Linked unsampled contact is missing or claims an observation')
     with contextlib.redirect_stdout(io.StringIO()) as output:
         app.print_current(phone_args)
     check(output.getvalue().count('Alex Doe') == 1, 'Normal plain entry repeats a matched person')

@@ -38,3 +38,14 @@ fork is `YeoBL/nchat`; `upstream` is the original `d99kris/nchat` repository.
 
 The initial customization history is a reconstruction from an existing working
 copy, not a claim that each feature was originally authored on its commit date.
+
+## Concurrent feature work
+
+The user requires a separate `codex/` feature branch and isolated Git worktree
+for every new nchat task because other agents may edit the project concurrently.
+Start from the current integration branch, `codex/personal-features` (the fork's
+default branch, referred to as main by the user). Before merging, inspect its
+latest state, incorporate concurrent commits, resolve conflicts and rerun the
+relevant checks. Merge the finished feature back into the integration branch
+and push to the personal fork. Preserve other agents' worktrees and uncommitted
+changes. Remove only your own clean temporary worktree after merging.
