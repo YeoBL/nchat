@@ -22,6 +22,7 @@ import contextlib
 import datetime
 import fnmatch
 import glob
+import heapq
 import io
 import json
 import os
@@ -33,9 +34,13 @@ from pathlib import Path
 
 PROGRAM = "nchat-presence"
 
+# Producer-compatible plausibility bound for record timestamps (year 2286).
+MAX_RECORD_TS = 10 ** 13
+
 # Bidi control characters and other unsafe-for-terminal code points.
 _UNSAFE_RANGES = ((0x00, 0x1F), (0x7F, 0x9F), (0xD800, 0xDFFF),
-                  (0x202A, 0x202E), (0x2066, 0x2069), (0x200E, 0x200F))
+                  (0x202A, 0x202E), (0x2066, 0x2069), (0x200E, 0x200F),
+                  (0x061C, 0x061C))
 
 
 def default_appdir():
@@ -184,6 +189,8 @@ def valid_record(record):
     uid = record.get("u")
     if not isinstance(ts, int) or isinstance(ts, bool) or ts <= 0:
         return False
+    if ts > MAX_RECORD_TS:
+        return False  # implausible timestamp (beyond year 2286)
     if not isinstance(uid, str) or not uid:
         return False
     if record.get("mark") == "hidden":
@@ -195,6 +202,8 @@ def valid_record(record):
         return False
     seen = record.get("seen", -1)
     if not isinstance(seen, int) or isinstance(seen, bool):
+        return False
+    if seen not in (-1, 0, 1, 2) and not (0 < seen <= MAX_RECORD_TS):
         return False
     recent = record.get("recent", 0)
     if not isinstance(recent, int) or isinstance(recent, bool) or recent not in (0, 1):
@@ -239,8 +248,8 @@ def iter_records(directory, profile_filter=None, since=None, until=None):
                     continue
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue  # torn tail being repaired by the poller
+                except (json.JSONDecodeError, ValueError, RecursionError):
+                    continue  # torn tail or pathological nesting
                 if not valid_record(record):
                     warn("skipping malformed record in %s:%d" % (path, line_number))
                     continue
@@ -333,8 +342,10 @@ def pattern_matches(profile, uid, pattern, contacts_by_profile, args, resolution
 
 
 def aggregate(directory, profile_filter, since, until, pattern, contacts, args):
-    """One pass over the history: per-contact aggregates with recovery-aware
-    hidden state, heartbeat-separated counters and marker timestamps."""
+    """One pass over the history: per-contact aggregates. The displayed
+    state follows every genuine sample; the hidden lifecycle is tracked in
+    append order (immune to wall-clock rollbacks), and only observable
+    samples retire a hidden mark."""
     stats = {}
     resolution_cache = {}
     for profile, record in iter_records(directory, profile_filter, since, until):
@@ -347,51 +358,62 @@ def aggregate(directory, profile_filter, since, until, pattern, contacts, args):
         if s is None:
             s = stats[key] = {"count": 0, "online": 0, "heartbeats": 0,
                               "last_ts": 0, "first_obs_ts": 0, "last_obs_ts": 0,
-                              "last_state": None, "last_seen": None, "hidden_ts": 0}
+                              "last_state": None, "hidden_order": 0, "obs_order": 0,
+                              "order": 0, "hidden_ts": 0}
+        s["order"] += 1
+        order = s["order"]
         if record.get("mark") == "hidden":
+            s["hidden_order"] = order
             s["hidden_ts"] = max(s["hidden_ts"], record["ts"])
+        elif record.get("hb"):
+            s["heartbeats"] += 1
         else:
-            if record.get("hb"):
-                s["heartbeats"] += 1
-            else:
-                s["count"] += 1
-                if record.get("on"):
-                    s["online"] += 1
-                if observable(record):
-                    if s["first_obs_ts"] == 0:
-                        s["first_obs_ts"] = record["ts"]
-                    # Only observable data defines the state; plain
-                    # no-data samples neither advance it nor clear hidden.
-                    if record["ts"] >= s["last_obs_ts"]:
-                        s["last_obs_ts"] = record["ts"]
-                        s["last_state"] = status_text(record)
-                        s["last_seen"] = record.get("seen", -1)
+            s["count"] += 1
+            if record.get("on"):
+                s["online"] += 1
+            # The displayed state follows every genuine sample, even
+            # no-data ones (an offline sample after online must not leave
+            # the contact displayed as online).
+            s["last_state"] = status_text(record)
+            if observable(record):
+                s["obs_order"] = order
+                if s["first_obs_ts"] == 0:
+                    s["first_obs_ts"] = record["ts"]
+                if record["ts"] > s["last_obs_ts"]:
+                    s["last_obs_ts"] = record["ts"]
         if record["ts"] > s["last_ts"]:
             s["last_ts"] = record["ts"]
     return stats
 
 
 def skipped_state(s):
-    """Hidden, unless observable data arrived after the marker."""
-    if s["hidden_ts"] == 0:
+    """Hidden, unless an observable sample arrived after the marker in
+    append order."""
+    if s["hidden_order"] == 0:
         return False
-    return s["last_obs_ts"] < s["hidden_ts"]
+    return s["obs_order"] < s["hidden_order"]
 
 
 def cell(text, width):
-    """Truncate a raw display string (before terminal escaping), preserving
-    the '<id>' suffix when present."""
+    """Plain truncation with an ellipsis (no '<id>' awareness)."""
     if len(text) <= width:
         return text.ljust(width)
-    marker = "<"
-    cut = text.find(marker)
-    if cut > 0:
-        tail = text[cut:]
-        head = text[:cut]
-        available = width - len(tail) - 1
-        if available > 0:
-            return (head[:available] + "…" + tail).ljust(width)
     return (text[: width - 1] + "…").ljust(width)
+
+
+def name_id_cell(name, id_text, width):
+    """Truncate the display NAME only; the '<id>' suffix is always kept
+    intact."""
+    if name:
+        suffix = " <%s>" % id_text
+        if len(suffix) >= width:
+            return suffix[: width - 1].ljust(width) + "…" if width > 1 else suffix[:width].ljust(width)
+        available = width - len(suffix)
+        head = name[:available]
+        if len(name) > available:
+            head += "…"
+        return (head + suffix).ljust(width)
+    return cell(id_text, width)
 
 
 def raw_display_id(profile, uid, contacts_by_profile, args):
@@ -420,13 +442,15 @@ def cmd_list(args):
             state = s["last_state"]
         else:
             state = "unknown"
-        rows.append((clean(profile), raw_display_id(profile, uid, contacts, args),
-                     fmt(s["last_ts"]), state, s["count"], s["online"], s["heartbeats"]))
+        name, id_text = identity_parts(profile, uid, contacts, args)
+        rows.append((clean(profile), name, id_text, fmt(s["last_ts"]), state,
+                     s["count"], s["online"], s["heartbeats"]))
     profile_width = min(max((len(r[0]) for r in rows), default=12) + 2, 28)
-    name_width = min(max((len(r[1]) for r in rows), default=12) + 2, 44)
-    for profile, who, last, state, count, online, heartbeats in rows:
+    name_width = min(max((len(name_id_cell(r[1], r[2], 60)) for r in rows), default=12) + 2, 44)
+    for profile, name, id_text, last, state, count, online, heartbeats in rows:
         print("%s%s%s  %s  (%d samples, %d online, %d heartbeats)"
-              % (cell(profile, profile_width), clean(cell(who, name_width)), last,
+              % (cell(profile, profile_width),
+                 clean(name_id_cell(name, id_text, name_width - 1)), last,
                  state, count, online, heartbeats))
 
 
@@ -434,34 +458,51 @@ def cmd_show(args):
     since = parse_when(args.since)
     until = parse_when(args.until)
     contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
+    resolution_cache = {}
 
+    # Single pass: collect the globally latest N matching records across
+    # profiles (bounded heap), and detect multi-profile matches for the
+    # attribution prefix.
     matched_profiles = set()
+    heap = []
+    seq = 0
     for profile, record in iter_records(args.dir, args.profile, since, until):
-        if pattern_matches(profile, record["u"], args.pattern, contacts, args, {}):
-            matched_profiles.add(profile)
-    multi_profile = len(matched_profiles) > 1
-
-    # The log grows forward, so keep the LAST n matching records (bounded
-    # memory); markers count toward the budget.
-    keep = collections.deque(maxlen=args.n) if args.n < sys.maxsize else collections.deque()
-    for profile, record in iter_records(args.dir, args.profile, since, until):
-        if not pattern_matches(profile, record["u"], args.pattern, contacts, args, {}):
+        if not pattern_matches(profile, record["u"], args.pattern, contacts, args,
+                               resolution_cache):
             continue
+        matched_profiles.add(profile)
         if record.get("mark") == "hidden":
-            keep.append((profile, record))
+            pass
+        elif args.online_only and not record.get("on"):
             continue
-        if args.online_only and not record.get("on"):
+        elif args.no_heartbeats and record.get("hb"):
             continue
-        if args.no_heartbeats and record.get("hb"):
-            continue
-        keep.append((profile, record))
+        item = (record["ts"], seq, profile, record)
+        seq += 1
+        if args.n < sys.maxsize:
+            if len(heap) < args.n:
+                heapq.heappush(heap, item)
+            elif item[0] > heap[0][0]:
+                heapq.heapreplace(heap, item)
+        else:
+            heap.append(item)
 
-    if not keep:
+    if not heap:
         sys.exit("no records match %r (patterns match user ids/numbers and display names)"
                  % args.pattern)
 
-    for profile, record in keep:
-        who = display_id(profile, record["u"], contacts, args)
+    multi_profile = len(matched_profiles) > 1
+    kept = sorted(heap)  # (ts, seq, ...) -> chronological, deterministic ties
+
+    # Resolve each kept contact once.
+    display_cache = {}
+    for _, _, profile, record in kept:
+        key = (profile, record["u"])
+        if key not in display_cache:
+            display_cache[key] = display_id(profile, record["u"], contacts, args)
+
+    for _, _, profile, record in kept:
+        who = display_cache[(profile, record["u"])]
         prefix = ("[%s] " % clean(profile)) if multi_profile else ""
         if record.get("mark") == "hidden":
             print("%s  %s%s marked hidden (skipped)" % (fmt(record["ts"]), prefix, who))
@@ -524,6 +565,7 @@ def self_test():
         with open(whatsapp_path, "w", encoding="utf-8") as fh:
             fh.write('{"ts":1700000000000,"u":"999888777666@s.whatsapp.net","on":1,"seen":-1,"recent":0}\n')
             fh.write('{"ts":1700000100000,"u":"111222333444@lid","on":0,"seen":-1,"recent":0}\n')
+            fh.write('{"ts":1700000200000,"u":"6581@s.whatsapp.net","on":0,"seen":-1,"recent":0}\n')
         history_dir = os.path.join(appdir, "history", profile)
         os.makedirs(history_dir)
         con = sqlite3.connect(os.path.join(history_dir, "db.sqlite"))
@@ -540,6 +582,7 @@ def self_test():
         con.execute("INSERT INTO contacts2 VALUES ('555111222333@lid', 'Lid Name', '999888777666', 0, 1)")
         con.execute("INSERT INTO contacts2 VALUES ('555444555666@lid', 'Wrong Name', '123456', 0, 1)")
         con.execute("INSERT INTO contacts2 VALUES ('555777888999@lid', 'Masked Name', '+65••••••81', 0, 1)")
+        con.execute("INSERT INTO contacts2 VALUES ('555888999111@lid', 'Collide', '111222333444', 0, 1)")
         con.commit()
         con.close()
 
@@ -583,10 +626,15 @@ def self_test():
         lines = [line for line in output.getvalue().splitlines() if line.strip()]
         check(len(lines) == 3, "show -n 3 returns three rows")
         # Markers share the budget: the kept window is recent(22:38), the
-        # hidden marker(22:43) and the recovery sample(22:48).
-        check("22:38:20" in lines[0] and "22:43:20" in lines[1] and "22:48:20" in lines[2],
+        # hidden marker(22:43) and the recovery sample(22:48). Timezone-
+        # independent: expectations derive from the same formatter.
+        t_recent = fmt(1700001500000)
+        t_marker = fmt(1700001800000)
+        t_recovery = fmt(1700002100000)
+        t_oldest = fmt(1700000000000)
+        check(t_recent in lines[0] and t_marker in lines[1] and t_recovery in lines[2],
               "show keeps the LAST n records (markers included), not the first")
-        check("22:13:20" not in output.getvalue(), "older records fall outside the last-N window")
+        check(t_oldest not in output.getvalue(), "older records fall outside the last-N window")
         args.n = 200
         args.no_heartbeats = False
 
@@ -605,12 +653,20 @@ def self_test():
             check(False, "masked phone must not resolve")
         except SystemExit as exc:
             check(exc.code != 0, "masked phone must not resolve (exit)")
-        # A LID uid must never resolve through another contact's phone.
+        # A LID uid must never resolve through another contact's phone,
+        # even when a cached phone actually collides with its digits.
         args.pattern = "111222333444"
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             cmd_list(args)
-        check("Lid Name" not in output.getvalue(), "LID digits are not a phone alias")
+        check("Collide" not in output.getvalue(), "LID digits are not a phone alias")
+        # A phone JID whose digits match a MASKED cache phone must stay a
+        # bare id.
+        args.pattern = "6581"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_list(args)
+        check("Masked Name" not in output.getvalue(), "masked phone digits never resolve a JID")
 
         # Time filters: markers respect bounds too. Everything predates 23:00.
         args.pattern = "61234"
