@@ -28,8 +28,8 @@ Features
 - View and save media (documents, photos, videos)
 - Show message read and edited indicators
 - Show user status (online, away, typing)
-- Browse grouped latest reported contact statuses with `nchat-presence`, with
-  name search, keyboard navigation and readable report ages
+- Browse one row per person with Telegram/WhatsApp status columns using
+  `nchat-presence`, with name search, contact linking and keyboard navigation
 - Jump to next unread chat
 - Archive, pin and delete chats
 - Search messages within a chat

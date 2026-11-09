@@ -4,7 +4,7 @@
 # Copyright (c) 2026 Bing Lin
 # All rights reserved.
 #
-# Read-only current-status browser and explicit legacy history commands.
+# Current-status browser with private display links and explicit legacy commands.
 # Parses the local JSONL files written by the presence poller under
 # <config>/nchat/presence/ and never contacts any service.
 #
@@ -24,6 +24,7 @@ import datetime
 import ctypes
 import ctypes.util
 import fnmatch
+import fcntl
 import glob
 import heapq
 import io
@@ -33,6 +34,8 @@ import sqlite3
 import sys
 import tempfile
 import time
+import stat
+import unicodedata
 
 from pathlib import Path
 
@@ -479,11 +482,142 @@ def current_contacts(args):
     for (profile, uid), item in latest.items():
         name, identifier = identity_parts(profile, uid, contacts, args)
         service = "WhatsApp" if profile.startswith("WhatsApp") else "Telegram" if profile.startswith("Telegram") else "Other"
+        named = bool(name.strip()) and name not in (uid, identifier)
+        _, phone = resolve_name(profile, uid, contacts.get(profile, {}))
+        if service == 'WhatsApp' and uid.endswith('@s.whatsapp.net'):
+            phone = uid[:-len('@s.whatsapp.net')]
         if not name.strip() or name in (uid, identifier):
             name = ("+" + identifier if uid.endswith("@s.whatsapp.net")
                     else "Contact " + identifier)
-        item.update(name=clean(name.strip()), identifier=clean(identifier), service=service)
+        item.update(name=clean(name.strip()), identifier=clean(identifier), service=service,
+                    phone=contact_phone(phone), named=named)
     return sorted(latest.values(), key=lambda item: (item["service"], item["name"].casefold(), item["key"]))
+
+
+def contact_phone(value):
+    """Use complete international numbers without guessing a region or LID alias."""
+    value = value.strip()
+    if not value or any(char not in '+0123456789-(). \t' for char in value):
+        return ''
+    if value.count('+') > 1 or ('+' in value and not value.startswith('+')):
+        return ''
+    digits = ''.join(char for char in value if char in '0123456789')
+    if digits.startswith('00'):
+        digits = digits[2:]
+    return digits if 7 <= len(digits) <= 15 and not digits.startswith('0') else ''
+
+
+def contact_link_pair(pair):
+    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+        raise ValueError('Invalid local contact link')
+    for identity in pair:
+        if not isinstance(identity, (list, tuple)) or len(identity) != 2 or any(
+                not isinstance(value, str) or not value or len(value) > 512 or '\x00' in value
+                for value in identity):
+            raise ValueError('Invalid local contact identity')
+    return tuple(tuple(identity) for identity in pair)
+
+
+def read_contact_links(args):
+    path = os.path.join(args.appdir, 'presence-contact-links.json')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return []
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 1_048_576:
+            raise ValueError('Local contact links need a private regular file')
+        try:
+            data = json.load(stream)
+        except (ValueError, UnicodeError, RecursionError) as error:
+            raise ValueError('Local contact links could not be read') from error
+    if not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] != 1 or not isinstance(data.get('links'), list) or len(data['links']) > 1000:
+        raise ValueError('Local contact links have an unsupported format')
+    return [contact_link_pair(pair) for pair in data['links']]
+
+
+def save_contact_link(args, pair=None, remove=()):
+    """Merge private display preferences under a lock and replace atomically."""
+    if pair is not None:
+        pair = contact_link_pair(pair)
+    os.makedirs(args.appdir, mode=0o700, exist_ok=True)
+    lock_path = os.path.join(args.appdir, 'presence-contact-links.lock')
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a') as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError('Local contact link lock must be private')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        links = read_contact_links(args)
+        removed = set(remove)
+        links = [link for link in links if not removed.intersection(link)]
+        if pair and tuple(pair) not in links and tuple(reversed(pair)) not in links:
+            links.append(tuple(pair))
+        if len(links) > 1000:
+            raise ValueError('Too many local contact links')
+        output_fd, temporary = tempfile.mkstemp(prefix='.presence-contact-links-', dir=args.appdir)
+        try:
+            with os.fdopen(output_fd, 'w') as output:
+                json.dump({'version': 1, 'links': links}, output)
+                output.write('\n')
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, os.path.join(args.appdir, 'presence-contact-links.json'))
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def current_people(args):
+    contacts = current_contacts(args)
+    try:
+        links = read_contact_links(args)
+    except (OSError, ValueError) as error:
+        warn(str(error) + '. Showing automatic matches.')
+        links = []
+    parents = {item['key']: item['key'] for item in contacts}
+    for pair in links:
+        for key in pair:
+            parents.setdefault(key, key)
+
+    def root(key):
+        while parents[key] != key:
+            parents[key] = parents[parents[key]]
+            key = parents[key]
+        return key
+
+    def join(left, right):
+        parents[root(right)] = root(left)
+
+    known = {}
+    for item in contacts:
+        identifiers = [('id', item['service'], normalize_uid(*item['key']))]
+        if item['phone']:
+            identifiers.append(('phone', item['phone']))
+        for identity in identifiers:
+            if identity in known:
+                join(known[identity], item['key'])
+            else:
+                known[identity] = item['key']
+    for left, right in links:
+        join(left, right)
+    groups = collections.defaultdict(list)
+    for item in contacts:
+        groups[root(item['key'])].append(item)
+    manual_roots = {root(pair[0]) for pair in links}
+    people = []
+    for key, members in groups.items():
+        members.sort(key=lambda item: item['key'])
+        preferred = max(members, key=lambda item: (item['named'], len(item['name'].split()), len(item['name'])))
+        people.append({'key': tuple(item['key'] for item in members), 'name': preferred['name'],
+                       'members': members, 'manual': key in manual_roots})
+    return sorted(people, key=lambda item: (item['name'].casefold(), item['key']))
+
+
+def service_contact(person, service):
+    candidates = [member for member in person['members'] if member['service'] == service]
+    return max(candidates, key=lambda item: item['record']['ts'] if item['record'] else 0, default=None)
 
 
 def report_age(timestamp, now):
@@ -582,47 +716,148 @@ def fit_screen(text, width):
 
 def current_rows(contacts, query, service):
     query = query.casefold()
-    return [item for item in contacts if service in ('All', item['service']) and
-            query in (item['name'] + ' ' + item['identifier']).casefold()]
+    return [person for person in contacts
+            if (service == 'All' or service_contact(person, service) is not None)
+            and query in (person['name'] + ' ' + ' '.join(
+                item['name'] + ' ' + item['identifier'] for item in person['members'])).casefold()]
+
+
+def pad_screen(text, width):
+    text = fit_screen(text, width)
+    return text + ' ' * max(0, width - sum(max(0, _libc.wcwidth(char)) for char in text))
+
+
+def person_columns(width):
+    available = width - 8
+    name = min(32, available // 3)
+    telegram = (available - name) // 2
+    return name, telegram, available - name - telegram
+
+
+def current_heading(width):
+    if width < 44:
+        return ' CONTACT · TG / WA'
+    return '  ' + ' │ '.join(pad_screen(label, size) for label, size in
+                            zip(('CONTACT', 'TELEGRAM', 'WHATSAPP'), person_columns(width)))
+
+
+def service_summary(person, service, now, width):
+    item = service_contact(person, service)
+    if item is None:
+        return '—'
+    state, seen, age = current_fields(item, now)
+    if state == 'Offline':
+        text = 'Seen ' + seen
+    elif state == 'Offline (old)':
+        text = 'Old · ' + seen
+    elif state == 'Unavailable':
+        return state
+    else:
+        text = state + ' · ' + age
+    if width >= 36 and state.startswith('Offline'):
+        text += ' · ' + age
+    return text
 
 
 def current_lines(contacts, width, now):
     lines = []
-    services = sorted({item['service'] for item in contacts})
-    for service in services:
-        group = [item for item in contacts if item['service'] == service]
-        if lines:
-            lines.append(('', None, 'group'))
-        lines.append((service.upper() + '  ·  ' + str(len(group)), None, 'group'))
-        for item in group:
-            state, seen, age = current_fields(item, now)
-            if width >= 94:
-                name_width = width - 62
-                name = fit_screen(item['name'], name_width)
-                padding = name_width - sum(max(0, _libc.wcwidth(char)) for char in name)
-                text = '  ' + name + ' ' * padding + '  ' + state.ljust(14) + '  ' + seen.ljust(23) + '  ' + age
-                lines.append((text, item['key'], state))
-            else:
-                lines.append(('  ' + item['name'], item['key'], state))
-                detail = state + '  ·  ' + age
-                if width >= 64:
-                    detail += '  ·  ' + seen
-                lines.append(('    ' + detail, item['key'], state))
+    for person in contacts:
+        if width >= 44:
+            sizes = person_columns(width)
+            values = (person['name'], service_summary(person, 'Telegram', now, sizes[1]),
+                      service_summary(person, 'WhatsApp', now, sizes[2]))
+            text = '  ' + ' │ '.join(pad_screen(value, size) for value, size in zip(values, sizes))
+            lines.append((text, person['key'], 'person'))
+        else:
+            lines.append(('  ' + person['name'], person['key'], 'person'))
+            for service, label in [('Telegram', 'TG'), ('WhatsApp', 'WA')]:
+                text = '    ' + label + ' ' + service_summary(person, service, now, width - 7)
+                lines.append((text, person['key'], 'person'))
     return lines
 
 
 def print_current(args):
     now = int(time.time() * 1000)
-    rows = current_rows(current_contacts(args), args.pattern, 'All')
+    rows = current_rows(current_people(args), args.pattern, 'All')
     print('NCHAT  ·  Latest reported status')
     print('Local cache  ·  ' + datetime.datetime.now().astimezone().strftime('%d %b %Y %H:%M %Z'))
     print('Reports older than 5 minutes are labelled old or unconfirmed.\n')
     if not rows:
         print('No contacts match.' if args.pattern else 'No status reports available yet.')
         return
-    print('  ' + 'CONTACT'.ljust(38) + '  ' + 'STATUS'.ljust(14) + '  ' + 'LAST SEEN'.ljust(23) + '  REPORT AGE')
+    print(current_heading(100))
     for text, _, _ in current_lines(rows, 100, now):
         print(fit_screen(text, 100))
+
+
+def pick_person_link(win, source, people):
+    import curses
+    services = {item['service'] for item in source['members']}
+    candidates = [person for person in people if not services.intersection(
+        item['service'] for item in person['members'])]
+    names = {unicodedata.normalize('NFKC', item['name']).casefold() for item in source['members']}
+    candidates.sort(key=lambda person: (not any(unicodedata.normalize('NFKC', item['name']).casefold() in names
+                                               for item in person['members']), person['name'].casefold()))
+    query, searching, selected, top = '', False, 0, 0
+    while True:
+        height, width = win.getmaxyx()
+        rows = current_rows(candidates, query, 'All')
+        selected = min(selected, max(0, len(rows) - 1))
+        page = max(1, height - 6)
+        top = max(0, min(top, selected, max(0, len(rows) - page)))
+        if selected >= top + page:
+            top = selected - page + 1
+        win.erase()
+        content = [(0, 'Link ' + source['name'], curses.A_BOLD),
+                   (1, 'Choose the same person on the other service', 0),
+                   (2, '/' + query + ('_' if searching else ''), curses.A_REVERSE)]
+        for index, person in enumerate(rows[top:top + page], top):
+            item = person['members'][0]
+            content.append((4 + index - top, person['name'] + ' · ' + item['identifier'],
+                            curses.A_REVERSE if index == selected else 0))
+        if not rows:
+            content.append((4, 'No matching contact. Esc cancels.', 0))
+        content.extend([(height - 2, 'Enter Link  ↑↓ Move  / Search', 0),
+                        (height - 1, 'Esc Cancel  q Cancel', 0)])
+        for y, text, attribute in content:
+            if 0 <= y < height and width > 1:
+                try:
+                    win.addstr(y, 0, fit_screen(text, width - 1), attribute)
+                except curses.error:
+                    pass
+        win.refresh()
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        if key == curses.KEY_RESIZE:
+            continue
+        if searching:
+            if key in ('\n', '\r', curses.KEY_ENTER):
+                searching = False
+            elif key in ('\x1b', '\x03'):
+                query, searching = '', False
+            elif key in ('\x7f', '\b', curses.KEY_BACKSPACE):
+                query = query[:-1]
+            elif isinstance(key, str) and key.isprintable() and len(query) < 120:
+                query += key
+            selected, top = 0, 0
+        elif key in ('\x1b', '\x03', 'q'):
+            return None
+        elif key in ('\n', '\r', curses.KEY_ENTER) and rows:
+            return rows[selected]
+        elif key in (curses.KEY_DOWN, 'j'):
+            selected += 1
+        elif key in (curses.KEY_UP, 'k'):
+            selected = max(0, selected - 1)
+        elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            selected = max(0, selected + (page if key == curses.KEY_NPAGE else -page))
+        elif key in ('g', curses.KEY_HOME):
+            selected = 0
+        elif key in ('G', curses.KEY_END):
+            selected = max(0, len(rows) - 1)
+        elif key == '/':
+            searching = True
 
 
 def browse_current(win, args):
@@ -635,23 +870,13 @@ def browse_current(win, args):
         pass
     win.keypad(True)
     win.timeout(1000)
-    colors = False
-    if curses.has_colors() and 'NO_COLOR' not in os.environ:
-        try:
-            curses.start_color()
-            curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_CYAN, -1)
-            curses.init_pair(2, curses.COLOR_GREEN, -1)
-            colors = True
-        except curses.error:
-            pass
     errors = io.StringIO()
     with contextlib.redirect_stderr(errors):
-        contacts = current_contacts(args)
+        contacts = current_people(args)
     query, service, searching, selection, top = args.pattern, 'All', False, 0, 0
     loaded_at = datetime.datetime.now().astimezone()
     note = ('Some cache records could not be read. r retries.' if errors.getvalue()
-            else 'r refreshes the local cache')
+            else 'm links contacts · u removes manual links · r refreshes')
     while True:
         rows = current_rows(contacts, query, service)
         selection = min(selection, max(0, len(rows) - 1))
@@ -659,7 +884,8 @@ def browse_current(win, args):
         height, width = win.getmaxyx()
         now = int(time.time() * 1000)
         lines = current_lines(rows, max(1, width - 1), now)
-        page = max(1, height - 10)
+        row_height = 3 if width < 45 else 1
+        page = max(row_height, (height - 10) // row_height * row_height)
         selected_line = next((i for i, line in enumerate(lines) if line[1] == selected), 0)
         if selected_line < top:
             top = max(0, selected_line - 1)
@@ -667,6 +893,7 @@ def browse_current(win, args):
         if selected_end >= top + page:
             top = selected_end - page + 1
         top = max(0, min(top, max(0, len(lines) - page)))
+        top -= top % row_height
         win.erase()
 
         def put(y, text, attribute=0):
@@ -677,14 +904,11 @@ def browse_current(win, args):
                     pass  # A terminal resize can race drawing.
 
         put(0, ' NCHAT  /  Latest status', curses.A_BOLD)
-        put(1, ' Read at ' + loaded_at.strftime('%H:%M %Z') + '  ·  ' + str(len(rows)) + ' contacts')
-        put(2, ' ' + ('ALL SERVICES' if service == 'All' else service.upper()) + '  ·  /' + query + ('_' if searching else ''), curses.A_REVERSE)
-        put(3, ' Last reported status · >5m = old' if width < 95 else
-            '  ' + 'CONTACT'.ljust(width - 63) + '  ' + 'STATUS'.ljust(14) + '  ' + 'LAST SEEN'.ljust(23) + '  REPORT AGE', curses.A_DIM)
-        for i, (text, key, kind) in enumerate(lines[top:top + page]):
-            attribute = curses.A_BOLD if kind == 'group' else 0
-            if colors and kind in ('group', 'Online'):
-                attribute |= curses.color_pair(1 if kind == 'group' else 2)
+        put(1, ' Read at ' + loaded_at.strftime('%H:%M %Z') + '  ·  ' + str(len(rows)) + ' people · >5m = old')
+        put(2, ' ' + ('ALL PEOPLE' if service == 'All' else 'WITH ' + service.upper()) + '  ·  /' + query + ('_' if searching else ''), curses.A_REVERSE)
+        put(3, current_heading(width - 1), curses.A_BOLD)
+        for i, (text, key, _) in enumerate(lines[top:top + page]):
+            attribute = 0
             if key is not None and key == selected:
                 attribute |= curses.A_REVERSE
                 if top + i == selected_line:
@@ -693,23 +917,29 @@ def browse_current(win, args):
         if not rows:
             put(5, ' No contacts match. Esc clears search; Tab changes service.' if query or service != 'All' else ' No status reports available yet.')
         if rows and height >= 12:
-            item = rows[selection]
-            profiles = sorted({value['key'][0] for value in contacts if value['service'] == item['service']})
-            account = (' / Account ' + str(profiles.index(item['key'][0]) + 1)) if len(profiles) > 1 else ''
-            put(height - 6, ' ' + item['name'] + '  ·  ' + item['service'] + account, curses.A_BOLD)
-            put(height - 5, ' ' + item['identifier'])
-            _, seen, age = current_fields(item, now)
-            detail = ('Seen ' + seen + ' · report ' + age if width < 64 else
-                      'Last seen ' + seen + '  ·  ' + ('Reported ' + readable_report(item['record']['ts']) if item['record'] else 'No observation'))
-            put(height - 4, ' ' + detail)
+            person = rows[selection]
+            match = 'Linked by you' if person['manual'] else 'Phone/account match' if len(person['members']) > 1 else 'Single service'
+            put(height - 6, ' ' + person['name'] + ' · ' + match, curses.A_BOLD)
+            for offset, platform in enumerate(('Telegram', 'WhatsApp')):
+                item = service_contact(person, platform)
+                detail = platform + ' — no contact in this view'
+                if item:
+                    state, seen, age = current_fields(item, now)
+                    detail = platform + ' ' + item['identifier'] + ' · ' + state + ' · seen ' + seen + ' · report ' + age
+                    if width >= 120 and item['record']:
+                        detail += ' · ' + readable_report(item['record']['ts'])
+                    others = sum(value['service'] == platform for value in person['members']) - 1
+                    if others:
+                        detail += ' · +' + str(others) + ' accounts'
+                put(height - 5 + offset, ' ' + detail)
         put(height - 3, ' ' + note, curses.A_DIM)
         if width < 72:
-            put(height - 2, ' ↑↓ Move  / Search  Tab Service')
-            put(height - 1, ' q Quit  r Refresh  Esc Clear')
+            put(height - 2, ' ↑↓ Move  / Search  Tab Filter')
+            put(height - 1, ' q Quit  r Refresh  m Link  u Unlink')
         else:
-            put(height - 2, ' ↑↓ / j k  Move   Tab  Service   /  Search   r  Refresh')
-            put(height - 1, ' q Quit  Esc Clear  PgUp/PgDn Page  g/G First/last')
-        if height < 12 or width < 26:
+            put(height - 2, ' ↑↓/j k Move  Tab Filter  / Search  m Link  u Unlink')
+            put(height - 1, ' q Quit  Esc Clear  r Refresh  PgUp/PgDn Page  g/G Ends')
+        if height < (13 if width < 45 else 12) or width < 26:
             win.erase()
             put(0, 'q Quit · Enlarge terminal')
         win.refresh()
@@ -737,7 +967,7 @@ def browse_current(win, args):
         elif key in (curses.KEY_UP, 'k'):
             selection = max(0, selection - 1)
         elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
-            selection = max(0, selection + (1 if key == curses.KEY_NPAGE else -1) * max(1, page // 2))
+            selection = max(0, selection + (1 if key == curses.KEY_NPAGE else -1) * max(1, page // row_height))
         elif key in ('g', curses.KEY_HOME):
             selection = 0
         elif key in ('G', curses.KEY_END):
@@ -750,13 +980,38 @@ def browse_current(win, args):
             searching = True
         elif key == '\x1b':
             query, service, selection, top = '', 'All', 0, 0
+        elif key in ('m', 'u') and rows:
+            person = rows[selection]
+            try:
+                if key == 'm':
+                    if all(service_contact(person, value) for value in ('Telegram', 'WhatsApp')):
+                        note = 'This person already has both services'
+                        continue
+                    target = pick_person_link(win, person, contacts)
+                    if target is None:
+                        note = 'Link cancelled'
+                        continue
+                    save_contact_link(args, pair=(person['members'][0]['key'], target['members'][0]['key']))
+                    note = 'Contacts linked locally'
+                else:
+                    if not person['manual']:
+                        note = 'This row has no manual links to remove'
+                        continue
+                    save_contact_link(args, remove=person['key'])
+                    note = 'Manual links removed'
+                contacts = current_people(args)
+                visible = current_rows(contacts, query, service)
+                anchor = person['members'][0]['key']
+                selection = next((i for i, value in enumerate(visible) if anchor in value['key']), 0)
+            except (OSError, ValueError):
+                note = 'Could not save the local link. Check preferences and permissions.'
         elif key in ('r', 'R'):
             errors = io.StringIO()
             try:
                 with contextlib.redirect_stderr(errors):
-                    contacts = current_contacts(args)
+                    contacts = current_people(args)
                 visible = current_rows(contacts, query, service)
-                selection = next((i for i, item in enumerate(visible) if item['key'] == selected), 0)
+                selection = next((i for i, item in enumerate(visible) if selected and set(selected).intersection(item['key'])), 0)
                 loaded_at = datetime.datetime.now().astimezone()
                 note = 'Refreshed ' + loaded_at.strftime('%H:%M')
                 if errors.getvalue():
@@ -1040,7 +1295,7 @@ def self_test():
 def main():
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
-        description="Browse latest reported contact statuses, grouped by service. "
+        description="Browse one row per person with Telegram and WhatsApp columns. "
                     "The default screen supports arrows, Tab, / search, r refresh and q quit. "
                     "Read the local nchat presence history under "
                     "~/.config/nchat/presence/. Patterns match user ids/numbers "

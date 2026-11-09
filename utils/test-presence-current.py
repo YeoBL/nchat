@@ -52,7 +52,7 @@ class Window:
     def get_wch(self): return next(self.keys)
 
 
-def terminal_check(args, width, interrupt=False):
+def terminal_check(args, width, interrupt=False, linking=False):
     child, master = pty.fork()
     if child == 0:
         os.environ['TERM'] = 'xterm-256color'
@@ -76,6 +76,24 @@ def terminal_check(args, width, interrupt=False):
         while b'Latest status' not in output and time.monotonic() < deadline:
             read_for(.05)
         check(b'Latest status' in output, 'Normal CLI did not open the status screen')
+        if linking:
+            preference = Path(args.appdir) / 'presence-contact-links.json'
+            os.write(master, b'm')
+            read_for(.1)
+            os.write(master, b'\x1b')
+            read_for(.15)
+            check(not preference.exists(), 'Native link cancellation saved preferences')
+            os.write(master, b'm\n')
+            deadline = time.monotonic() + 2
+            while not preference.exists() and time.monotonic() < deadline:
+                read_for(.03)
+            check(preference.exists() and json.loads(preference.read_text())['links'],
+                  'Native Link did not reach the preference writer')
+            os.write(master, b'u')
+            deadline = time.monotonic() + 2
+            while json.loads(preference.read_text())['links'] and time.monotonic() < deadline:
+                read_for(.03)
+            check(not json.loads(preference.read_text())['links'], 'Native Unlink failed')
         for keys in [b'j', b'\t', b'/jamie\n', b'\x1b', b'r', b'\x1b[6~']:
             os.write(master, keys)
             read_for(.08)
@@ -128,6 +146,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     args = argparse.Namespace(dir=str(directory), appdir=str(root), profile=None,
                               no_names=False, pattern='', plain=True)
     contacts = app.current_contacts(args)
+    people = app.current_people(args)
     by_name = {item['name']: item for item in contacts}
     check(len(contacts) == 7, 'Accounts or duplicate names were merged')
     check(app.current_fields(by_name['Jamie'], now)[0] == 'Unconfirmed', 'Heartbeat renewed stale online status')
@@ -146,10 +165,10 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     check(app.readable_seen(2, now) == 'Within last week', 'Coarse last-seen timestamp corrupted')
     check(app.readable_seen(1, now) == 'Within last month', 'Monthly last-seen sentinel corrupted')
     check('Yesterday' in app.readable_seen(now - 86_400_000, now), 'Yesterday formatting missing')
-    check(len(app.current_rows(contacts, 'alex', 'All')) == 2, 'Name search loses duplicate contacts')
-    check(len(app.current_rows(contacts, 'alex', 'Telegram')) == 1, 'Service filter leaks rows')
+    check(len(app.current_rows(people, 'alex', 'All')) == 2, 'Same-name people were silently joined')
+    check(len(app.current_rows(people, 'alex', 'Telegram')) == 1, 'Service filter leaks rows')
     for width in (1, 12, 26, 40, 80, 120):
-        for text, _, _ in app.current_lines(contacts, width, now):
+        for text, _, _ in app.current_lines(people, width, now):
             clipped = app.fit_screen(text, width)
             check(sum(max(0, app._libc.wcwidth(char)) for char in clipped) <= width, 'Row exceeds terminal width')
     check('\x1b' not in app.screen_text('Bad\x1b[31m'), 'Contact name can inject terminal controls')
@@ -178,20 +197,20 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
                       'Rendered frame crosses the terminal edge')
         check(any(attribute & curses.A_REVERSE for _, attribute in window.frames[0].values()),
               'Selection disappears without colour')
-    for width, height in [(26, 10), (40, 12), (80, 16), (120, 40), (20, 6)]:
+    for width, height in [(26, 10), (40, 12), (40, 13), (80, 16), (120, 40), (20, 6)]:
         window = Window(['G', 'r', 'q'], width, height)
         with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
             app.browse_current(window, args)
         check(any('q Quit' in value[0] for value in window.frames[-1].values()),
               'Small terminal cannot discover exit')
-        if height >= 12:
-            check('Recent' in window.frames[1][height - 6][0], 'Last-contact navigation lost selection')
+        if height >= (13 if width < 45 else 12):
+            check(people[-1]['name'].split()[0] in window.frames[1][height - 6][0], 'Last-contact navigation lost selection')
     for width in (26, 40, 63, 64, 71, 72, 93, 94, 95, 120):
         window = Window(['q'], width)
         with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
             app.browse_current(window, args)
         heading = window.frames[0][3][0]
-        check(('CONTACT' in heading) == (width >= 95), 'Column heading and row layout disagree at a width boundary')
+        check(('WHATSAPP' in heading) == (width >= 45), 'Column heading and row layout disagree at a width boundary')
     window = Window(['/', 'q', 'q', '\n', '\x1b', 'q'], 80)
     with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
         app.browse_current(window, args)
@@ -233,7 +252,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     with path.open('a') as stream:
         stream.write((json.dumps(dict(ts=now, u='100', on=1, seen=-1, hb=1)) + '\n') * 10000)
     started = time.monotonic()
-    check(len(app.current_contacts(args)) == 7, 'Latest-state memory grows with historical sample count')
+    check(len(app.current_people(args)) == 7, 'Latest-state memory grows with historical sample count')
     elapsed = time.monotonic() - started
     check(elapsed < 2, 'Small local-cache refresh exceeded 2 seconds')
     before = {str(path): hashlib.sha256(path.read_bytes()).digest() for path in root.rglob('*') if path.is_file()}
@@ -243,5 +262,123 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     after = {str(path): hashlib.sha256(path.read_bytes()).digest() for path in root.rglob('*') if path.is_file()}
     check(before == after, 'Current-status browsing modified source data')
 
-print('PASS: current-state freshness, names, service groups, timestamps, Unicode width, search/navigation, refresh/recovery, compact layout, plain/empty states and real terminal resize/quit; synthetic data only')
+    # Cross-service people retain each platform's latest state independently.
+    telegram = dict(by_name['Jamie'], phone='447700900123')
+    whatsapp = dict(by_name['Fresh'], phone='447700900123')
+    with patch.object(app, 'current_contacts', return_value=[telegram, whatsapp]):
+        combined = app.current_people(args)
+    check(len(combined) == 1 and len(combined[0]['members']) == 2, 'A matching phone did not produce one person')
+    check(app.service_contact(combined[0], 'Telegram')['record']['on'] == 1,
+          'Telegram observation was overwritten by WhatsApp')
+    check('Unconfirmed' in app.service_summary(combined[0], 'Telegram', now, 40)
+          and 'Online' in app.service_summary(combined[0], 'WhatsApp', now, 40),
+          'Service columns conflate stale and fresh online reports')
+    for width in (44, 64, 80, 120):
+        paired = app.current_lines(combined, width, now)
+        check(len(paired) == 1 and paired[0][0].count('│') == 2, 'Wide view is not one row with two service columns')
+    check('—' in app.service_summary(people[0], 'WhatsApp', now, 30), 'Missing service is shown as offline')
+    for value in ['+44••••123', '+44∙∙123', '12345678@lid', '1234', '++447700900123']:
+        check(not app.contact_phone(value), 'Masked or opaque identifier became a matching phone')
+    check(app.contact_phone('+44 (7700) 900-123') == '447700900123', 'Phone punctuation prevents matching')
+    check(app.contact_phone('00447700900123') == '447700900123', 'International prefix prevents matching')
+    same_names = [dict(telegram, phone='', name='Alex Smith'), dict(whatsapp, phone='', name='Alex Smith')]
+    link_args = argparse.Namespace(**dict(vars(args), appdir=str(root / 'link-preferences')))
+    with patch.object(app, 'current_contacts', return_value=same_names):
+        check(len(app.current_people(link_args)) == 2, 'An identical name silently merged two identities')
+        window = Window(['m', '\x1b', 'q'], 80)
+        with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+            app.browse_current(window, link_args)
+        link_path = Path(link_args.appdir) / 'presence-contact-links.json'
+        check(not link_path.exists(), 'Cancelling the link picker saved a link')
+        window = Window(['m', '\n', 'q'], 80)
+        with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+            app.browse_current(window, link_args)
+        linked = app.current_people(link_args)
+        check(len(linked) == 1 and linked[0]['manual'], 'Confirmed picker selection was not saved')
+        check(link_path.stat().st_mode & 0o777 == 0o600, 'Manual identity preferences are not private')
+        check(any('Contacts linked locally' in frame.get(21, ('', 0))[0] for frame in window.frames), 'Link completion feedback missing')
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            app.print_current(link_args)
+        check(output.getvalue().count('Alex Smith') == 1, 'Plain output repeats a confirmed person')
+        previous = link_path.read_bytes()
+        try:
+            app.save_contact_link(link_args, pair=(('Telegram_fixture', '\x00bad'), whatsapp['key']))
+            check(False, 'Malformed identity was saved')
+        except ValueError:
+            pass
+        check(link_path.read_bytes() == previous, 'Invalid identity changed saved links')
+        with patch.object(app.os, 'replace', side_effect=OSError('synthetic write failure')):
+            try:
+                app.save_contact_link(link_args, remove=linked[0]['key'])
+                check(False, 'Failed preference write returned success')
+            except OSError:
+                pass
+        check(link_path.read_bytes() == previous, 'Failed link save lost existing preferences')
+        check(not list(Path(link_args.appdir).glob('.presence-contact-links-*')), 'Failed save left temporary copies')
+        window = Window(['u', 'q'], 80)
+        with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+            app.browse_current(window, link_args)
+        check(len(app.current_people(link_args)) == 2 and app.read_contact_links(link_args) == [],
+              'Unlink did not restore separate rows')
+    pair_one = (telegram['key'], whatsapp['key'])
+    pair_two = (('Telegram_fixture', 'another'), ('WhatsAppMd_fixture', 'second@lid'))
+    code = ('import runpy,sys,types,json; '
+            'm=runpy.run_path(sys.argv[1]); '
+            'm["save_contact_link"](types.SimpleNamespace(appdir=sys.argv[2]), '
+            'pair=tuple(tuple(x) for x in json.loads(sys.argv[3])))')
+    writers = [subprocess.Popen([sys.executable, '-c', code, str(SCRIPT), link_args.appdir, json.dumps(pair)])
+               for pair in (pair_one, pair_two)]
+    check(all(writer.wait(timeout=5) == 0 for writer in writers), 'Concurrent preference writer failed')
+    check(len(app.read_contact_links(link_args)) == 2, 'Concurrent writers lost a link')
+    broken = argparse.Namespace(**dict(vars(link_args), appdir=str(root / 'bad-links')))
+    Path(broken.appdir).mkdir(mode=0o700)
+    damaged = Path(broken.appdir) / 'presence-contact-links.json'
+    damaged.write_text('invalid-json')
+    damaged.chmod(0o600)
+    with patch.object(app, 'current_contacts', return_value=[telegram, whatsapp]), contextlib.redirect_stderr(io.StringIO()):
+        check(len(app.current_people(broken)) == 1, 'Broken manual links prevent automatic matching')
+    try:
+        app.save_contact_link(broken, pair=pair_one)
+        check(False, 'Malformed preferences were silently overwritten')
+    except ValueError:
+        pass
+    check(damaged.read_text() == 'invalid-json', 'Malformed preference recovery destroyed the file')
+    phone_root = root / 'phone-cache'
+    phone_presence = phone_root / 'presence'
+    phone_presence.mkdir(parents=True)
+    fixtures = [
+        ('Telegram_phone', '313030', 'Alex Doe', '+44 (7700) 900-123', 0),
+        ('WhatsAppMd_phone', '987654321@lid', 'A.D.', '447700900123', 0),
+        ('WhatsAppMd_second', '447700900123@s.whatsapp.net', '', '', 1),
+    ]
+    for profile, uid, name, phone, online in fixtures:
+        folder = phone_root / 'history' / profile
+        folder.mkdir(parents=True)
+        with sqlite3.connect(folder / 'db.sqlite') as connection:
+            connection.execute('CREATE TABLE contacts2 (id TEXT, name TEXT, phone TEXT)')
+            connection.execute('INSERT INTO contacts2 VALUES (?, ?, ?)', (uid, name, phone))
+        record = dict(ts=now - (1000 if online else 30_000), u=uid, on=online, seen=now - 60_000)
+        (phone_presence / ('history.' + profile.encode().hex() + '.jsonl')).write_text(json.dumps(record) + '\n')
+    phone_args = argparse.Namespace(**dict(vars(args), appdir=str(phone_root), dir=str(phone_presence)))
+    phone_people = app.current_people(phone_args)
+    check(len(phone_people) == 1 and len(phone_people[0]['members']) == 3,
+          'Real cache phone lookup did not join Telegram, WhatsApp LID and phone identities')
+    check(phone_people[0]['name'] == 'Alex Doe', 'A numeric fallback replaced a known full name')
+    check(app.service_contact(phone_people[0], 'WhatsApp')['record']['on'] == 1,
+          'Multiple account records discarded the newest service report')
+    check(len(app.current_rows(phone_people, 'a.d.', 'All')) == 1, 'Search lost an alias on the second service')
+    with contextlib.redirect_stdout(io.StringIO()) as output:
+        app.print_current(phone_args)
+    check(output.getvalue().count('Alex Doe') == 1, 'Normal plain entry repeats a matched person')
+    with patch.object(app, 'current_contacts', return_value=[
+        dict(contacts[0], key=('Telegram_pages', str(index)), identifier=str(index),
+             name='Person%02d' % index, phone='') for index in range(30)]):
+        for width, expected in [(80, 'Person14'), (40, 'Person04')]:
+            window = Window([curses.KEY_NPAGE, 'q'], width)
+            with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+                app.browse_current(window, args)
+            check(expected in window.frames[1][18][0], 'Paging uses physical lines instead of people')
+    terminal_check(args, 80, linking=True)
+
+print('PASS: paired service columns, phone matching, manual link/cancel/unlink, private atomic/concurrent preferences, freshness, names, navigation, resize and legacy current-view checks; synthetic data only')
 print('Synthetic 10,000-record refresh: %.3fs; source files unchanged' % elapsed)

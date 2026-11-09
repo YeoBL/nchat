@@ -537,6 +537,12 @@ runtime state.
 ## Feature inventory and access
 
 The `nchat-presence` helper now opens a current-status browser by default.
+It combines matching people into one row with separate Telegram/WhatsApp columns,
+using complete cached phone numbers or the same service identity across accounts.
+For missing metadata, m opens a counterpart picker and Enter confirms a local
+link. u removes manual links. Private display preferences live in
+`<config>/presence-contact-links.json`, with atomic writes and a separate lock.
+Same-name contacts require explicit confirmation. Search includes linked aliases.
 Its source is `utils/nchat-presence` and its installed entry point is
 `/Users/bingl/.local/bin/nchat-presence`. Use `current --plain` for grouped text.
 Tab changes service, / searches names/IDs, r reloads the cache and q quits.
