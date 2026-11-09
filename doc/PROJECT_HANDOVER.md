@@ -420,7 +420,17 @@ Screen hardcopy and Screen copy mode retain placeholders. Kitty's actual text
 grid and selection contain the rendered Unicode. The native grid/Screen replay
 tests use synthetic data and never send service messages or read requests.
 
-Activation status and final checks are recorded in `changes.md`.
+The complete build and the notification/rendering, helper-installation,
+tools-dialog UX and UI integration suites passed. Dialog/integration tests also
+passed with full rendering explicitly enabled. Dense replay includes 180 joined
+emoji and multiple bounded paint calls. On 9 November the core was restarted in
+Screen `15976.nchat`, window `0`, shell `15977`, terminal `ttys002`, PID `44174`.
+It returned Online. The Screen session was detached. Kitty helpers and the narrow
+authorization setting are installed with a private configuration backup. The
+user attempted the reload shortcut and was given Ctrl+Cmd+, as the macOS
+alternative. Actual helper acceptance and live appearance await reattachment
+and user confirmation. Do not treat the native parser checks as visual proof
+of the user's running Kitty window.
 
 ### Joined emoji rendering follow-up
 
