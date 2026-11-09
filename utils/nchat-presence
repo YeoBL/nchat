@@ -176,9 +176,12 @@ def parse_when(text):
             parsed = None
     if parsed is None:
         sys.exit("cannot parse time %r (use YYYY-MM-DD or YYYY-MM-DD HH:MM)" % text)
-    if parsed.tzinfo is None:
-        parsed = parsed.astimezone()
-    return int(parsed.timestamp() * 1000)
+    try:
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return int(parsed.timestamp() * 1000)
+    except (OverflowError, OSError, ValueError):
+        sys.exit("cannot parse time %r (use YYYY-MM-DD or YYYY-MM-DD HH:MM)" % text)
 
 
 def valid_record(record):
@@ -357,7 +360,7 @@ def aggregate(directory, profile_filter, since, until, pattern, contacts, args):
         s = stats.get(key)
         if s is None:
             s = stats[key] = {"count": 0, "online": 0, "heartbeats": 0,
-                              "last_ts": 0, "first_obs_ts": 0, "last_obs_ts": 0,
+                              "last_ts": 0, "first_obs_ts": 0,
                               "last_state": None, "hidden_order": 0, "obs_order": 0,
                               "order": 0, "hidden_ts": 0}
         s["order"] += 1
@@ -379,8 +382,6 @@ def aggregate(directory, profile_filter, since, until, pattern, contacts, args):
                 s["obs_order"] = order
                 if s["first_obs_ts"] == 0:
                     s["first_obs_ts"] = record["ts"]
-                if record["ts"] > s["last_obs_ts"]:
-                    s["last_obs_ts"] = record["ts"]
         if record["ts"] > s["last_ts"]:
             s["last_ts"] = record["ts"]
     return stats
@@ -407,7 +408,7 @@ def name_id_cell(name, id_text, width):
     if name:
         suffix = " <%s>" % id_text
         if len(suffix) >= width:
-            return suffix[: width - 1].ljust(width) + "…" if width > 1 else suffix[:width].ljust(width)
+            return (suffix[: width - 1] + "…").ljust(width) if width > 1 else suffix[:width].ljust(width)
         available = width - len(suffix)
         head = name[:available]
         if len(name) > available:
@@ -470,13 +471,15 @@ def cmd_show(args):
         if not pattern_matches(profile, record["u"], args.pattern, contacts, args,
                                resolution_cache):
             continue
-        matched_profiles.add(profile)
         if record.get("mark") == "hidden":
             pass
         elif args.online_only and not record.get("on"):
             continue
         elif args.no_heartbeats and record.get("hb"):
             continue
+        # Only rows that will actually be printed count toward the
+        # multi-profile attribution prefix.
+        matched_profiles.add(profile)
         item = (record["ts"], seq, profile, record)
         seq += 1
         if args.n < sys.maxsize:
@@ -558,7 +561,7 @@ def self_test():
             fh.write('{"ts":1700001800000,"u":"3631323334","mark":"hidden"}\n')
             fh.write('{"ts":1700002100000,"u":"3631323334","on":0,"seen":1699990000000,"recent":0}\n')
             fh.write('{"ts":1700002400000}\n')  # schema-violating line
-            fh.write('{"ts":1700002700000,"u":"3631323334","on":0,"seen":-1,')  # torn
+            fh.write('{"ts":1700002700000,"u":"3631323334","on":0,"seen":-1,\n')  # torn
             fh.write('{"ts":1700003000000,"u":"3631323334","on":0,"seen":"oops","recent":0}\n')  # bad seen
         whatsapp_path = os.path.join(presence_dir,
                                      "history." + whatsapp_profile.encode().hex() + ".jsonl")
