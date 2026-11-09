@@ -220,30 +220,67 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     alex_person = {'name': 'Alex',
                    'key': (alex_tg['key'], alex_wa['key']),
                    'members': [alex_tg, alex_wa], 'manual': False}
-    history = app.person_history(alex_person, args)
-    check(len(history) == 2 and {entry['service'] for entry in history}
-          == {'Telegram', 'WhatsApp'}, 'Person history does not merge both services')
-    check(history[0]['ts'] <= history[-1]['ts'], 'Person history is not chronological')
-    jamie_person = next(person for person in people if person['name'] == 'Jamie')
-    jamie_history = app.person_history(jamie_person, args)
-    check(len(jamie_history) == 2 and jamie_history[-1]['record'].get('hb'),
-          'Heartbeat missing from person history')
-    check('[TG]' in app.history_line(jamie_history[-1])
-          and '~' in app.history_line(jamie_history[-1]), 'History line does not mark heartbeats')
-    window = Window([curses.KEY_DOWN, 'G', '/', 'o', 'n', '\n', 'q'], 80, 24)
-    with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+    # Online intervals: exact end, unknown end, hidden end, open run, rollback.
+    t0 = now - 3_600_000
+    sequence = [
+        dict(ts=t0, u='x', on=1, seen=-1, recent=0),
+        dict(ts=t0 + 900_000, u='x', on=0, seen=t0 + 840_000, recent=0),
+        dict(ts=t0 + 1_800_000, u='x', on=1, seen=-1, recent=0),
+        dict(ts=t0 + 1_900_000, u='x', on=0, seen=-1, recent=0),
+        dict(ts=t0 + 2_700_000, u='x', on=1, seen=-1, recent=0),
+        dict(ts=t0 + 2_800_000, u='x', mark='hidden'),
+        dict(ts=t0 + 3_600_000, u='x', on=1, seen=-1, recent=0),
+        dict(ts=t0 + 3_600_000, u='x', on=1, seen=-1, recent=0, hb=1),
+    ]
+    intervals = app.online_intervals(sequence)
+    check(len(intervals) == 4, 'Interval derivation misses or invents sessions')
+    check(intervals[0]['end_kind'] == 'exact' and intervals[0]['end_ts'] == t0 + 840_000,
+          'Exact seen timestamp not used as the interval end')
+    check(intervals[1]['end_kind'] == 'unknown' and intervals[1]['closed_at'] == t0 + 1_900_000,
+          'Offline without seen does not close with unknown end')
+    check(intervals[2]['end_kind'] == 'hidden', 'Hidden marker does not close the run')
+    check(intervals[3]['end_kind'] == 'open', 'Trailing online run is not marked open')
+    check(app.duration_text(t0, t0 + 900_000) == '~15m', 'Duration is not an estimate of the interval')
+    check(app.duration_text(t0, None) == '?', 'Unknown end must not invent a duration')
+    rolled = app.online_intervals([
+        dict(ts=t0 + 4_000_000, u='x', on=1, seen=-1, recent=0),
+        dict(ts=t0 - 10, u='x', on=1, seen=-1, recent=0),
+    ])
+    check(len(rolled) == 2 and rolled[0]['end_kind'] == 'unknown',
+          'Backward timestamp jump must break the run')
+    # Merged view: newest first across services; header carries both states.
+    alex_intervals = app.person_intervals(alex_person, args)
+    check(alex_intervals == sorted(alex_intervals, key=lambda item: item['start_ts'], reverse=True),
+          'Merged intervals are not newest first')
+    check('Alex' in app.history_header(alex_person, now, 80)
+          and ('TG' in app.history_header(alex_person, now, 80)
+               or 'WA' in app.history_header(alex_person, now, 80)),
+          'History header misses the name or a service state')
+    for width in (40, 60, 80, 120):
+        line = app.interval_line(dict(start_ts=t0, end_ts=t0 + 900_000,
+                                      end_kind='exact', service='WhatsApp'), width, now)
+        check(sum(max(0, app._libc.wcwidth(char)) for char in line) <= width,
+              'Interval row exceeds terminal width')
+        check('~15m' in line and ('→' in line or '│' in line), 'Interval row lost its range or duration')
+    window = Window(['j', 'G', 'r', 'q'], 80, 24)
+    synthetic = [
+        dict(start_ts=t0, end_ts=t0 + 900_000, end_kind='exact', service='WhatsApp'),
+        dict(start_ts=t0 - 7_200_000, end_ts=None, end_kind='open', service='Telegram'),
+    ]
+    with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False), \
+         patch.object(app, 'person_intervals', return_value=synthetic):
         app.browse_person(window, args, alex_person)
     frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
-    check('History' in frames[0], 'Person history view missing its header')
-    check(any('[TG]' in frame and '[WA]' in frame for frame in frames), 'Person history misses a service')
-    check(any('/on_' in frame for frame in frames), 'History search does not update as typed')
-    check('q/Esc Back' in frames[-1], 'History back help is missing')
+    check('Online periods' in frames[0], 'Person table missing its heading')
+    check(any('START' in frame and 'LENGTH' in frame for frame in frames), 'Wide table lacks column headings')
+    check(any('~15m' in frame and 'open?' in frame for frame in frames), 'Interval rows missing')
+    check('~ = estimate' in frames[-1] and 'q/Esc Back' in frames[-1], 'Table footer hints missing')
     window = Window(['\n', 'q', 'q'], 80, 24)
     with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
         app.browse_current(window, args)
     frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
-    check(any('History' in frame for frame in frames), 'Enter does not open the history view')
-    check('Latest status' in frames[-1], 'Back from history does not restore the list')
+    check(any('Online periods' in frame for frame in frames), 'Enter does not open the online table')
+    check('Latest status' in frames[-1], 'Back from the table does not restore the list')
     for colour_setup in ('disabled', 'unsupported'):
         window = Window(['q'], 80)
         environment = {'NO_COLOR': '1'} if colour_setup == 'disabled' else {}
