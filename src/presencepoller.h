@@ -504,6 +504,7 @@ inline void PresencePoller::RecordStatus(int64_t p_SteadyMs, int64_t p_WallMs,
   }
 
   const bool hasData = p_IsOnline || (p_TimeSeen >= 0) || p_Recently;
+  bool recovered = false;
   if (hasData)
   {
     if (st.dataMs != p_WallMs)
@@ -514,14 +515,17 @@ inline void PresencePoller::RecordStatus(int64_t p_SteadyMs, int64_t p_WallMs,
     if (st.hidden)
     {
       // Observable data after a hidden mark: the peer's status is visible
-      // again, so it returns to the poll set.
+      // again, so it returns to the poll set. The recovery observation must
+      // be written even when it is identical to the last pre-hidden sample,
+      // so consumers of the history can see the mark being retired.
       st.hidden = false;
       m_StateDirty = true;
+      recovered = true;
     }
   }
 
   LastSample& last = m_LastSamples[p_ProfileId][p_UserId];
-  if (last.tsMs != 0 &&
+  if (!recovered && last.tsMs != 0 &&
       last.online == p_IsOnline &&
       last.timeSeen == p_TimeSeen &&
       last.recently == p_Recently)

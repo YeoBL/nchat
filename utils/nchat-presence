@@ -20,6 +20,7 @@ import argparse
 import collections
 import contextlib
 import datetime
+import fnmatch
 import glob
 import io
 import json
@@ -32,18 +33,23 @@ from pathlib import Path
 
 PROGRAM = "nchat-presence"
 
+# Bidi control characters and other unsafe-for-terminal code points.
+_UNSAFE_RANGES = ((0x00, 0x1F), (0x7F, 0x9F), (0xD800, 0xDFFF),
+                  (0x202A, 0x202E), (0x2066, 0x2069), (0x200E, 0x200F))
+
 
 def default_appdir():
-    """Mirror nchat's application-directory resolution (fileutil.cpp)."""
+    """Mirror nchat's application-directory resolution (fileutil.cpp),
+    plus the helper-specific NCHAT_CONFIG_DIR override."""
     env = os.environ.get("NCHAT_CONFIG_DIR")
     if env:
         return env
-    home = os.environ.get("HOME", ".")
-    legacy = os.path.join(home, ".nchat")
-    if os.path.isdir(legacy):
+    home = os.environ.get("HOME", "")
+    legacy = os.path.join(home, ".nchat") if home else ""
+    if legacy and os.path.isdir(legacy):
         return legacy
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    config_home = xdg if xdg else os.path.join(home, ".config")
+    config_home = xdg if xdg else (os.path.join(home, ".config") if home else ".config")
     return os.path.join(config_home, "nchat")
 
 
@@ -51,46 +57,56 @@ def default_dir():
     return os.path.join(default_appdir(), "presence")
 
 
-def warn(message):
-    print("%s: warning: %s" % (PROGRAM, message), file=sys.stderr)
-
-
 def clean(text):
-    """Render a string safely for a terminal (no control characters)."""
+    """Render a string safely for a terminal: escape control, bidi and
+    surrogate characters."""
     out = []
     for ch in text:
         code = ord(ch)
-        if code < 32 or code == 127:
-            out.append("\\x%02x" % code)
+        if any(lo <= code <= hi for lo, hi in _UNSAFE_RANGES):
+            out.append("\\u%04x" % code)
         else:
             out.append(ch)
     return "".join(out)
 
 
+def warn(message):
+    print("%s: warning: %s" % (PROGRAM, clean(message)), file=sys.stderr)
+
+
 def load_contacts(appdir, profile):
-    """Read the local nchat cache's contact names (id -> (name, phone))."""
-    contacts = {}
+    """Read the local nchat cache's contacts.
+
+    Returns {"by_id": {id: (name, phone)},
+             "by_phone": {digits: [(name, contact_id), ...]}}
+    where masked phones (containing the bullet character) are never indexed.
+    """
+    by_id = {}
+    by_phone = collections.defaultdict(list)
     if "/" in profile or profile in (".", ".."):
-        return contacts  # never join a hostile path component
+        return {"by_id": by_id, "by_phone": by_phone}
     db_path = os.path.join(appdir, "history", profile, "db.sqlite")
     if not os.path.isfile(db_path):
-        return contacts
+        return {"by_id": by_id, "by_phone": by_phone}
     uri = Path(os.path.abspath(db_path)).as_uri() + "?mode=ro"
     try:
         con = sqlite3.connect(uri, uri=True)
         try:
             rows = con.execute("SELECT id, name, phone FROM contacts2")
             for contact_id, name, phone in rows:
-                contacts[contact_id] = (name or "", phone or "")
+                name = name or ""
+                phone = phone or ""
+                by_id[contact_id] = (name, phone)
+                if phone and "•" not in phone:
+                    by_phone[digits_of(phone)].append((name or phone, contact_id))
         finally:
             con.close()
     except sqlite3.Error:
         pass  # locked or unreadable cache: fall back to raw ids
-    return contacts
+    return {"by_id": by_id, "by_phone": by_phone}
 
 
 def load_all_contacts(appdir, directory):
-    """Contact names per profile, keyed by profile id."""
     result = {}
     if not appdir:
         return result
@@ -135,8 +151,12 @@ def status_text(record):
     return "offline, seen " + seen_text(record.get("seen", -1))
 
 
+def observable(record):
+    """The producer's observable-data predicate: clears hidden state."""
+    return bool(record.get("on")) or record.get("seen", -1) >= 0 or bool(record.get("recent"))
+
+
 def parse_when(text):
-    """Parse an ISO-ish time into epoch milliseconds."""
     if not text:
         return None
     value = text.strip()
@@ -156,10 +176,50 @@ def parse_when(text):
     return int(parsed.timestamp() * 1000)
 
 
-def iter_records(directory, profile_filter=None, since=None, until=None):
+def valid_record(record):
+    """Full schema validation: anything else is skipped with a warning."""
+    if not isinstance(record, dict):
+        return False
+    ts = record.get("ts")
+    uid = record.get("u")
+    if not isinstance(ts, int) or isinstance(ts, bool) or ts <= 0:
+        return False
+    if not isinstance(uid, str) or not uid:
+        return False
+    if record.get("mark") == "hidden":
+        return True
+    if record.get("mark") is not None:
+        return False  # unknown marker kinds are rejected
+    on = record.get("on")
+    if not isinstance(on, int) or isinstance(on, bool) or on not in (0, 1):
+        return False
+    seen = record.get("seen", -1)
+    if not isinstance(seen, int) or isinstance(seen, bool):
+        return False
+    recent = record.get("recent", 0)
+    if not isinstance(recent, int) or isinstance(recent, bool) or recent not in (0, 1):
+        return False
+    hb = record.get("hb", 0)
+    if not isinstance(hb, int) or isinstance(hb, bool) or hb not in (0, 1):
+        return False
+    return True
+
+
+def list_history_files(directory):
+    """List history files, surfacing enumeration failures as warnings."""
     if not os.path.isdir(directory):
         sys.exit("no presence directory at %s" % directory)
-    for path in sorted(glob.glob(os.path.join(directory, "history.*.jsonl"))):
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        warn("cannot list %s: %s" % (directory, exc))
+        return []
+    return [os.path.join(directory, name) for name in names
+            if name.startswith("history.") and name.endswith(".jsonl")]
+
+
+def iter_records(directory, profile_filter=None, since=None, until=None):
+    for path in list_history_files(directory):
         profile = decode_profile(os.path.basename(path))
         if profile_filter and profile_filter not in profile:
             continue
@@ -168,7 +228,7 @@ def iter_records(directory, profile_filter=None, since=None, until=None):
         except OSError as exc:
             warn("cannot read %s: %s" % (path, exc))
             continue
-        with fh:
+        try:
             for line_number, raw in enumerate(fh, 1):
                 try:
                     line = raw.decode("utf-8").strip()
@@ -179,25 +239,21 @@ def iter_records(directory, profile_filter=None, since=None, until=None):
                     continue
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValueError):
                     continue  # torn tail being repaired by the poller
-                if not isinstance(record, dict):
+                if not valid_record(record):
                     warn("skipping malformed record in %s:%d" % (path, line_number))
                     continue
-                if not isinstance(record.get("ts"), int) or not isinstance(record.get("u"), str):
-                    warn("skipping malformed record in %s:%d" % (path, line_number))
-                    continue
-                if record.get("mark") == "hidden":
-                    yield profile, record
-                    continue
-                if not isinstance(record.get("on"), int) or record.get("on") not in (0, 1):
-                    warn("skipping malformed record in %s:%d" % (path, line_number))
-                    continue
+                # Date bounds apply to every record kind, markers included.
                 if since is not None and record["ts"] < since:
                     continue
                 if until is not None and record["ts"] > until:
                     continue
                 yield profile, record
+        except OSError as exc:
+            warn("error while reading %s: %s" % (path, exc))
+        finally:
+            fh.close()
 
 
 def normalize_uid(profile, uid):
@@ -211,10 +267,12 @@ def normalize_uid(profile, uid):
 
 
 def short_id(uid):
-    for suffix in ("@s.whatsapp.net", "@lid", "@newsletter", "@broadcast"):
-        if uid.endswith(suffix):
-            return uid[: -len(suffix)]
-    return uid
+    """Unambiguous short form: phone JIDs lose their suffix, LIDs keep it."""
+    if uid.endswith("@s.whatsapp.net"):
+        return uid[: -len("@s.whatsapp.net")]
+    if uid.endswith("@newsletter") or uid.endswith("@broadcast"):
+        return uid[: -len("@newsletter")]
+    return uid  # LIDs and other ids stay fully qualified
 
 
 def digits_of(value):
@@ -222,50 +280,55 @@ def digits_of(value):
 
 
 def resolve_name(profile, uid, contacts):
-    if profile.startswith("Telegram"):
-        entry = contacts.get(uid)
-        if entry:
-            name, phone = entry
-            return name or phone
-        return None
-    # WhatsApp: exact JID first; for phone JIDs, use the cached phone column
-    # (a LID entry is only trusted through its explicit phone association).
-    entry = contacts.get(uid)
+    entry = contacts.get("by_id", {}).get(uid)
     if entry:
         name, phone = entry
-        if name or phone:
-            return name or phone
-    phone_digits = digits_of(uid)
-    if phone_digits:
-        matches = []
-        for contact_id, (name, phone) in contacts.items():
-            if (name or phone) and digits_of(phone) == phone_digits:
-                matches.append(name or phone)
+        if name:
+            return name, phone
+    if profile.startswith("Telegram"):
+        return (entry[0] or entry[1], entry[1]) if entry else (None, "")
+    # Phone fallback: only genuine phone JIDs, and only through complete,
+    # unmasked cached phone values (never LID digits).
+    if uid.endswith("@s.whatsapp.net"):
+        phone_digits = digits_of(uid)
+        matches = [name for name, _ in contacts.get("by_phone", {}).get(phone_digits, [])]
         if len(matches) == 1:
-            return matches[0]
-    return None
+            return matches[0], phone_digits
+    return None, ""
+
+
+def identity_parts(profile, uid, contacts_by_profile, args):
+    """Return (name-or-empty, unambiguous id text)."""
+    id_text = normalize_uid(profile, uid) if profile.startswith("Telegram") else short_id(uid)
+    name = ""
+    if not args.no_names:
+        name, _ = resolve_name(profile, uid, contacts_by_profile.get(profile, {}))
+    return (name or ""), id_text
 
 
 def display_id(profile, uid, contacts_by_profile, args):
-    """Show the display name when the local cache has one, else the id."""
-    id_text = normalize_uid(profile, uid) if profile.startswith("Telegram") else short_id(uid)
-    if not args.no_names:
-        name = resolve_name(profile, uid, contacts_by_profile.get(profile, {}))
-        if name:
-            return clean("%s <%s>" % (name, id_text))
+    name, id_text = identity_parts(profile, uid, contacts_by_profile, args)
+    if name:
+        return clean("%s <%s>" % (name, id_text))
     return clean(id_text)
 
 
-def pattern_matches(profile, uid, pattern, contacts_by_profile, args):
+def pattern_matches(profile, uid, pattern, contacts_by_profile, args, resolution_cache):
     pattern = pattern.casefold()
     if pattern in uid.casefold() or pattern in normalize_uid(profile, uid).casefold():
         return True
     if pattern in short_id(uid).casefold():
         return True
-    if not args.no_names:
-        name = resolve_name(profile, uid, contacts_by_profile.get(profile, {}))
-        if name and pattern in name.casefold():
-            return True
+    if args.no_names:
+        return False
+    name, phone = resolution_cache.get((profile, uid), (None, None))
+    if name is None and (profile, uid) not in resolution_cache:
+        name, phone = resolve_name(profile, uid, contacts_by_profile.get(profile, {}))
+        resolution_cache[(profile, uid)] = (name, phone)
+    if name and pattern in name.casefold():
+        return True
+    if phone and pattern in phone.casefold():
+        return True
     return False
 
 
@@ -273,9 +336,11 @@ def aggregate(directory, profile_filter, since, until, pattern, contacts, args):
     """One pass over the history: per-contact aggregates with recovery-aware
     hidden state, heartbeat-separated counters and marker timestamps."""
     stats = {}
+    resolution_cache = {}
     for profile, record in iter_records(directory, profile_filter, since, until):
         uid = record["u"]
-        if pattern and not pattern_matches(profile, uid, pattern, contacts, args):
+        if pattern and not pattern_matches(profile, uid, pattern, contacts, args,
+                                           resolution_cache):
             continue
         key = (profile, uid)
         s = stats.get(key)
@@ -285,31 +350,56 @@ def aggregate(directory, profile_filter, since, until, pattern, contacts, args):
                               "last_state": None, "last_seen": None, "hidden_ts": 0}
         if record.get("mark") == "hidden":
             s["hidden_ts"] = max(s["hidden_ts"], record["ts"])
-            continue
-        if record.get("hb"):
-            s["heartbeats"] += 1
         else:
-            s["count"] += 1
-            if record.get("on"):
-                s["online"] += 1
-            if s["first_obs_ts"] == 0:
-                s["first_obs_ts"] = record["ts"]
-            # The last genuine observation defines the state; heartbeats
-            # only copy it and must not advance it.
-            if record["ts"] >= s["last_obs_ts"]:
-                s["last_obs_ts"] = record["ts"]
-                s["last_state"] = status_text(record)
-                s["last_seen"] = record.get("seen", -1)
+            if record.get("hb"):
+                s["heartbeats"] += 1
+            else:
+                s["count"] += 1
+                if record.get("on"):
+                    s["online"] += 1
+                if observable(record):
+                    if s["first_obs_ts"] == 0:
+                        s["first_obs_ts"] = record["ts"]
+                    # Only observable data defines the state; plain
+                    # no-data samples neither advance it nor clear hidden.
+                    if record["ts"] >= s["last_obs_ts"]:
+                        s["last_obs_ts"] = record["ts"]
+                        s["last_state"] = status_text(record)
+                        s["last_seen"] = record.get("seen", -1)
         if record["ts"] > s["last_ts"]:
             s["last_ts"] = record["ts"]
     return stats
 
 
 def skipped_state(s):
-    """Hidden, unless a genuine observation arrived after the marker."""
+    """Hidden, unless observable data arrived after the marker."""
     if s["hidden_ts"] == 0:
         return False
     return s["last_obs_ts"] < s["hidden_ts"]
+
+
+def cell(text, width):
+    """Truncate a raw display string (before terminal escaping), preserving
+    the '<id>' suffix when present."""
+    if len(text) <= width:
+        return text.ljust(width)
+    marker = "<"
+    cut = text.find(marker)
+    if cut > 0:
+        tail = text[cut:]
+        head = text[:cut]
+        available = width - len(tail) - 1
+        if available > 0:
+            return (head[:available] + "…" + tail).ljust(width)
+    return (text[: width - 1] + "…").ljust(width)
+
+
+def raw_display_id(profile, uid, contacts_by_profile, args):
+    """Unescaped display form, for width computation before cleaning."""
+    name, id_text = identity_parts(profile, uid, contacts_by_profile, args)
+    if name:
+        return "%s <%s>" % (name, id_text)
+    return id_text
 
 
 def cmd_list(args):
@@ -318,6 +408,8 @@ def cmd_list(args):
     contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
     stats = aggregate(args.dir, args.profile, since, until, args.pattern, contacts, args)
     if not stats:
+        if args.pattern:
+            sys.exit("no records match %r" % args.pattern)
         print("no presence history found")
         return
     rows = []
@@ -328,15 +420,14 @@ def cmd_list(args):
             state = s["last_state"]
         else:
             state = "unknown"
-        rows.append((clean(profile), display_id(profile, uid, contacts, args),
+        rows.append((clean(profile), raw_display_id(profile, uid, contacts, args),
                      fmt(s["last_ts"]), state, s["count"], s["online"], s["heartbeats"]))
     profile_width = min(max((len(r[0]) for r in rows), default=12) + 2, 28)
     name_width = min(max((len(r[1]) for r in rows), default=12) + 2, 44)
     for profile, who, last, state, count, online, heartbeats in rows:
-        profile_cell = profile[:profile_width - 2].ljust(profile_width)
-        name_cell = who[:name_width - 2].ljust(name_width)
         print("%s%s%s  %s  (%d samples, %d online, %d heartbeats)"
-              % (profile_cell, name_cell, last, state, count, online, heartbeats))
+              % (cell(profile, profile_width), clean(cell(who, name_width)), last,
+                 state, count, online, heartbeats))
 
 
 def cmd_show(args):
@@ -344,10 +435,9 @@ def cmd_show(args):
     until = parse_when(args.until)
     contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
 
-    # Attribute records when the pattern matches more than one profile.
     matched_profiles = set()
     for profile, record in iter_records(args.dir, args.profile, since, until):
-        if pattern_matches(profile, record["u"], args.pattern, contacts, args):
+        if pattern_matches(profile, record["u"], args.pattern, contacts, args, {}):
             matched_profiles.add(profile)
     multi_profile = len(matched_profiles) > 1
 
@@ -355,7 +445,7 @@ def cmd_show(args):
     # memory); markers count toward the budget.
     keep = collections.deque(maxlen=args.n) if args.n < sys.maxsize else collections.deque()
     for profile, record in iter_records(args.dir, args.profile, since, until):
-        if not pattern_matches(profile, record["u"], args.pattern, contacts, args):
+        if not pattern_matches(profile, record["u"], args.pattern, contacts, args, {}):
             continue
         if record.get("mark") == "hidden":
             keep.append((profile, record))
@@ -406,7 +496,7 @@ def cmd_summary(args):
 
 def check(condition, message):
     if not condition:
-        sys.exit("self-test FAILED: %s" % message)
+        raise RuntimeError("self-test FAILED: %s" % message)
 
 
 def self_test():
@@ -427,11 +517,13 @@ def self_test():
             fh.write('{"ts":1700001800000,"u":"3631323334","mark":"hidden"}\n')
             fh.write('{"ts":1700002100000,"u":"3631323334","on":0,"seen":1699990000000,"recent":0}\n')
             fh.write('{"ts":1700002400000}\n')  # schema-violating line
-            fh.write('{"ts":1700002700000,"u":"3631323334","on":0,"seen":-1}\n')  # torn
+            fh.write('{"ts":1700002700000,"u":"3631323334","on":0,"seen":-1,')  # torn
+            fh.write('{"ts":1700003000000,"u":"3631323334","on":0,"seen":"oops","recent":0}\n')  # bad seen
         whatsapp_path = os.path.join(presence_dir,
                                      "history." + whatsapp_profile.encode().hex() + ".jsonl")
         with open(whatsapp_path, "w", encoding="utf-8") as fh:
             fh.write('{"ts":1700000000000,"u":"999888777666@s.whatsapp.net","on":1,"seen":-1,"recent":0}\n')
+            fh.write('{"ts":1700000100000,"u":"111222333444@lid","on":0,"seen":-1,"recent":0}\n')
         history_dir = os.path.join(appdir, "history", profile)
         os.makedirs(history_dir)
         con = sqlite3.connect(os.path.join(history_dir, "db.sqlite"))
@@ -445,8 +537,9 @@ def self_test():
         con = sqlite3.connect(os.path.join(wa_dir, "db.sqlite"))
         con.execute("CREATE TABLE contacts2 (id TEXT, name TEXT, phone TEXT, "
                     "isSelf INT, isAlias INT, UNIQUE(id) ON CONFLICT REPLACE)")
-        con.execute("INSERT INTO contacts2 VALUES ('111222333444@lid', 'Lid Name', '999888777666', 0, 1)")
-        con.execute("INSERT INTO contacts2 VALUES ('555666777888@lid', 'Wrong Name', '123456', 0, 1)")
+        con.execute("INSERT INTO contacts2 VALUES ('555111222333@lid', 'Lid Name', '999888777666', 0, 1)")
+        con.execute("INSERT INTO contacts2 VALUES ('555444555666@lid', 'Wrong Name', '123456', 0, 1)")
+        con.execute("INSERT INTO contacts2 VALUES ('555777888999@lid', 'Masked Name', '+65••••••81', 0, 1)")
         con.commit()
         con.close()
 
@@ -481,23 +574,45 @@ def self_test():
         check("marked hidden" in shown, "show prints the hidden marker")
         check("Test Name <61234>" in shown, "show rows carry contact identity")
 
-        # Display-name search and the WhatsApp phone-based LID resolution.
+        # Last-N semantics: the newest matching record must be shown last.
+        args.n = 3
+        args.no_heartbeats = True
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_show(args)
+        lines = [line for line in output.getvalue().splitlines() if line.strip()]
+        check(len(lines) == 3, "show -n 3 returns three rows")
+        # Markers share the budget: the kept window is recent(22:38), the
+        # hidden marker(22:43) and the recovery sample(22:48).
+        check("22:38:20" in lines[0] and "22:43:20" in lines[1] and "22:48:20" in lines[2],
+              "show keeps the LAST n records (markers included), not the first")
+        check("22:13:20" not in output.getvalue(), "older records fall outside the last-N window")
+        args.n = 200
+        args.no_heartbeats = False
+
+        # WhatsApp phone-column resolution through an unmasked LID entry.
         args.pattern = "Lid Name"
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             cmd_summary(args)
         check("Lid Name <999888777666>" in output.getvalue(),
               "WhatsApp phone-column resolution through a LID entry")
-        args.pattern = "Wrong Name"
+        # A masked phone must never resolve a full JID.
+        args.pattern = "Masked Name"
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 cmd_summary(args)
-            check(False, "ambiguous phone mapping must exit with no match")
+            check(False, "masked phone must not resolve")
         except SystemExit as exc:
-            check(exc.code != 0, "ambiguous phone mapping must not resolve wrongly")
+            check(exc.code != 0, "masked phone must not resolve (exit)")
+        # A LID uid must never resolve through another contact's phone.
+        args.pattern = "111222333444"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_list(args)
+        check("Lid Name" not in output.getvalue(), "LID digits are not a phone alias")
 
-        # Time filters: everything in the fixture predates 23:00, so the
-        # filtered show must exit with no match.
+        # Time filters: markers respect bounds too. Everything predates 23:00.
         args.pattern = "61234"
         args.since = "2023-11-14 23:00"
         try:
@@ -554,8 +669,8 @@ def main():
     parser.add_argument("--appdir", default=None,
                         help="nchat config dir for display-name lookup (default: parent of --dir)")
     parser.add_argument("--profile", default=None, help="only match profiles containing this text")
-    parser.add_argument("-n", type=int, default=200, help="max records for show (default 200; --all for no cap)")
-    parser.add_argument("--all", action="store_true", help="show all matching records (no -n cap)")
+    parser.add_argument("-n", type=int, default=200, help="last N records for show (default 200)")
+    parser.add_argument("--all", action="store_true", help="show all matching records (overrides -n)")
     parser.add_argument("--no-heartbeats", action="store_true",
                         help="hide heartbeat re-affirmation lines in show")
     parser.add_argument("--since", default=None, metavar="WHEN",
@@ -573,6 +688,10 @@ def main():
         parser.error("-n must be a positive number of records")
     if args.all:
         args.n = sys.maxsize
+    since = parse_when(args.since)
+    until = parse_when(args.until)
+    if since is not None and until is not None and since > until:
+        parser.error("--since must not be later than --until")
 
     if args.appdir is None:
         args.appdir = os.path.dirname(os.path.abspath(args.dir))
