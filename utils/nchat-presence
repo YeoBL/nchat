@@ -4,11 +4,12 @@
 # Copyright (c) 2026 Bing Lin
 # All rights reserved.
 #
-# Read-only CLI for the nchat continuous presence polling history.
+# Read-only current-status browser and explicit legacy history commands.
 # Parses the local JSONL files written by the presence poller under
 # <config>/nchat/presence/ and never contacts any service.
 #
 # Usage:
+#   nchat-presence [current] [PATTERN] [--plain] [--dir DIR] [--profile NAME]
 #   nchat-presence list [PATTERN] [--dir DIR] [--profile NAME]
 #   nchat-presence show PATTERN [--dir DIR] [--profile NAME] [-n N | --all]
 #         [--no-heartbeats] [--since WHEN] [--until WHEN] [--online-only]
@@ -20,6 +21,8 @@ import argparse
 import collections
 import contextlib
 import datetime
+import ctypes
+import ctypes.util
 import fnmatch
 import glob
 import heapq
@@ -29,6 +32,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 
 from pathlib import Path
 
@@ -455,6 +459,325 @@ def cmd_list(args):
                  state, count, online, heartbeats))
 
 
+def current_contacts(args):
+    """Keep only each contact's last reported state. Heartbeats aren't observations."""
+    if not os.path.isdir(args.dir):
+        return []
+    contacts = {} if args.no_names else load_all_contacts(args.appdir, args.dir)
+    latest = {}
+    for profile, record in iter_records(args.dir, args.profile):
+        if record.get("hb"):
+            continue
+        key = (profile, record["u"])
+        item = latest.setdefault(key, {"key": key, "record": None, "hidden": False})
+        if record.get("mark") == "hidden":
+            item["hidden"] = True
+        else:
+            item["record"] = record
+            if observable(record):
+                item["hidden"] = False
+    for (profile, uid), item in latest.items():
+        name, identifier = identity_parts(profile, uid, contacts, args)
+        service = "WhatsApp" if profile.startswith("WhatsApp") else "Telegram" if profile.startswith("Telegram") else "Other"
+        if not name.strip() or name in (uid, identifier):
+            name = ("+" + identifier if uid.endswith("@s.whatsapp.net")
+                    else "Contact " + identifier)
+        item.update(name=clean(name.strip()), identifier=clean(identifier), service=service)
+    return sorted(latest.values(), key=lambda item: (item["service"], item["name"].casefold(), item["key"]))
+
+
+def report_age(timestamp, now):
+    if not timestamp:
+        return "No report"
+    if timestamp > now + 60_000:
+        return "Clock mismatch"
+    seconds = max(0, (now - timestamp) // 1000)
+    if seconds < 60:
+        return "Just now"
+    if seconds < 3600:
+        return "%dm ago" % (seconds // 60)
+    if seconds < 86400:
+        return "%dh ago" % (seconds // 3600)
+    return "%dd ago" % (seconds // 86400)
+
+
+def readable_seen(timestamp, now):
+    if timestamp in (None, -1, 0):
+        return "Unavailable"
+    if timestamp == 1:
+        return "Within last month"
+    if timestamp == 2:
+        return "Within last week"
+    seen = datetime.datetime.fromtimestamp(timestamp / 1000).astimezone()
+    today = datetime.datetime.fromtimestamp(now / 1000).astimezone().date()
+    if seen.date() == today:
+        return "Today " + seen.strftime("%H:%M")
+    if seen.date() == today - datetime.timedelta(days=1):
+        return "Yesterday " + seen.strftime("%H:%M")
+    return seen.strftime("%d %b %Y, %H:%M")
+
+
+def readable_report(timestamp):
+    return datetime.datetime.fromtimestamp(timestamp / 1000).astimezone().strftime('%a %d %b, %H:%M:%S %Z')
+
+
+def current_fields(item, now):
+    record = item["record"]
+    if item["hidden"] or record is None:
+        return "Unavailable", "Unavailable", "No fresh report"
+    age = report_age(record["ts"], now)
+    if age == "Clock mismatch":
+        return "Unconfirmed", "Unavailable", age
+    fresh = 0 <= now - record["ts"] <= 300_000
+    if record.get("on"):
+        # A cached heartbeat cannot renew an online claim.
+        state = "Online" if fresh else "Unconfirmed"
+        return state, "—", age
+    if record.get("recent"):
+        return ("Seen recently" if fresh else "Approx. (old)"), "Seen recently", age
+    if record.get("seen", -1) <= 0:
+        return "Unavailable", "Unavailable", age
+    return ("Offline" if fresh else "Offline (old)"), readable_seen(record["seen"], now), age
+
+
+_libc = ctypes.CDLL(ctypes.util.find_library("c") or None)
+_libc.wcwidth.argtypes = [ctypes.c_wchar]
+_libc.wcwidth.restype = ctypes.c_int
+
+
+def screen_text(text):
+    """Use stable terminal cells for emoji modifiers, joiners and flag pairs."""
+    text = clean(str(text))
+    result = []
+    for char in text:
+        code = ord(char)
+        if 0x1F1E6 <= code <= 0x1F1FF:
+            result.append(chr(ord('A') + code - 0x1F1E6))
+        elif 0x1F3FB <= code <= 0x1F3FF or char in ('\ufe0f', '\ufe0e'):
+            continue
+        elif char == '\u200d':
+            result.append(' ')
+        else:
+            result.append(char)
+    return ''.join(result)
+
+
+def fit_screen(text, width):
+    """Clip by terminal cells, retaining accents attached to the last base."""
+    text = screen_text(text)
+    if width <= 0:
+        return ""
+    if sum(max(0, _libc.wcwidth(char)) for char in text) <= width:
+        return text
+    result = []
+    used = 0
+    for char in text:
+        cells = max(0, _libc.wcwidth(char))
+        if used + cells > width - 1:
+            break
+        result.append(char)
+        used += cells
+    return ''.join(result) + '…'
+
+
+def current_rows(contacts, query, service):
+    query = query.casefold()
+    return [item for item in contacts if service in ('All', item['service']) and
+            query in (item['name'] + ' ' + item['identifier']).casefold()]
+
+
+def current_lines(contacts, width, now):
+    lines = []
+    services = sorted({item['service'] for item in contacts})
+    for service in services:
+        group = [item for item in contacts if item['service'] == service]
+        if lines:
+            lines.append(('', None, 'group'))
+        lines.append((service.upper() + '  ·  ' + str(len(group)), None, 'group'))
+        for item in group:
+            state, seen, age = current_fields(item, now)
+            if width >= 94:
+                name_width = width - 62
+                name = fit_screen(item['name'], name_width)
+                padding = name_width - sum(max(0, _libc.wcwidth(char)) for char in name)
+                text = '  ' + name + ' ' * padding + '  ' + state.ljust(14) + '  ' + seen.ljust(23) + '  ' + age
+                lines.append((text, item['key'], state))
+            else:
+                lines.append(('  ' + item['name'], item['key'], state))
+                detail = state + '  ·  ' + age
+                if width >= 64:
+                    detail += '  ·  ' + seen
+                lines.append(('    ' + detail, item['key'], state))
+    return lines
+
+
+def print_current(args):
+    now = int(time.time() * 1000)
+    rows = current_rows(current_contacts(args), args.pattern, 'All')
+    print('NCHAT  ·  Latest reported status')
+    print('Local cache  ·  ' + datetime.datetime.now().astimezone().strftime('%d %b %Y %H:%M %Z'))
+    print('Reports older than 5 minutes are labelled old or unconfirmed.\n')
+    if not rows:
+        print('No contacts match.' if args.pattern else 'No status reports available yet.')
+        return
+    print('  ' + 'CONTACT'.ljust(38) + '  ' + 'STATUS'.ljust(14) + '  ' + 'LAST SEEN'.ljust(23) + '  REPORT AGE')
+    for text, _, _ in current_lines(rows, 100, now):
+        print(fit_screen(text, 100))
+
+
+def browse_current(win, args):
+    import curses
+    if hasattr(curses, 'set_escdelay') and 'ESCDELAY' not in os.environ:
+        curses.set_escdelay(50)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    win.keypad(True)
+    win.timeout(1000)
+    colors = False
+    if curses.has_colors() and 'NO_COLOR' not in os.environ:
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_CYAN, -1)
+            curses.init_pair(2, curses.COLOR_GREEN, -1)
+            colors = True
+        except curses.error:
+            pass
+    errors = io.StringIO()
+    with contextlib.redirect_stderr(errors):
+        contacts = current_contacts(args)
+    query, service, searching, selection, top = args.pattern, 'All', False, 0, 0
+    loaded_at = datetime.datetime.now().astimezone()
+    note = ('Some cache records could not be read. r retries.' if errors.getvalue()
+            else 'r refreshes the local cache')
+    while True:
+        rows = current_rows(contacts, query, service)
+        selection = min(selection, max(0, len(rows) - 1))
+        selected = rows[selection]['key'] if rows else None
+        height, width = win.getmaxyx()
+        now = int(time.time() * 1000)
+        lines = current_lines(rows, max(1, width - 1), now)
+        page = max(1, height - 10)
+        selected_line = next((i for i, line in enumerate(lines) if line[1] == selected), 0)
+        if selected_line < top:
+            top = max(0, selected_line - 1)
+        selected_end = max((i for i, line in enumerate(lines) if line[1] == selected), default=selected_line)
+        if selected_end >= top + page:
+            top = selected_end - page + 1
+        top = max(0, min(top, max(0, len(lines) - page)))
+        win.erase()
+
+        def put(y, text, attribute=0):
+            if 0 <= y < height and width > 1:
+                try:
+                    win.addstr(y, 0, fit_screen(text, width - 1), attribute)
+                except curses.error:
+                    pass  # A terminal resize can race drawing.
+
+        put(0, ' NCHAT  /  Latest status', curses.A_BOLD)
+        put(1, ' Read at ' + loaded_at.strftime('%H:%M %Z') + '  ·  ' + str(len(rows)) + ' contacts')
+        put(2, ' ' + ('ALL SERVICES' if service == 'All' else service.upper()) + '  ·  /' + query + ('_' if searching else ''), curses.A_REVERSE)
+        put(3, ' Last reported status · >5m = old' if width < 95 else
+            '  ' + 'CONTACT'.ljust(width - 63) + '  ' + 'STATUS'.ljust(14) + '  ' + 'LAST SEEN'.ljust(23) + '  REPORT AGE', curses.A_DIM)
+        for i, (text, key, kind) in enumerate(lines[top:top + page]):
+            attribute = curses.A_BOLD if kind == 'group' else 0
+            if colors and kind in ('group', 'Online'):
+                attribute |= curses.color_pair(1 if kind == 'group' else 2)
+            if key is not None and key == selected:
+                attribute |= curses.A_REVERSE
+                if top + i == selected_line:
+                    text = '› ' + text[2:]
+            put(4 + i, text, attribute)
+        if not rows:
+            put(5, ' No contacts match. Esc clears search; Tab changes service.' if query or service != 'All' else ' No status reports available yet.')
+        if rows and height >= 12:
+            item = rows[selection]
+            profiles = sorted({value['key'][0] for value in contacts if value['service'] == item['service']})
+            account = (' / Account ' + str(profiles.index(item['key'][0]) + 1)) if len(profiles) > 1 else ''
+            put(height - 6, ' ' + item['name'] + '  ·  ' + item['service'] + account, curses.A_BOLD)
+            put(height - 5, ' ' + item['identifier'])
+            _, seen, age = current_fields(item, now)
+            detail = ('Seen ' + seen + ' · report ' + age if width < 64 else
+                      'Last seen ' + seen + '  ·  ' + ('Reported ' + readable_report(item['record']['ts']) if item['record'] else 'No observation'))
+            put(height - 4, ' ' + detail)
+        put(height - 3, ' ' + note, curses.A_DIM)
+        if width < 72:
+            put(height - 2, ' ↑↓ Move  / Search  Tab Service')
+            put(height - 1, ' q Quit  r Refresh  Esc Clear')
+        else:
+            put(height - 2, ' ↑↓ / j k  Move   Tab  Service   /  Search   r  Refresh')
+            put(height - 1, ' q Quit  Esc Clear  PgUp/PgDn Page  g/G First/last')
+        if height < 12 or width < 26:
+            win.erase()
+            put(0, 'q Quit · Enlarge terminal')
+        win.refresh()
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        if key == curses.KEY_RESIZE:
+            continue
+        if searching:
+            if key in ('\n', '\r', curses.KEY_ENTER):
+                searching = False
+            elif key in ('\x1b', '\x03'):
+                query, searching = '', False
+            elif key in ('\x7f', '\b', curses.KEY_BACKSPACE):
+                query = query[:-1]
+            elif isinstance(key, str) and key.isprintable() and len(query) < 120:
+                query += key
+            selection, top = 0, 0
+            continue
+        if key in ('q', 'Q', '\x03'):
+            return
+        if key in (curses.KEY_DOWN, 'j'):
+            selection += 1
+        elif key in (curses.KEY_UP, 'k'):
+            selection = max(0, selection - 1)
+        elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            selection = max(0, selection + (1 if key == curses.KEY_NPAGE else -1) * max(1, page // 2))
+        elif key in ('g', curses.KEY_HOME):
+            selection = 0
+        elif key in ('G', curses.KEY_END):
+            selection = max(0, len(rows) - 1)
+        elif key == '\t':
+            services = ['All', 'WhatsApp', 'Telegram']
+            service = services[(services.index(service) + 1) % len(services)]
+            selection, top = 0, 0
+        elif key == '/':
+            searching = True
+        elif key == '\x1b':
+            query, service, selection, top = '', 'All', 0, 0
+        elif key in ('r', 'R'):
+            errors = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(errors):
+                    contacts = current_contacts(args)
+                visible = current_rows(contacts, query, service)
+                selection = next((i for i, item in enumerate(visible) if item['key'] == selected), 0)
+                loaded_at = datetime.datetime.now().astimezone()
+                note = 'Refreshed ' + loaded_at.strftime('%H:%M')
+                if errors.getvalue():
+                    note += '  ·  Some cache records could not be read'
+            except (OSError, SystemExit):
+                note = 'Could not refresh the cache. Press r to retry.'
+
+
+def cmd_current(args):
+    if args.plain or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print_current(args)
+    else:
+        import curses
+        try:
+            curses.wrapper(browse_current, args)
+        except KeyboardInterrupt:
+            return
+        except curses.error:
+            sys.exit('This terminal could not open the status screen. Use nchat-presence current --plain.')
+
+
 def cmd_show(args):
     since = parse_when(args.since)
     until = parse_when(args.until)
@@ -717,11 +1040,13 @@ def self_test():
 def main():
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
-        description="Read the local nchat presence history under "
+        description="Browse latest reported contact statuses, grouped by service. "
+                    "The default screen supports arrows, Tab, / search, r refresh and q quit. "
+                    "Read the local nchat presence history under "
                     "~/.config/nchat/presence/. Patterns match user ids/numbers "
                     "and, when the local cache is readable, display names.")
-    parser.add_argument("command", nargs="?", choices=["list", "show", "summary"],
-                        help="list contacts / show one contact's history / summarize")
+    parser.add_argument("command", nargs="?", choices=["current", "list", "show", "summary"],
+                        help="current status screen (default) / legacy list / history / summary")
     parser.add_argument("pattern", nargs="?", default="",
                         help="user id, number or display name to filter; required for show")
     parser.add_argument("--dir", default=default_dir(), help="presence directory (default %(default)s)")
@@ -740,6 +1065,8 @@ def main():
                         help="in show, only online samples and hidden markers")
     parser.add_argument("--no-names", action="store_true",
                         help="do not resolve display names from the local cache")
+    parser.add_argument("--plain", action="store_true",
+                        help="print the grouped current-status table without keyboard navigation")
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -757,7 +1084,11 @@ def main():
 
     if args.self_test:
         return self_test()
-    if args.command == "list" or args.command is None:
+    if args.command in (None, "current"):
+        if args.since or args.until or args.online_only or args.no_heartbeats or args.all:
+            parser.error("date and history filters apply to list, show or summary; current shows latest reports")
+        cmd_current(args)
+    elif args.command == "list":
         cmd_list(args)
     elif args.command == "show":
         if not args.pattern:

@@ -133,7 +133,26 @@ WhatsApp data only flows while this installation is online (see
 `online_status_share`). The files stay on this machine and are never
 uploaded.
 
-Read the history with the `nchat-presence` helper:
+### Latest reported status screen
+
+Run `nchat-presence` or `nchat-presence current` for the grouped current-status
+browser. Contact names lead each row, with the selected contact's identifier and
+timestamp details below. The header shows when the local cache was read.
+Reports older than five minutes are labelled old or unconfirmed. Cached
+heartbeats do not renew freshness. Flags render as country letters, with emoji
+modifiers and joiners simplified for stable terminal columns.
+
+Use arrows or j/k to select, Tab to cycle All/WhatsApp/Telegram, / to search names
+or identifiers, Enter to finish entering a query, Esc to clear, r to read the
+cache again and q to quit. Page Up/Page Down and g/G move through longer lists.
+The layout adapts to narrow terminals. `--plain` prints a grouped snapshot and
+is selected automatically for piped output. `NO_COLOR=1` requests monochrome.
+The screen updates displayed ages between refreshes. Press r for newer records.
+
+The weighted review and its checks are in
+[nchat presence UI scorecard](nchat-presence-ui-review.md).
+
+Read the history with the explicit legacy `nchat-presence` commands:
 `nchat-presence list [pattern]` shows every tracked contact with its latest
 state; `nchat-presence summary [pattern]` summarizes one contact (first
 sample, last record, last state, genuine online events, heartbeat count,

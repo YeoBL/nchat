@@ -1,0 +1,109 @@
+# nchat presence current status UI scorecard
+
+This review covers the current-status screen approved by the user on 9 November
+2026. Its complete criteria set spans data meaning, information hierarchy,
+layout, accessibility, interaction, recovery, performance and deployment.
+
+## Scoring method
+
+Weights total 100. Each criterion receives a rating from 1 to 5. A rating of 1
+means absent or harmful, 2 means a major usability problem, 3 means usable with
+an unresolved material problem, 4 means the specified checks pass with the
+recorded limits, and 5 means the specified behaviour is directly covered by the
+checks listed. The weighted score is the sum of weight multiplied by rating
+divided by 5. Every criterion must reach at least 4, and data meaning, safe
+interaction, terminal bounds and exit checks must pass independently of the total.
+
+These are engineering self-assessments supported by synthetic and terminal tests.
+The user has not yet confirmed the visual result. Terminal theme, font and
+assistive-technology preferences require the user's own acceptance check.
+
+## Refinement passes
+
+| Pass | Findings | Refinement and verification |
+|---|---|---|
+| Initial current screen | Long identifiers and historical counts dominated the old listing. | Added a name-first grouped view, selected-contact details, relative report ages and keyboard navigation. |
+| Compact layout review | The wide key legend clipped Quit on narrow terminals. Duplicate row arrows added clutter. Selected two-line rows could be cut at the viewport edge. | Compact key legends put Quit first, use one selection marker, and keep both selected row lines in view. Tested width/height combinations and native resize. |
+| Data meaning review | A heartbeat could look like fresh presence, old offline data needed a label, and a changing clock heading could suggest a new cache read. | Ignore heartbeats for current-state freshness, label reports older than five minutes, and show the actual cache-read time. Exact observation and last-seen times remain distinct. |
+| Recovery and delivery review | First-use, failed refresh, theme fallback and installed-file identity needed explicit checks. | Added empty states, retained-view retry feedback, monochrome/NO_COLOR support, piped output, native terminal checks and a larger synthetic cache benchmark. Verified and backed up the installed helper. |
+
+## Weighted criteria
+
+| Criterion | Weight | Rating out of 5 | Acceptance requirement | Evidence and remaining limits |
+|---|---|---|---|---|
+| Current-state scope | 4 | 5 | Show one latest state per contact and keep browsing read-only. | File hashes unchanged after real terminal sessions. No activity counts or timeline controls in this screen. |
+| Freshness and stale states | 6 | 5 | Distinguish fresh reports, old offline/coarse reports, unconfirmed online reports and future clock mismatches. | Explicit age boundary, stale-online and future-time cases. |
+| Unavailable and coarse data | 4 | 5 | Use honest unavailable/recent/week/month labels and preserve service uncertainty. | Hidden-state, recent-state and coarse timestamp fixtures. |
+| Heartbeat semantics | 4 | 5 | A cached heartbeat must never renew the observation time or an online claim. | A fresh heartbeat after a 15-minute-old online observation remains unconfirmed. |
+| Contact name priority | 5 | 4 | Show a readable cached name prominently with a transparent identifier fallback. | Names lead rows. Full identities move to the selected-contact panel. Name availability depends on the local cache. |
+| Identity disambiguation | 3 | 4 | Keep accounts and same-name contacts separate and expose the selected identifier. | Duplicate Alex contacts remain separate by service/account key. Multiple same-service accounts get account labels. |
+| Service grouping | 4 | 5 | Separate Telegram and WhatsApp visibly and provide a service filter. | Group headings, counts and Tab filter fixtures. |
+| Stable ordering | 1 | 5 | Keep alphabetical rows stable instead of moving them with every report. | Deterministic service/name/account sorting. |
+| Visual hierarchy | 2 | 4 | Separate title, filter, headers, contact rows, details and controls. | Native screen layouts plus inspected synthetic frames. Terminal typography remains theme-controlled. |
+| Signal over clutter | 2 | 5 | Keep raw profile strings, repeated IDs, sample counts and heartbeat counts out of primary rows. | Plain-view checks reject sample/heartbeat clutter and raw JID suffixes in rows. |
+| Readable timestamps | 4 | 5 | Use relative report ages, Today/Yesterday labels, readable older dates and exact selected details. | Relative-age, yesterday and last-week tests. |
+| Timezone clarity | 2 | 4 | Display local timezone in the snapshot heading and exact details. | Timezone-aware formatting. Arbitrary DST changes were not exhaustively simulated. |
+| Column alignment | 3 | 4 | Give names useful space and keep wide status/seen/age columns aligned. | Cell-width bounds at widths 1, 12, 26, 40, 80 and 120. Terminal emoji styling is simplified. |
+| Responsive width | 4 | 5 | Switch from columns to compact two-line rows and prioritize status/age at narrow sizes. | 40/80/120-column fixtures and native 80/120-column sessions. |
+| Responsive height | 3 | 4 | Keep selected content and essential controls visible across terminal heights. | Heights 6, 10, 12, 16, 24 and 40. Tiny sizes offer an explicit resize/quit state. |
+| Visible selection | 3 | 4 | Show the selected row and its details without relying on colour. | Reverse-video selection and a single leading selection marker in monochrome fixtures. |
+| Colour independence | 3 | 5 | Preserve meaning and navigation without colour, and honour NO_COLOR. | All interaction fixtures run without colour. Text labels convey every state. |
+| Unicode legibility | 4 | 4 | Clip by display cells and preserve readable CJK and accents. | Wide-name clipping and emoji fallback checks. Flags render as country letters and modifiers/joiners use stable fallbacks. |
+| Terminal text safety | 4 | 5 | Escape control and bidi characters before display. | An escape-sequence contact name cannot inject terminal controls. |
+| Keyboard coverage | 4 | 5 | Reach all current-view functions through keys. | Arrows/j/k, page keys, g/G, Tab, search, refresh, Esc and quit paths. |
+| Search feedback | 4 | 4 | Support case-insensitive name/ID search, visible input mode and useful zero-result feedback. | Live query, duplicate-name and no-match fixtures. Search is substring matching. |
+| Filter clarity | 2 | 5 | Keep the active service visible and cycle predictably. | All to WhatsApp to Telegram, with selection reset and an explicit banner. |
+| Escape and cancellation | 2 | 5 | Clear search/filter state predictably and keep search keystrokes in the search field. | Search-mode input and Escape/reset tests. A 50 ms default escape delay avoids the usual one-second pause. |
+| Paging and orientation | 2 | 4 | Support page/first/last navigation and keep the selection in view. | Page, Home/End-equivalent and scrolling fixtures. Service headings scroll with the list. |
+| Refresh behaviour | 3 | 5 | Show when the cache was read, retain the selected identity and report completion. | Selection-preservation and refresh-result fixtures. The screen reloads on r. |
+| Empty states | 2 | 5 | Handle first use and empty filters with clear next actions. | Missing-directory and zero-result tests. |
+| Errors and recovery | 3 | 4 | Preserve the last good view on refresh failure and offer a retry. | Injected read failure retains contact details and displays retry guidance. Corrupt-record warnings are reduced to a UI note. |
+| Tiny terminal fallback | 2 | 4 | Offer a usable exit when the screen cannot fit. | 20 by 6 and 26 by 10 fixtures keep q visible. |
+| Performance and resources | 2 | 4 | Keep rendering local and bounded by contact count, with an explicit refresh budget. | 10,000 cached reaffirmations refresh in about 0.02 seconds on this Mac against a 2-second test ceiling. Loading still scans the input files. |
+| Plain output and assistive use | 2 | 5 | Provide labelled text without ANSI/cursor control for pipes and --plain. | Real subprocess pipe test and grouped text formatting. |
+| Discoverability | 2 | 4 | Make default launch useful and keep essential help visible. | No-argument launch opens current status. Compact and wide key legends always include Quit. Full keys are also documented. Shared --help also includes legacy command options. |
+| Clean exit and resize | 2 | 5 | Restore the terminal and exit without traceback after normal quit, resize or interruption. | Native PTY resize/quit checks and curses-wrapper error handling. |
+| Installation and recovery | 1 | 5 | Deploy the tested helper atomically and preserve the replaced helper. | Installed source hash and self-tests are checked. A private recovery copy is retained. |
+| Compatibility | 2 | 5 | Keep existing explicit commands available while making the current view the default. | Original synthetic self-test passes. Explicit list/show/summary routing is retained. |
+
+The resulting score is **92.0/100**, with every criterion rated at least
+4/5. The score describes the tested current view and the limits above.
+
+## Reproduce the checks
+
+```sh
+cd /Users/bingl/.local/src/nchat-inline
+python3 utils/test-presence-current.py
+python3 utils/nchat-presence --self-test
+```
+
+The first script uses temporary synthetic SQLite contacts and JSONL reports. It
+checks freshness, identity, search, filters, paging, refresh, failures, compact
+layouts, Unicode bounds and plain output. It also opens real pseudo-terminals
+at 80 and 120 columns, resizes to 40 columns, exercises keys, quits and verifies
+that the source files were unchanged. Its 10,000-record benchmark keeps seven
+latest contact states and is subject to a two-second regression ceiling.
+The second script retains the existing helper's explicit-command regressions.
+
+## Usage
+
+Run `nchat-presence` or `nchat-presence current`. Use arrows or j/k to move,
+Tab to cycle services, / to search, Enter to finish entering a query, Esc to
+clear, r to read the cache again and q to quit. Page Up/Page Down and g/G move
+farther through the list. `nchat-presence current --plain` prints a grouped
+snapshot. `NO_COLOR=1 nchat-presence` requests monochrome display.
+
+The five-minute stale threshold is a presentation choice. Report age advances
+between refreshes. New cached data appears after r. Emoji modifiers and joined
+styling are simplified for stable terminal columns, while the underlying names
+remain intact in the cache.
+
+## Installation verification
+
+On 9 November 2026, the installed helper at
+`/Users/bingl/.local/bin/nchat-presence` matched the tested source byte for byte.
+Its current plain-view invocation completed successfully against the existing
+local cache with output discarded, and its synthetic self-test passed. The
+replaced helper is retained privately under
+`~/.local/.nchat-helper-install/backups/20261109T103214Z-nchat-presence-current/`.
+A source rollback should be followed by deployment of the selected helper copy.

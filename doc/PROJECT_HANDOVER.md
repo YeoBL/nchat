@@ -536,6 +536,18 @@ runtime state.
 
 ## Feature inventory and access
 
+The `nchat-presence` helper now opens a current-status browser by default.
+Its source is `utils/nchat-presence` and its installed entry point is
+`/Users/bingl/.local/bin/nchat-presence`. Use `current --plain` for grouped text.
+Tab changes service, / searches names/IDs, r reloads the cache and q quits.
+The view labels stale reports after five minutes and ignores heartbeat records
+for freshness. Regression coverage is `python3 utils/test-presence-current.py`.
+The weighted acceptance review is `doc/nchat-presence-ui-review.md`. This helper
+was upgraded directly with a private recovery copy under
+`~/.local/.nchat-helper-install/backups`. The portable helper installer's target
+list currently omits `nchat-presence`, so review and deploy its installed copy
+explicitly when editing it.
+
 This compact inventory was copied from the `changes.md` feature table at source
 `9e4bc1a3`. Each status preserves the recorded verification level. “Offline
 verified” refers to the tested synthetic paths. “Live unverified,” “Partial,”
