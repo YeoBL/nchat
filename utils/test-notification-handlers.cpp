@@ -413,6 +413,11 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
     assert(joined == original);
   }
   {
+    const std::vector<std::string> emojiCases = {
+      "🙂‍↔️🙂‍↔️", "🙂‍↕️", "👨‍👩‍👧‍👦", "👩🏽‍💻", "❤️‍🔥",
+      "❤️ ♥️ ☀️", "👁️‍🗨️", "🏳️‍🌈", "🏃‍➡️", "1️⃣ 2️⃣", "😔😪",
+      "⌚︎ ⌛︎", "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+    };
     UiModel model;
     auto protocol = std::make_shared<HistoricalTestProtocol>();
     auto& impl = model.m_Impl;
@@ -426,7 +431,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
       const auto id = "sidebar-" + std::to_string(i);
       impl.m_ChatVec.push_back({profile, id});
       impl.m_ContactInfos[profile][id].name = i % 4 == 0 ? "ABCDEFGHIJK🇸🇬" :
-        (i % 4 == 1 ? "CUMSA 🇸🇬🇲🇾 -" : (i % 4 == 2 ? "Peer 👍🏻" : "Chat " + std::to_string(i)));
+        (i % 4 == 1 ? "CUMSA 🇸🇬🇲🇾 -" : (i % 4 == 2 ? "Peer 👍🏻" : "Chat " + emojiCases[i % emojiCases.size()]));
     }
     impl.m_MessageVec[profile][chat] = {"new", "peer", "old"};
     impl.m_ContactInfos[profile]["self"].isSelf = true;
@@ -445,7 +450,8 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
       ChatMessage message;
       message.id = id; message.senderId = i % 2 ? "self" : "peer";
       message.isOutgoing = i % 2; message.isRead = true;
-      message.text = "Older message " + std::to_string(i) + " emoji 😔😪";
+      message.text = i == 0 ? emojiCases[0] : "Older message " + std::to_string(i) + " emoji " +
+        emojiCases[i % emojiCases.size()] + " trailing ASCII";
       message.timeSent = 1794150000000 - (i + 1) * 60000;
       if (i % 4 == 0) message.quotedId = "peer";
       impl.m_MessageVec[profile][chat].push_back(id);
@@ -478,7 +484,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
       if (frame < 8) impl.m_CurrentChatIndex = frame % 2 == 0 ? 0 : 70;
       const int scrollOffsets[] = {0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0, 1};
       impl.m_MessageOffset[profile][chat] = frame < 8 ? (frame % 3 == 0 ? 0 : 10) : scrollOffsets[frame - 8];
-      impl.GetEntryStr() = contentFrame == 5 ? L"" : L"Draft " + glyph + L" tail";
+      impl.GetEntryStr() = contentFrame == 5 ? L"" : L"Draft " + glyph + L" 👨‍👩‍👧‍👦 🙂‍↔️ tail";
       impl.GetEntryPos() = static_cast<int>(impl.GetEntryStr().size());
       {
         std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
@@ -506,6 +512,8 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
         }
       if (frame < 8) assert(combined == (renderedFrame % 3 == 0 ? 2 : 0));
       assert(protocol->requests.empty());
+      assert(impl.m_Messages[profile][chat].at("older-0").text == emojiCases[0]);
+      if (contentFrame != 5) assert(impl.GetEntryStr().find(L"🙂‍↔️") != std::wstring::npos);
       fflush(output); rewind(output);
       std::ofstream raw(directory + "/" + std::to_string(frame) + ".raw", std::ios::binary);
       char bytes[4096]; size_t size = 0;

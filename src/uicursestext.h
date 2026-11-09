@@ -25,6 +25,17 @@ namespace UiCursesText
     const size_t limit = std::min(std::wcslen(p_Text), static_cast<size_t>(std::max(0, p_Limit)));
     for (size_t position = 0; position < limit;)
     {
+      const wchar_t character = p_Text[position];
+      // Curses counts joined emoji as separate spacing characters. Terminals
+      // can merge them, or widen a narrow symbol after VS16, leaving their
+      // real cursor behind curses' cursor. Draw terminal-safe components at
+      // their default widths. This affects display only, including the editor.
+      if (character == L'\u200d' || character == L'\ufe0e' || character == L'\ufe0f' ||
+          character == L'\u20e3' || (character >= L'\U000e0020' && character <= L'\U000e007f'))
+      {
+        ++position;
+        continue;
+      }
       const size_t end = GlyphEnd(p_Text, position, limit);
       if (end > position + 1)
       {
