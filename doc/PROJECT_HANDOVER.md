@@ -561,6 +561,14 @@ fixtures. All tests use synthetic messages and never send service edits. There
 is no complete historical recovery guarantee for WhatsApp, or version ordering
 between two already-edited snapshots without provider edit-version metadata.
 
+Activated on 9 November 2026 after full core/protocol builds and the notification,
+rendering, UI integration, Telegram callback and WhatsApp race suites passed.
+The clean restart reused Screen `15976.nchat`, window `0`, shell `15977` and
+`ttys002`. The resulting core PID was `31298`. Draft-save and fatal startup
+failures were absent from startup diagnostics. A live service edit roundtrip
+remains unverified. For already stale Telegram content, reopen the chat and
+scroll to the relevant page to initiate reconciliation.
+
 ## Feature inventory and access
 
 The `nchat-presence` helper now opens a current-status browser by default.
