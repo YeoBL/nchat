@@ -16,6 +16,45 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## GitHub backup and rollback checkpoints — 9 November 2026
+
+The default GitHub branch is `codex/personal-features`. The existing 163
+customization commits were already published when this backup began. The
+remaining standalone login-probe changes are now preserved in a separate
+implementation commit, with their experimental verification status below.
+
+| Saved point | Contents | Link |
+|---|---|---|
+| `checkpoint/nchat-2026-11-09` | Source checkpoint including the outstanding probe experiment, this inventory and rollback notes. | [Browse checkpoint](https://github.com/YeoBL/nchat/tree/checkpoint%2Fnchat-2026-11-09) |
+| `checkpoint/nchat-2026-11-09-before-backup` | Previously published source through `da56b058`, before committing the outstanding probe work. | [Browse earlier checkpoint](https://github.com/YeoBL/nchat/tree/checkpoint%2Fnchat-2026-11-09-before-backup) |
+| `vanilla-base` | Original nchat 5.17.26 used by this feature inventory. | [Browse vanilla baseline](https://github.com/YeoBL/nchat/tree/vanilla-base) |
+
+For a selective rollback, start from a clean working tree on a new branch and
+revert the implementation commit linked in the relevant feature row.
+
+```sh
+git switch -c codex/rollback-feature
+git revert <implementation-commit>
+```
+
+For the complete source checkpoint, create a branch at the saved tag.
+
+```sh
+git switch -c codex/restore-2026-11-09 checkpoint/nchat-2026-11-09
+```
+
+Check dependent features and later fixes before reverting shared plumbing.
+Some reconstructed features share commits, so they require a focused follow-up
+patch to undo individually. Build and test the selected version before replacing
+the running core or widget. Source rollback does not restore account databases,
+runtime caches, installed binaries or local configuration. Preserve separate
+private backups before changing those. The Screen workaround also has a loaded
+session setting and a `~/.screenrc` source line to handle when undoing it.
+
+| Preserved change | Access / effect | Implementation commit | Verification / limits |
+|---|---|---|---|
+| Experimental Android login compatibility and rejection diagnostics | Standalone probe `--login-control android-compat` preserves the QR9 registration and alters two post-pair login flags. Logout categories distinguish connect-time rejection from stream logout. Existing QR9/rejection behavior is documented. | [ac81460c](https://github.com/YeoBL/nchat/commit/ac81460c), [earlier QR9 control 137381b4](https://github.com/YeoBL/nchat/commit/137381b4) | `go test -race -count=1 ./cmd/viewonce-probe` and `go vet ./cmd/viewonce-probe` pass with synthetic inputs. This backup did not perform a live login. Successful Android authentication and view-once delivery remain unverified. |
+
 ## Verification audit and follow-up fixes — 20 October 2026
 
 Initial audited implementation: [`4a914f89`](https://github.com/YeoBL/nchat/commit/4a914f8930e89d7e8e5725e56c464bce047be479).
