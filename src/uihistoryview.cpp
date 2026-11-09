@@ -103,9 +103,9 @@ UiHistoryView::UiHistoryView(const UiViewParams& p_Params)
 
     static int attributeTextNormal = UiColorConfig::GetAttribute("history_text_attr");
     static int colorPairTextRecv = UiColorConfig::GetColorPair("history_text_recv_color");
-    werase(m_Win);
+    UiCursesText::Erase(m_Win);
     wbkgd(m_Win, attributeTextNormal | colorPairTextRecv | ' ');
-    wrefresh(m_Win);
+    UiCursesText::Refresh(m_Win);
   }
 }
 
@@ -119,7 +119,7 @@ UiHistoryView::~UiHistoryView()
 
   if (m_PaddedWin != nullptr)
   {
-    delwin(m_PaddedWin);
+    UiCursesText::Delete(m_PaddedWin);
     m_PaddedWin = nullptr;
   }
 }
@@ -164,7 +164,7 @@ void UiHistoryView::Draw()
     m_Model->GetMessagesLocked(currentChat.first, currentChat.second);
   int messageOffset = std::max(m_Model->GetMessageOffsetLocked(currentChat.first, currentChat.second), 0);
 
-  werase(m_PaddedWin);
+  UiCursesText::Erase(m_PaddedWin);
   wbkgd(m_PaddedWin, attributeTextNormal | colorPairTextRecv | ' ');
 
   m_HistoryShowCount = 0;
@@ -465,7 +465,7 @@ void UiHistoryView::Draw()
         // rows, but an inserted trailing space splits a long URL at every wrap.
         const std::wstring wdisp = (isReaction || (!isAttachment && !isQuote)) ?
           *wline : StrUtil::TrimPadWString(*wline, m_PaddedW);
-        UiCursesText::Draw(m_PaddedWin, y, 0, wdisp.c_str(), m_PaddedW);
+        UiCursesText::Draw(m_PaddedWin, y, 0, wdisp.c_str(), wdisp.size());
       }
 
       if (!isThumbnail && isAttachment)
@@ -548,7 +548,7 @@ void UiHistoryView::Draw()
     }
 
     std::wstring wdisp = StrUtil::TrimPadWString(wheader, m_PaddedW);
-    UiCursesText::Draw(m_PaddedWin, y, 0, wdisp.c_str(), m_PaddedW);
+    UiCursesText::Draw(m_PaddedWin, y, 0, wdisp.c_str(), wdisp.size());
 
     wattroff(m_PaddedWin, attributeName | colorPairName);
 
@@ -561,7 +561,7 @@ void UiHistoryView::Draw()
     firstMessage = false;
   }
 
-  wrefresh(m_PaddedWin);
+  UiCursesText::Refresh(m_PaddedWin);
 
   if (s_ThumbnailDialogDepth != 0)
   {

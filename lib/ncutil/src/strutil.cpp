@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "emojiutil.h"
+#include "textglyph.h"
 #include "log.h"
 
 void StrUtil::DeleteToNextMatch(std::wstring& p_Str, int& p_Pos, int p_Offs, std::wstring p_Chars)
@@ -434,6 +435,19 @@ std::wstring StrUtil::TrimPadWString(const std::wstring& p_Str, int p_Len)
 std::wstring StrUtil::TrimWString(const std::wstring& p_Str, int p_Len)
 {
   p_Len = std::max(p_Len, 0);
+  if (TextGlyph::Enabled())
+  {
+    size_t end = 0;
+    int width = 0;
+    while (end < p_Str.size())
+    {
+      const auto glyph = TextGlyph::Next(p_Str.c_str(), end, p_Str.size());
+      if (width + glyph.width > p_Len) break;
+      width += glyph.width;
+      end = glyph.end;
+    }
+    return p_Str.substr(0, end);
+  }
   std::wstring str = p_Str;
   if (WStringWidth(str) > p_Len)
   {
@@ -638,8 +652,17 @@ std::vector<std::wstring> StrUtil::WordWrap(std::wstring p_Text, unsigned p_Line
                 linePart[modifier] <= L'\U0001f3ff') charLength = modifier - i + 1;
           }
           unsigned char_width = 0;
-          for (size_t part = 0; part < charLength; ++part)
-            char_width += std::max(wcwidth(linePart[i + part]), 1);
+          if (TextGlyph::Enabled())
+          {
+            const auto glyph = TextGlyph::Next(linePart.c_str(), i, linePart.size());
+            charLength = glyph.end - i;
+            char_width = glyph.width;
+          }
+          else
+          {
+            for (size_t part = 0; part < charLength; ++part)
+              char_width += std::max(wcwidth(linePart[i + part]), 1);
+          }
 
           // Track the most recent space for wrapping
           if (wc == L' ')
@@ -662,7 +685,8 @@ std::vector<std::wstring> StrUtil::WordWrap(std::wstring p_Text, unsigned p_Line
               // previous (double width char)
               // Keep flags/modifiers together, and always advance even when a
               // glyph is wider than a very narrow wrapping column.
-              const int lenOffset = i == 0 ? static_cast<int>(charLength) : ((char_width == 1) ? 1 : 0);
+              const int lenOffset = i == 0 ? static_cast<int>(charLength) :
+                ((!TextGlyph::Enabled() && char_width == 1) ? 1 : 0);
               lines.push_back(linePart.substr(0, i + lenOffset));
               linePart = linePart.substr(i + lenOffset);
             }
@@ -715,6 +739,17 @@ std::vector<std::wstring> StrUtil::WordWrap(std::wstring p_Text, unsigned p_Line
 
 int StrUtil::WStringWidth(const std::wstring& p_WStr)
 {
+  if (TextGlyph::Enabled())
+  {
+    int width = 0;
+    for (size_t position = 0; position < p_WStr.size();)
+    {
+      const auto glyph = TextGlyph::Next(p_WStr.c_str(), position, p_WStr.size());
+      width += glyph.width;
+      position = glyph.end;
+    }
+    return width;
+  }
   int width = wcswidth(p_WStr.c_str(), p_WStr.size());
   return (width != -1) ? width : p_WStr.size();
 }

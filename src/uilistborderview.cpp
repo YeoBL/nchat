@@ -26,12 +26,12 @@ void UiListBorderView::Draw()
   static int colorPair = UiColorConfig::GetColorPair("listborder_color");
   static int attribute = UiColorConfig::GetAttribute("listborder_attr");
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, attribute | colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
   mvwvline(m_Win, 0, 0, ACS_VLINE, m_H);
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }

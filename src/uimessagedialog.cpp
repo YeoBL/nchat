@@ -109,7 +109,7 @@ void UiMessageDialog::Draw()
   static int colorPair = UiColorConfig::GetColorPair("dialog_color");
   static int attribute = UiColorConfig::GetAttribute("dialog_attr");
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
@@ -119,11 +119,11 @@ void UiMessageDialog::Draw()
   for (int i = 0; i < std::min(m_H - 1, (int)wlines.size()); ++i)
   {
     const std::wstring& wdisp = wlines.at(i);
-    int w = std::min((int)wdisp.size(), m_W);
+    int w = StrUtil::WStringWidth(wdisp);
     int x = std::max(0, ((m_W - w) / 2));
-    UiCursesText::Draw(m_Win, i + 1, x, wdisp.c_str(), w);
+    UiCursesText::Draw(m_Win, i + 1, x, wdisp.c_str(), wdisp.size());
   }
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }

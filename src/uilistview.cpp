@@ -26,9 +26,9 @@ UiListView::UiListView(const UiViewParams& p_Params)
     static int colorPair = UiColorConfig::GetColorPair("list_color");
     static int attribute = UiColorConfig::GetAttribute("list_attr");
 
-    werase(m_Win);
+    UiCursesText::Erase(m_Win);
     wbkgd(m_Win, attribute | colorPair | ' ');
-    wrefresh(m_Win);
+    UiCursesText::Refresh(m_Win);
   }
 }
 
@@ -36,7 +36,7 @@ UiListView::~UiListView()
 {
   if (m_PaddedWin != nullptr)
   {
-    delwin(m_PaddedWin);
+    UiCursesText::Delete(m_PaddedWin);
     m_PaddedWin = nullptr;
   }
 }
@@ -68,7 +68,7 @@ void UiListView::Draw()
     unreads.push_back(isUnread);
   }
 
-  werase(m_PaddedWin);
+  UiCursesText::Erase(m_PaddedWin);
   wbkgd(m_PaddedWin, attribute | colorPair | ' ');
   wattron(m_PaddedWin, attribute | colorPair);
 
@@ -121,5 +121,5 @@ void UiListView::Draw()
   }
 
   wattroff(m_PaddedWin, attribute | colorPair);
-  wrefresh(m_PaddedWin);
+  UiCursesText::Refresh(m_PaddedWin);
 }

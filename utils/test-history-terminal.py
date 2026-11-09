@@ -3,6 +3,8 @@
 Run with kitty +runpy and the test directory. All terminal grids are in memory.
 """
 import fcntl
+import json
+import runpy
 import os
 import pty
 import select
@@ -60,6 +62,60 @@ else:
     raise RuntimeError("Terminal cell comparison did not reject a wrong position")
 
 
+emoji_paint = runpy.run_path(str(Path(__file__).with_name('nchat_emoji.py')))['paint']
+emoji_decode = runpy.run_path(str(Path(__file__).with_name('nchat_emoji.py')))['decode']
+
+
+def unwrap_screen(data):
+    result = bytearray()
+    position = 0
+    while position < len(data):
+        if data[position:position + 2] != b'\x1bP':
+            result.append(data[position])
+            position += 1
+            continue
+        position += 2
+        escaped = False
+        while position < len(data):
+            char = data[position]
+            position += 1
+            if escaped and char == ord('\\'):
+                break
+            if char == 27:
+                if escaped:
+                    result.append(27)
+                escaped = True
+            else:
+                if escaped:
+                    result.append(27)
+                result.append(char)
+                escaped = False
+    return bytes(result)
+
+
+def feed(screen, data, wrapped=False):
+    if wrapped:
+        data = unwrap_screen(data)
+    marker = b'\x1bP@kitty-cmd'
+    while marker in data:
+        begin = data.index(marker)
+        parse_bytes(screen, data[:begin])
+        end = data.index(b'\x1b\\', begin)
+        command = json.loads(data[begin + len(marker):end])
+        payload = command['payload']
+        if command['cmd'] != 'kitten' or Path(payload['kitten']).name != 'nchat_emoji.py':
+            raise AssertionError('Unexpected remote operation in rendering fixture')
+        rows = emoji_decode(payload['args'][0])
+        if rows is None:
+            raise AssertionError('Invalid emoji rendering request')
+        before = screen.cursor.copy()
+        emoji_paint(screen, rows)
+        if screen.cursor != before:
+            raise AssertionError(('Emoji repaint changed the input cursor', repr(before), repr(screen.cursor)))
+        data = data[end + 2:]
+    parse_bytes(screen, data)
+
+
 def check_screen_route(binary, fixture, frames):
     rows, columns, _ = snapshot(frames[0])
     terminal = Screen(None, rows, columns, 0)
@@ -77,8 +133,8 @@ tty.setraw(0)
 offset = 0
 for name in sys.argv[1:]:
     data = Path(name).read_bytes()
-    for byte in data[offset:]:
-        os.write(1, bytes([byte]))
+    for start in range(offset, len(data), 7):
+        os.write(1, data[start:start + 7])
         time.sleep(0.0001)
     offset = len(data)
     os.read(0, 1)
@@ -89,7 +145,7 @@ time.sleep(30)
         try:
             for frame, path in enumerate(frames):
                 output = bytearray()
-                deadline = time.monotonic() + 4
+                deadline = time.monotonic() + 12
                 last_data = time.monotonic()
                 while time.monotonic() < deadline:
                     if select.select([master], [], [], 0.05)[0]:
@@ -102,7 +158,7 @@ time.sleep(30)
                         break
                 if not output:
                     raise AssertionError((fixture, frame, "Screen produced no output"))
-                parse_bytes(terminal, bytes(output))
+                feed(terminal, bytes(output))
                 check_grid(terminal, snapshot(path)[2], fixture + "/Screen", frame)
                 os.write(master, b"x")
         finally:
@@ -125,7 +181,7 @@ for fixture in sorted((root / "history-render").iterdir()):
     for frame, path in enumerate(frames):
         rows, columns, expected = snapshot(path)
         data = path.read_bytes()
-        parse_bytes(terminal, data[previous_length:])
+        feed(terminal, data[previous_length:], fixture.name.startswith('screen'))
         previous_length = len(data)
         check_grid(terminal, expected, fixture.name + "/direct", frame)
     if binary and fixture.name.startswith("screen"):

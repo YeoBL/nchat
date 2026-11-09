@@ -182,14 +182,14 @@ void UiListDialog::Draw()
   static int attributeSelected = UiColorConfig::GetAttribute("dialog_attr_selected");
   static std::wstring hiddenIndicator = L".";
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
   int offset = NumUtil::Bound(0, (m_Index - (m_H / 2)), std::max(0, ((int)m_Items.size() - m_H)));
   for (int i = offset; i < std::min((offset + m_H), (int)m_Items.size()); ++i)
   {
-    const std::wstring& wdisp = m_Items.at(i);
+    const std::wstring wdisp = StrUtil::TrimWString(m_Items.at(i), m_W);
     const bool isShaded = m_ShadeHidden && (wdisp.rfind(hiddenIndicator, 0) == 0);
 
     if (isShaded)
@@ -204,7 +204,7 @@ void UiListDialog::Draw()
       wattron(m_Win, attributeSelected);
     }
 
-    UiCursesText::Draw(m_Win, (i - offset), 0, wdisp.c_str(), std::min((int)wdisp.size(), m_W));
+    UiCursesText::Draw(m_Win, (i - offset), 0, wdisp.c_str(), wdisp.size());
 
     if (i == m_Index)
     {
@@ -220,7 +220,7 @@ void UiListDialog::Draw()
   }
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }
 
 void UiListDialog::UpdateFooter()

@@ -411,6 +411,8 @@ add_executable(nchat
   src/uidialog.h
   src/uiemojilistdialog.cpp
   src/uiemojilistdialog.h
+  src/uicursestext.cpp
+  src/uicursestext.h
   src/uientryview.cpp
   src/uientryview.h
   src/uifilelistdialog.cpp

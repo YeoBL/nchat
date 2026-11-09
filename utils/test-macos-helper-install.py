@@ -28,7 +28,8 @@ def main():
         script = source / installer.name
         shutil.copyfile(installer, script)
         for name in ("nchat-image", "nchat-thumbnails", "nchat-image-clear", "nchat-peek",
-                     "nchat-peek-view.py", "nchat_badge.py", "nchat_badge_auth.py", "kitty-nchat.conf"):
+                     "nchat-peek-view.py", "nchat_badge.py", "nchat_badge_auth.py",
+                     "nchat_emoji.py", "nchat_terminal_auth.py", "kitty-nchat.conf"):
             (source / name).write_text("fixture version one\n")
         for name in ("nchat Unread.app", "nchat-transcribe.app", "nchat-record.app"):
             binary = root / "source/build" / name / "Contents/MacOS/fixture"
@@ -55,7 +56,7 @@ def main():
         assert "Would install" in run("--dry-run")
         assert snapshot(root) == before, "fresh dry-run wrote files"
         assert "Installed" in run()
-        assert len(json.loads(manifest.read_text())) == 11
+        assert len(json.loads(manifest.read_text())) == 13
         assert image.stat().st_mode & 0o777 == 0o755
         assert app.read_text() == "app fixture version one\n"
         assert state.stat().st_mode & 0o777 == 0o700

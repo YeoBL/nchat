@@ -190,23 +190,23 @@ private:
     if (!m_Running) return;
     const int color = UiColorConfig::GetColorPair("dialog_color");
     const int attr = UiColorConfig::GetAttribute("dialog_attr");
-    werase(m_Win);
+    UiCursesText::Erase(m_Win);
     wbkgd(m_Win, color | ' ');
     wattron(m_Win, attr | color);
     auto labels = StrUtil::WordWrap(StrUtil::ToWString(m_Label), std::max(1, m_W), false, false, false, 2);
     const int labelRows = std::min(std::max(1, m_H / 3), static_cast<int>(labels.size()));
-    for (int i = 0; i < labelRows; ++i) UiCursesText::Draw(m_Win, i, 0, labels[i].c_str(), m_W);
+    for (int i = 0; i < labelRows; ++i) UiCursesText::Draw(m_Win, i, 0, labels[i].c_str(), labels[i].size());
     const int start = std::min(m_H - 1, labelRows + 1);
     const int height = std::max(1, m_H - start);
     const auto layout = LayoutField(m_Entry, std::max(1, m_W - 1), m_Pos);
     const int offset = std::max(0, layout.row - height + 1);
     for (int i = offset; i < std::min(static_cast<int>(layout.lines.size()), offset + height); ++i)
-      UiCursesText::Draw(m_Win, start + i - offset, 0, layout.lines[i].c_str(), m_W);
+      UiCursesText::Draw(m_Win, start + i - offset, 0, layout.lines[i].c_str(), layout.lines[i].size());
     wmove(m_Win, std::min(m_H - 1, start + layout.row - offset),
       std::min(std::max(0, m_W - 1), layout.col));
     wattroff(m_Win, attr | color);
     SetFooter("Enter: save | Ctrl-N: new line | Alt-V: paste | Ctrl-C: cancel");
-    wrefresh(m_Win);
+    UiCursesText::Refresh(m_Win);
     curs_set(1);
   }
 

@@ -37,7 +37,7 @@ void UiStatusView::Draw()
   static int colorPair = UiColorConfig::GetColorPair("status_color");
   static int attribute = UiColorConfig::GetAttribute("status_attr");
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, attribute | colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
@@ -93,5 +93,5 @@ void UiStatusView::Draw()
   UiCursesText::Draw(m_Win, 0, 0, wstatus.c_str(), wstatus.size());
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }

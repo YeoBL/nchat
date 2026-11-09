@@ -54,8 +54,8 @@ void UiDialog::Init()
 
 void UiDialog::Cleanup()
 {
-  delwin(m_Win);
-  delwin(m_BorderWin);
+  UiCursesText::Delete(m_Win);
+  UiCursesText::Delete(m_BorderWin);
 }
 
 void UiDialog::SetFooter(const std::string& p_Footer)
@@ -69,28 +69,26 @@ void UiDialog::DrawBorder()
   static int colorPair = UiColorConfig::GetColorPair("dialog_color");
   static int attribute = UiColorConfig::GetAttribute("dialog_attr");
 
-  werase(m_BorderWin);
+  UiCursesText::Erase(m_BorderWin);
   wbkgd(m_BorderWin, colorPair | ' ');
   wattron(m_BorderWin, attribute | colorPair);
 
   wborder(m_BorderWin, 0, 0, 0, 0, 0, 0, 0, 0);
   const int maxTextWidth = m_W - 2;
 
-  std::string title = " " + m_Title.substr(0, maxTextWidth) + " ";
-  std::wstring wtitle = StrUtil::ToWString(title);
-  int titlex = std::max(0, (m_W - (int)wtitle.size()) / 2) + 2;
-  int titlew = std::min((int)wtitle.size(), m_W);
+  std::wstring wtitle = L" " + StrUtil::TrimWString(StrUtil::ToWString(m_Title), maxTextWidth) + L" ";
+  int titlex = std::max(0, (m_W - StrUtil::WStringWidth(wtitle)) / 2) + 2;
+  int titlew = wtitle.size();
   UiCursesText::Draw(m_BorderWin, 0, titlex, wtitle.c_str(), titlew);
 
   if (!m_Footer.empty())
   {
-    std::string footer = " " + m_Footer.substr(0, maxTextWidth) + " ";
-    std::wstring wfooter = StrUtil::ToWString(footer);
-    int footerx = std::max(0, (m_W - (int)wfooter.size()) / 2) + 2;
-    int footerw = std::min((int)wfooter.size(), m_W);
+    std::wstring wfooter = L" " + StrUtil::TrimWString(StrUtil::ToWString(m_Footer), maxTextWidth) + L" ";
+    int footerx = std::max(0, (m_W - StrUtil::WStringWidth(wfooter)) / 2) + 2;
+    int footerw = wfooter.size();
     UiCursesText::Draw(m_BorderWin, m_H + 1, footerx, wfooter.c_str(), footerw);
   }
 
   wattroff(m_BorderWin, attribute | colorPair);
-  wrefresh(m_BorderWin);
+  UiCursesText::Refresh(m_BorderWin);
 }

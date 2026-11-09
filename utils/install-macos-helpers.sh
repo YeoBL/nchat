@@ -44,7 +44,8 @@ backups = state / "backups"
 targets = [(source_dir / name, prefix / "bin" / name, 0o755)
            for name in ("nchat-image", "nchat-thumbnails", "nchat-image-clear", "nchat-peek")]
 targets += [(source_dir / "nchat-peek-view.py", prefix / "lib/nchat-peek-view.py", 0o644)]
-targets += [(source_dir / name, kitty / name, 0o644) for name in ("nchat_badge.py", "nchat_badge_auth.py")]
+targets += [(source_dir / name, kitty / name, 0o644) for name in ("nchat_badge.py", "nchat_badge_auth.py",
+                                                                                "nchat_emoji.py", "nchat_terminal_auth.py")]
 targets += [(source_dir / "kitty-nchat.conf", kitty / "nchat-example.conf", 0o644)]
 targets += [(source_dir.parent / "build" / name,
              (applications if name == "nchat Unread.app" else config / "helpers") / name, None)

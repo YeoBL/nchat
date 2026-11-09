@@ -116,31 +116,29 @@ void UiTextInputDialog::Draw()
 
   curs_set(0);
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
-  const int promptWidth = StrUtil::WStringWidth(StrUtil::ToWString(m_Message)) + 1;
-  const int maxEntryDisplay = m_W - StrUtil::WStringWidth(StrUtil::ToWString(m_Message)) - 2;
-
-  int offset = 0;
-  std::wstring wdisp = StrUtil::ToWString(m_Message);
-  if (m_EntryPos < maxEntryDisplay)
+  const auto prompt = StrUtil::ToWString(m_Message);
+  const int maxEntryDisplay = std::max(1, m_W - StrUtil::WStringWidth(prompt) - 2);
+  size_t offset = 0;
+  while (offset < static_cast<size_t>(m_EntryPos) &&
+         UiCursesText::Width(m_EntryStr.substr(offset, m_EntryPos - offset)) >= maxEntryDisplay)
   {
-    wdisp += m_EntryStr;
+    const size_t next = TextGlyph::Next(m_EntryStr.c_str(), offset, m_EntryStr.size()).end;
+    if (next > static_cast<size_t>(m_EntryPos)) break;
+    offset = next;
   }
-  else
-  {
-    offset = m_EntryPos - maxEntryDisplay + 1;
-    wdisp += m_EntryStr.substr(offset, maxEntryDisplay + 0);
-  }
+  std::wstring wdisp = prompt + m_EntryStr.substr(offset);
 
-  int w = std::min((int)wdisp.size(), m_W - 2);
-  UiCursesText::Draw(m_Win, 1, 1, wdisp.c_str(), w);
-  wmove(m_Win, 1, promptWidth + m_EntryPos - offset);
+  wdisp = StrUtil::TrimWString(wdisp, m_W - 2);
+  UiCursesText::Draw(m_Win, 1, 1, wdisp.c_str(), wdisp.size());
+  const auto prefix = prompt + m_EntryStr.substr(offset, m_EntryPos - offset);
+  wmove(m_Win, 1, std::min(m_W - 1, 1 + UiCursesText::Width(prefix)));
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 
   curs_set(1);
 }
