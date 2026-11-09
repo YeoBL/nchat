@@ -415,6 +415,13 @@ emoji tags. The regression failed on the original drawing path. The repaired
 path passed every frame in native Kitty and an isolated Screen relay, including
 scrolling and independently dirty panels. No private message fixture is stored.
 
+The full build, notifications/rendering, tools-dialog UX and UI integration tests
+passed before activation. Restarted on 9 November 2026 in Screen `15976.nchat`,
+window `0`, original shell `15977` and terminal `ttys002`. The new core PID was
+`34436`, the Screen frame reported Online, and startup diagnostics contained no
+fatal or draft-save failures. The user's actual conversation appearance remains
+subject to visual confirmation after scrolling.
+
 ### Screen freeze during scrolling
 
 On 8 November, Screen 5.0.2 consumed 100% CPU in
