@@ -158,13 +158,18 @@ signs, parentheses and hyphens work. Results filter as you type. Enter finishes
 the query and arrow/page keys immediately navigate its results. Esc clears, r reads the
 cache again and q to quit. Page Up/Page Down and g/G move through longer lists.
 Tab filters people who have the selected service while preserving both columns.
-Press **Enter** on a selected contact to browse their full presence history
-(merged across services, newest last, with `~` marking heartbeat rows; q or
-Esc returns to the list). The layout uses columns from 45 terminal columns and
-compact person cards below that width. `--plain` prints the paired-column
-snapshot and is selected automatically for piped output. `NO_COLOR=1` requests
-monochrome. The screen updates displayed ages between refreshes. Press r for
-newer records.
+Press **Enter** on a selected contact to open their online-period table: the
+times they came online and went offline, merged across services, newest
+first, with an estimated length (`~15m`) per session. `?` marks a session
+whose end the platform never recorded, `open?` a session with no closing
+observation yet, and `~` flags that the start may predate the first
+observation. q or Esc returns to the list. The legacy `show` command still
+prints the raw samples for full detail.
+The list itself uses columns from 45 terminal columns and compact person
+cards below that width. `--plain` prints the paired-column snapshot and is
+selected automatically for piped output. `NO_COLOR=1` requests monochrome.
+The screen updates displayed ages between refreshes. Press r for newer
+records.
 
 When phone metadata is missing, select a person and press **m**. Choose their
 contact on the other service by typing their name or number immediately. Use
