@@ -215,6 +215,35 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
         app.browse_current(window, args)
     check(any('/qq_' in frame[2][0] for frame in window.frames), 'Typing q in search exits the browser')
+    alex_tg = next(item for item in contacts if item['key'] == ('Telegram_fixture', '101'))
+    alex_wa = next(item for item in contacts if item['key'] == ('WhatsAppMd_fixture', '123@s.whatsapp.net'))
+    alex_person = {'name': 'Alex',
+                   'key': (alex_tg['key'], alex_wa['key']),
+                   'members': [alex_tg, alex_wa], 'manual': False}
+    history = app.person_history(alex_person, args)
+    check(len(history) == 2 and {entry['service'] for entry in history}
+          == {'Telegram', 'WhatsApp'}, 'Person history does not merge both services')
+    check(history[0]['ts'] <= history[-1]['ts'], 'Person history is not chronological')
+    jamie_person = next(person for person in people if person['name'] == 'Jamie')
+    jamie_history = app.person_history(jamie_person, args)
+    check(len(jamie_history) == 2 and jamie_history[-1]['record'].get('hb'),
+          'Heartbeat missing from person history')
+    check('[TG]' in app.history_line(jamie_history[-1])
+          and '~' in app.history_line(jamie_history[-1]), 'History line does not mark heartbeats')
+    window = Window([curses.KEY_DOWN, 'G', '/', 'o', 'n', '\n', 'q'], 80, 24)
+    with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+        app.browse_person(window, args, alex_person)
+    frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
+    check('History' in frames[0], 'Person history view missing its header')
+    check(any('[TG]' in frame and '[WA]' in frame for frame in frames), 'Person history misses a service')
+    check(any('/on_' in frame for frame in frames), 'History search does not update as typed')
+    check('q/Esc Back' in frames[-1], 'History back help is missing')
+    window = Window(['\n', 'q', 'q'], 80, 24)
+    with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
+        app.browse_current(window, args)
+    frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
+    check(any('History' in frame for frame in frames), 'Enter does not open the history view')
+    check('Latest status' in frames[-1], 'Back from history does not restore the list')
     for colour_setup in ('disabled', 'unsupported'):
         window = Window(['q'], 80)
         environment = {'NO_COLOR': '1'} if colour_setup == 'disabled' else {}
