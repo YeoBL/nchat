@@ -132,3 +132,13 @@ for recent chats; WhatsApp samples come from presence subscriptions, so
 WhatsApp data only flows while this installation is online (see
 `online_status_share`). The files stay on this machine and are never
 uploaded.
+
+Read the history with the `nchat-presence` helper:
+`nchat-presence list` shows every tracked contact with its latest state,
+`nchat-presence summary <number-or-id>` summarizes one contact (first/last
+record, current state, online events), and
+`nchat-presence show <number-or-id>` prints its full history (use
+`--no-heartbeats` to hide the periodic re-affirmation lines). WhatsApp
+contacts are matched by their full JID (`<number>@s.whatsapp.net`) or a
+substring of it. The helper only reads the local files; it never contacts
+any service.
