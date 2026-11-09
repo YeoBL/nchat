@@ -123,3 +123,10 @@ cached private candidates without observations, self/group exclusions, formatted
 phone search, a focused picker, one-Enter linking and Escape cancellation. Local
 assisted matches are saved outside the repository with a private recovery record.
 Their identities and account data are excluded from this document and Git.
+
+On 9 November 2026, the merged search helper was installed atomically and its
+bytes matched the source. Installed self-tests and a real-cache plain invocation
+passed. The replaced helper is retained under
+`~/.local/.nchat-helper-install/backups/20261109T112815Z-presence-contact-search/`.
+The assisted preference writes were read back and all planned pairs resolved to
+combined rows. Recovery details remain private under the configuration directory.
