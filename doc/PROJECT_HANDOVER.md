@@ -540,6 +540,27 @@ local config, installed apps and loaded Screen settings need their own recovery
 plan. The checkpoints contain source history rather than a backup of private
 runtime state.
 
+## Edited-message synchronization follow-up
+
+Telegram uses `getMessage` for exact content/edit updates. These notifications
+set `contentUpdate`, which persists the row without declaring a contiguous
+history page. Preserve existing sequence boundaries, sent time and read state.
+Ordinary nonsequence display messages, including sponsored entries, retain their
+previous non-persistence behavior. Telegram opening refreshes the latest 50 rows,
+and cached pagination also queries TDLib to reconcile content.
+
+WhatsApp protocol edits must carry the original key ID and
+`EditAttributeMessageEdit`. Unwrapped `events.Message.IsEdit` also sets that flag.
+The shared `CacheUtil::PreserveEditedContent` prevents unedited replay from
+reverting known edited content in both the durable cache and UI. It allows a
+real deletion and a later explicitly edited version to replace content.
+
+Run `sh utils/test-notifications.sh`, `sh utils/test-telegram-edit-permissions.sh`
+and `sh utils/test-whatsapp-group-names.sh`. The latter includes edit-event race
+fixtures. All tests use synthetic messages and never send service edits. There
+is no complete historical recovery guarantee for WhatsApp, or version ordering
+between two already-edited snapshots without provider edit-version metadata.
+
 ## Feature inventory and access
 
 The `nchat-presence` helper now opens a current-status browser by default.
