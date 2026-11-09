@@ -6,6 +6,7 @@
 // nchat is distributed under the MIT license, see LICENSE for details.
 
 #include "uiscreen.h"
+#include "uicursestext.h"
 
 #include <algorithm>
 
@@ -14,7 +15,7 @@
 UiScreen::UiScreen()
 {
   wclear(stdscr);
-  wrefresh(stdscr);
+  UiCursesText::Refresh(stdscr);
   getmaxyx(stdscr, m_H, m_W);
   m_H = std::max(m_H, 11);
   m_W = std::max(m_W, 29);

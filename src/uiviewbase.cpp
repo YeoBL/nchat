@@ -25,7 +25,7 @@ UiViewBase::~UiViewBase()
 {
   if (!m_Enabled) return;
 
-  delwin(m_Win);
+  UiCursesText::Delete(m_Win);
   m_Win = nullptr;
 }
 

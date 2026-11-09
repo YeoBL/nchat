@@ -45,7 +45,7 @@ void UiTopView::Draw()
   static int colorPair = UiColorConfig::GetColorPair("top_color");
   static int attribute = UiColorConfig::GetAttribute("top_attr");
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, attribute | colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
@@ -76,5 +76,5 @@ void UiTopView::Draw()
   UiCursesText::Draw(m_Win, 0, 0, topWStr.c_str(), topWStr.size());
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }

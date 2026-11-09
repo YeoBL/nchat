@@ -219,3 +219,26 @@ online right now. WhatsApp contacts are matched by their full JID
 through the cache's phone column only for complete, unmasked numbers
 (masked entries stay ids). The helper only reads the local files; it never
 contacts any service.
+
+### Complete emoji in Kitty and GNU Screen
+
+Install `nchat_emoji.py` and `nchat_terminal_auth.py` alongside the existing
+`nchat_badge.py` and `nchat_badge_auth.py` helpers in Kitty's configuration
+folder. The macOS helper installer includes all four. In `kitty.conf`, use
+`allow_remote_control password` and
+`remote_control_password "" nchat_terminal_auth.py`, then reload Kitty's
+configuration before restarting nchat. The helper accepts bounded glyph
+painting in the originating window and the existing badge operation.
+
+When Kitty's window environment and the rendering helper are present, nchat
+reserves display columns using complete emoji sequences and paints the original
+Unicode in those cells. Joined emoji, flags, keycaps, skin tones and combining
+accents keep their source text and wrapping boundaries. Screen receives ASCII
+metadata and simple cell placeholders, avoiding its joined-emoji width errors.
+A bounded repaint restores glyphs after a Screen redisplay or reattachment.
+
+This path is tested with Kitty 0.48.2 and GNU Screen 5.0.2 on macOS. Other
+terminals retain the existing compatibility rendering. `NCHAT_FULL_EMOJI=0`
+disables Kitty glyph painting for troubleshooting. `NCHAT_KITTY_CONFIG_DIR`
+selects an alternative helper folder. This covers emoji sequences and combining
+accents, rather than being a general complex-script shaping engine.

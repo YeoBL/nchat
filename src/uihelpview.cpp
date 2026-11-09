@@ -182,7 +182,7 @@ void UiHelpView::Draw()
   static int colorPair = UiColorConfig::GetColorPair("help_color");
   static int attribute = UiColorConfig::GetAttribute("help_attr");
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, attribute | colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
@@ -213,10 +213,11 @@ void UiHelpView::Draw()
   }
 
   wstr = L" " + wstr + std::wstring(std::max(m_W - (int)wstr.size(), 0), L' ');
-  UiCursesText::Draw(m_Win, 0, 0, wstr.c_str(), std::min((int)wstr.size(), m_W));
+  wstr = StrUtil::TrimWString(wstr, m_W);
+  UiCursesText::Draw(m_Win, 0, 0, wstr.c_str(), wstr.size());
 
   wattroff(m_Win, attribute | colorPair);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }
 
 std::vector<std::wstring> UiHelpView::GetHelpViews(const int p_MaxW, const std::vector<std::wstring>& p_HelpItems,

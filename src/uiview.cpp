@@ -116,6 +116,7 @@ void UiView::Init()
 
 void UiView::Draw()
 {
+  UiCursesText::BeginFrame();
   m_UiTopView->Draw();
   m_UiHelpView->Draw();
   m_UiStatusView->Draw();
@@ -124,6 +125,7 @@ void UiView::Draw()
   m_UiHistoryView->Draw();
   m_UiEntryView->Draw();
   curs_set(1);
+  UiCursesText::EndFrame();
   UiHistoryView::FlushThumbnails();
 }
 

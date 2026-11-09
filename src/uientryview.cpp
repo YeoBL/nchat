@@ -25,7 +25,7 @@ void UiEntryView::Draw()
   if (!m_Dirty)
   {
     wmove(m_Win, m_CursY, m_CursX);
-    wrefresh(m_Win);
+    UiCursesText::Refresh(m_Win);
     return;
   }
 
@@ -44,7 +44,7 @@ void UiEntryView::Draw()
   static int colorPair = UiColorConfig::GetColorPair("entry_color");
   static int attribute = UiColorConfig::GetAttribute("entry_attr");
 
-  werase(m_Win);
+  UiCursesText::Erase(m_Win);
   wbkgd(m_Win, attribute | colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
@@ -68,5 +68,5 @@ void UiEntryView::Draw()
   m_CursY = (cy - yoffs);
 
   wmove(m_Win, m_CursY, m_CursX);
-  wrefresh(m_Win);
+  UiCursesText::Refresh(m_Win);
 }

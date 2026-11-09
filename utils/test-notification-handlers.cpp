@@ -393,6 +393,8 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
   SCREEN* screen = newterm(terminal.c_str(), output, input);
   assert(screen); set_term(screen); assert(resizeterm(rows, columns) != ERR);
   noecho(); nonl(); keypad(stdscr, TRUE);
+  setenv("NCHAT_FULL_EMOJI", "1", 1);
+  UiCursesText::SetOutput(output);
   AppConfig::Init(); UiColorConfig::Init();
   assert(StrUtil::TrimWString(L"ABCDEFGHIJK🇸🇬", 12) == L"ABCDEFGHIJK");
   assert(StrUtil::TrimPadWString(L"ABCDEFGHIJK🇸🇬", 12) == L"ABCDEFGHIJK ");
@@ -401,13 +403,14 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
   assert(StrUtil::TrimWString(L"🇸🇬", 0).empty());
   for (unsigned width = 1; width < 18; ++width)
   {
-    const std::wstring original = L"ABCDEFGHIJK🇸🇬👍🏻X";
+    const std::wstring original = L"ABCéD🙂‍↔️👨‍👩‍👧‍👦🇸🇬👍🏻X";
     const auto wrapped = StrUtil::WordWrap(original, width, false, false, false, 0);
     std::wstring joined;
     for (const auto& line : wrapped)
     {
       assert(!line.empty());
-      assert(line.front() != L'\U0001f1ec' && line.front() != L'\U0001f3fb');
+      assert(line.front() != L'\U0001f1ec' && line.front() != L'\U0001f3fb' &&
+             line.front() != L'\u0301' && line.front() != L'\u200d' && line.front() != L'\ufe0f');
       joined += line;
     }
     assert(joined == original);
@@ -416,7 +419,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
     const std::vector<std::string> emojiCases = {
       "🙂‍↔️🙂‍↔️", "🙂‍↕️", "👨‍👩‍👧‍👦", "👩🏽‍💻", "❤️‍🔥",
       "❤️ ♥️ ☀️", "👁️‍🗨️", "🏳️‍🌈", "🏃‍➡️", "1️⃣ 2️⃣", "😔😪",
-      "⌚︎ ⌛︎", "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+      "□　", "⌚︎ ⌛︎", "☝ ☰ ⚊ ⛹ ✌ ✍ 🏋 🏌 🕴 🕵 🖐", "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
     };
     UiModel model;
     auto protocol = std::make_shared<HistoricalTestProtocol>();
@@ -480,6 +483,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
       if (frame < 8) latest.timeSent += 60000;
       latest.text = "Frame " + std::to_string(contentFrame) + " Body " +
         (contentFrame == 5 ? "plain" : emoji) + " tail 漢字 é 🥺 https://example.test/path";
+      if (frame == 0) for (int count = 0; count < 30; ++count) latest.text += "🙂‍↔️";
       impl.m_SelectMessageActive = (frame % 2) != 0;
       if (frame < 8) impl.m_CurrentChatIndex = frame % 2 == 0 ? 0 : 70;
       const int scrollOffsets[] = {0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0, 1};
@@ -488,6 +492,7 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
       impl.GetEntryPos() = static_cast<int>(impl.GetEntryStr().size());
       {
         std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
+        UiCursesText::BeginFrame();
         list.SetDirty(frame < 8 && frame % 3 != 2); list.Draw();
         borderView.SetDirty(frame == 0); borderView.Draw();
         history.SetDirty(frame >= 8 || frame % 3 != 1); history.Draw();
@@ -495,21 +500,24 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
         statusView.SetDirty(frame < 8 && frame % 2 == 0); statusView.Draw();
         entryView.SetDirty(frame < 8); entryView.Draw();
         curs_set(1);
+        UiCursesText::EndFrame();
       }
-      int combined = 0;
+      int combined = 0, headShakes = 0;
       for (int y = 0; y < history.m_PaddedH; ++y)
         for (int x = 0; x < history.m_PaddedW; ++x)
         {
           cchar_t cell = {};
           assert(mvwin_wch(history.m_PaddedWin, y, x, &cell) != ERR);
-          if (cell.chars[0] != L'👍') continue;
-          const int modifier = renderedFrame == 6 ? 2 : 1;
+          const auto glyph = UiCursesText::ScreenGlyph(getbegy(history.m_PaddedWin) + y,
+                                                       getbegx(history.m_PaddedWin) + x);
+          if (glyph == L"🙂‍↔️") ++headShakes;
+          if (glyph.empty() || glyph[0] != L'👍') continue;
           assert(renderedFrame != 5);
-          if (terminal == "screen") assert(cell.chars[1] == 0);
-          else assert(cell.chars[modifier] == L'\U0001f3fb' + renderedFrame % 5);
+          assert(glyph.back() == L'\U0001f3fb' + renderedFrame % 5);
           ++combined;
           ++x; // Skip the second cell of this two-column glyph.
         }
+      if (frame == 0) assert(headShakes >= 30);
       if (frame < 8) assert(combined == (renderedFrame % 3 == 0 ? 2 : 0));
       assert(protocol->requests.empty());
       assert(impl.m_Messages[profile][chat].at("older-0").text == emojiCases[0]);
@@ -534,11 +542,13 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
           cchar_t cell = {};
           mvwin_wch(curscr, y, x, &cell);
           const bool ascii = cell.chars[0] >= 32 && cell.chars[0] <= 126 &&
-            !cell.chars[1] && !(cell.attr & A_ALTCHARSET);
+            !cell.chars[1] && !(cell.attr & A_ALTCHARSET) && UiCursesText::ScreenGlyph(y, x).empty();
           positioned += ascii ? cell.chars[0] : L'\uffff';
           if (x >= nextGlyphColumn)
           {
-            if ((cell.attr & A_ALTCHARSET) && cell.chars[0] == L'x') displayed += L'│';
+            const auto complete = UiCursesText::ScreenGlyph(y, x);
+            if (!complete.empty()) displayed += complete;
+            else if ((cell.attr & A_ALTCHARSET) && cell.chars[0] == L'x') displayed += L'│';
             else if (!cell.chars[0]) displayed += L' ';
             else
               for (int part = 0; part < CCHARW_MAX && cell.chars[part]; ++part)
@@ -554,6 +564,8 @@ static void TestHistoryEmojiRendering(const std::string& root, const std::string
   }
   endwin(); delscreen(screen); fclose(output); fclose(input);
   UiColorConfig::Cleanup(); AppConfig::Cleanup();
+  UiCursesText::SetOutput(stdout);
+  unsetenv("NCHAT_FULL_EMOJI");
   if (screenEnvironment) setenv("STY", oldScreenEnvironment.c_str(), 1);
   else unsetenv("STY");
   std::cout << "PASS: " << fixture << " draws stable emoji cells through content changes and scrolling, with intact flag/wrap boundaries\n";
