@@ -83,20 +83,19 @@ public:
   // private chats first, already truncated by the caller). p_SteadyMs must be
   // monotonic; p_WallMs is used only for stored timestamps. p_CanObserve is
   // false while the account is disconnected or announced offline; no eligible
-  // time accrues then. The first p_FastCount candidates poll on
-  // p_FastIntervalMs and the rest on p_PollIntervalMs (both with a random
-  // phase and +/-20% jitter), so frequently spoken-to contacts are sampled
-  // more often without bursting. Registers first-seen times, accumulates
-  // eligible time for continuously selected users, marks never-observed
-  // users hidden after p_HiddenDetectMs of eligible time, and returns the
-  // user ids due for a poll request now (bounded by a small per-tick
-  // dispatch budget).
+  // time accrues then. Poll intervals form a gradient across the candidate
+  // list: the most recent contact polls on p_FastIntervalMs and the least
+  // recent on p_PollIntervalMs, with each contact's interval linearly
+  // interpolated by rank (each with a random phase and +/-20% jitter).
+  // Registers first-seen times, accumulates eligible time for continuously
+  // selected users, marks never-observed users hidden after
+  // p_HiddenDetectMs of eligible time, and returns the user ids due for a
+  // poll request now (bounded by a small per-tick dispatch budget).
   std::vector<std::string> Tick(int64_t p_SteadyMs, int64_t p_WallMs,
                                 const std::string& p_ProfileId,
                                 const std::vector<std::string>& p_Candidates,
                                 int64_t p_PollIntervalMs,
                                 int64_t p_FastIntervalMs,
-                                size_t p_FastCount,
                                 int64_t p_HiddenDetectMs,
                                 bool p_CanObserve);
 
@@ -316,7 +315,6 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
                                                      const std::vector<std::string>& p_Candidates,
                                                      int64_t p_PollIntervalMs,
                                                      int64_t p_FastIntervalMs,
-                                                     size_t p_FastCount,
                                                      int64_t p_HiddenDetectMs,
                                                      bool p_CanObserve)
 {
@@ -326,9 +324,14 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
   if (p_FastIntervalMs < 1000) p_FastIntervalMs = 1000;
   if (p_FastIntervalMs > p_PollIntervalMs) p_FastIntervalMs = p_PollIntervalMs;
 
-  // Per-user tier: the first p_FastCount candidates poll faster.
+  // Interval gradient: rank 0 (most recent) polls at the fast interval and
+  // the last candidate at the slow interval, interpolated linearly.
   auto userInterval = [&](size_t p_Rank) -> int64_t {
-    return (p_Rank < p_FastCount) ? p_FastIntervalMs : p_PollIntervalMs;
+    const size_t n = p_Candidates.size();
+    if (n <= 1) return p_PollIntervalMs;
+    const int64_t span = p_PollIntervalMs - p_FastIntervalMs;
+    const int64_t offset = (span * static_cast<int64_t>(p_Rank)) / static_cast<int64_t>(n - 1);
+    return p_FastIntervalMs + offset;
   };
 
   auto& states = m_UserStates[p_ProfileId];

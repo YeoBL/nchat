@@ -2727,8 +2727,6 @@ void UiModel::Impl::ProcessPresencePoll()
   const int64_t pollIntervalMs = pollIntervalSec * 1000;
   const int64_t fastIntervalSec = std::max<int64_t>(5, UiConfig::GetNum("presence_poll_fast_interval"));
   const int64_t fastIntervalMs = fastIntervalSec * 1000;
-  const size_t fastCount =
-    static_cast<size_t>(std::max<int64_t>(0, UiConfig::GetNum("presence_poll_fast_count")));
   const int64_t pollCountRaw = UiConfig::GetNum("presence_poll_count");
   if (pollCountRaw <= 0)
   {
@@ -2816,7 +2814,7 @@ void UiModel::Impl::ProcessPresencePoll()
 
     const std::vector<std::string> due =
       m_PresencePoller.Tick(steadyMs, nowMs, profileId, orderedIds, pollIntervalMs,
-                            fastIntervalMs, fastCount, hiddenDetectMs, canObserve);
+                            fastIntervalMs, hiddenDetectMs, canObserve);
 
     for (const std::string& userId : due)
     {

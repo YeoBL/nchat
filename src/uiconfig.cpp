@@ -65,7 +65,6 @@ void UiConfig::Init()
     { "pinned_indicator", "\xe2\x9a\xb2" },
     { "presence_poll_count", "50" },
     { "presence_poll_enabled", "1" },
-    { "presence_poll_fast_count", "10" },
     { "presence_poll_fast_interval", "5" },
     { "presence_poll_heartbeat_sec", "300" },
     { "presence_poll_hidden_detect_sec", "172800" },

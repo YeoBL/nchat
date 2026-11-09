@@ -111,7 +111,7 @@ int main(int argc, char* argv[])
 
     const std::string specialUser = "u\"x\\\ty";
     std::vector<std::string> candidates = { "u1", specialUser };
-    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 0, 120000, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 120000, true).empty());
 
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, profile, "u1", false, -1, false);
     assert(poller.Flush());
@@ -170,7 +170,7 @@ int main(int argc, char* argv[])
 
     // A user that drops out of the candidate list stops being recorded.
     std::vector<std::string> onlyU1 = { "u1" };
-    poller.Tick(kBase + 1000000, kBase + kWallOffset + 1000000, profile, onlyU1, 60000, 60000, 0, 120000, true);
+    poller.Tick(kBase + 1000000, kBase + kWallOffset + 1000000, profile, onlyU1, 60000, 60000, 120000, true);
     poller.RecordStatus(kBase + 1001000, kBase + kWallOffset + 1001000, profile, specialUser, true, -1, false);
     assert(poller.Flush());
     assert(poller.Drain());
@@ -181,7 +181,7 @@ int main(int argc, char* argv[])
     std::vector<std::string> hiddenCandidates = { "h1" };
     for (int64_t t = 1001000; t <= 2100000; t += 1000)
     {
-      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, hiddenCandidates, 60000, 60000, 0, 1000000, true);
+      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, hiddenCandidates, 60000, 60000, 1000000, true);
     }
     assert(poller.Flush());
     assert(poller.Drain());
@@ -200,7 +200,7 @@ int main(int argc, char* argv[])
     assert(poller.Init(dir, 999));
 
     std::vector<std::string> candidates = { "a", "b", "c", "d" };
-    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 0, 120000, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 120000, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, profile, "b", true, -1, false);
 
     // One continuous timeline: spread across the interval, at least 48s
@@ -213,7 +213,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 1000; t <= 121000; t += 1000)
     {
       std::vector<std::string> due =
-        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 120000, true);
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 120000, true);
       for (const std::string& u : due)
       {
         if (t >= 120000)
@@ -242,7 +242,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 151000; t <= 230000; t += 1000)
     {
       std::vector<std::string> due =
-        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 120000, true);
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 120000, true);
       for (const std::string& u : due)
       {
         assert(u != "a" && u != "d");
@@ -282,7 +282,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 231000; t <= 400000; t += 1000)
     {
       std::vector<std::string> due =
-        reloaded.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 120000, true);
+        reloaded.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 120000, true);
       for (const std::string& u : due)
       {
         assert(u != "a" && u != "d");
@@ -304,13 +304,13 @@ int main(int argc, char* argv[])
     PresencePoller poller;
     assert(poller.Init(dir, 51));
     std::vector<std::string> candidates = { "e", "f" };
-    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 0, 600000, false).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 600000, false).empty());
     // Long unobservable gap: polling continues (requests still fire) but no
     // eligible time accrues.
     bool polledWhileUnobservable = false;
     for (int64_t t = 1000; t <= 300000; t += 1000)
     {
-      if (!poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 600000, false).empty())
+      if (!poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 600000, false).empty())
       {
         polledWhileUnobservable = true;
       }
@@ -322,7 +322,7 @@ int main(int argc, char* argv[])
     // t=901000, where they must be hidden.
     for (int64_t t = 301000; t <= 900000; t += 1000)
     {
-      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 600000, true);
+      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 600000, true);
     }
     assert(poller.Flush(true));
     assert(poller.Drain());
@@ -350,7 +350,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 901000; t <= 1000000; t += 1000)
     {
       std::vector<std::string> due =
-        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 600000, true);
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 600000, true);
       for (const std::string& u : due)
       {
         assert(u != "e" && u != "f");
@@ -361,12 +361,12 @@ int main(int argc, char* argv[])
     // and never fire; instead it must appear in the poll output.
     std::vector<std::string> withNewcomer = { "e", "f", "g" };
     assert(!Contains(poller.Tick(kBase + 1001000, kBase + kWallOffset + 1001000, profile,
-                                 withNewcomer, 60000, 60000, 0, 600000, true), "g"));
+                                 withNewcomer, 60000, 60000, 600000, true), "g"));
     bool gSeen = false;
     for (int64_t t = 1002000; t <= 1300000; t += 1000)
     {
       std::vector<std::string> due =
-        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, withNewcomer, 60000, 60000, 0, 600000, true);
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, withNewcomer, 60000, 60000, 600000, true);
       for (const std::string& u : due)
       {
         assert(u != "e" && u != "f");
@@ -388,26 +388,26 @@ int main(int argc, char* argv[])
 
     PresencePoller poller;
     assert(poller.Init(dir, 42));
-    assert(poller.Tick(kBase, kBase + kWallOffset, profile, many, 60000, 60000, 0, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, many, 60000, 60000, 0, true).empty());
     // One interval later everyone is due, but the per-tick budget caps it.
     std::vector<std::string> due =
-      poller.Tick(kBase + 60000, kBase + kWallOffset + 60000, profile, many, 60000, 60000, 0, 0, true);
+      poller.Tick(kBase + 60000, kBase + kWallOffset + 60000, profile, many, 60000, 60000, 0, true);
     assert(due.size() == 3);
-    due = poller.Tick(kBase + 61000, kBase + kWallOffset + 61000, profile, many, 60000, 60000, 0, 0, true);
+    due = poller.Tick(kBase + 61000, kBase + kWallOffset + 61000, profile, many, 60000, 60000, 0, true);
     assert(due.size() == 3);
 
     // A long gap re-phases overdue users instead of firing a burst.
     PresencePoller paused;
     assert(paused.Init(dir, 43));
     std::vector<std::string> five = { "p0", "p1", "p2", "p3", "p4" };
-    assert(paused.Tick(kBase, kBase + kWallOffset, profile, five, 60000, 60000, 0, 0, true).empty());
+    assert(paused.Tick(kBase, kBase + kWallOffset, profile, five, 60000, 60000, 0, true).empty());
     due = paused.Tick(kBase + 10 * 60000 + 1000, kBase + kWallOffset + 10 * 60000 + 1000,
-                      profile, five, 60000, 60000, 0, 0, true);
+                      profile, five, 60000, 60000, 0, true);
     assert(due.empty()); // re-phased, nothing fired at the wake-up tick
     std::unordered_set<std::string> fired;
     for (int64_t t = 602000; t <= 700000; t += 1000)
     {
-      due = paused.Tick(kBase + t, kBase + kWallOffset + t, profile, five, 60000, 60000, 0, 0, true);
+      due = paused.Tick(kBase + t, kBase + kWallOffset + t, profile, five, 60000, 60000, 0, true);
       assert(due.size() <= 3);
       for (const std::string& u : due)
       {
@@ -425,8 +425,8 @@ int main(int argc, char* argv[])
     PresencePoller poller;
     assert(poller.Init(dir, 7));
 
-    assert(poller.Tick(kBase, kBase + kWallOffset, pa, { "u1" }, 60000, 60000, 0, 0, true).empty());
-    assert(poller.Tick(kBase, kBase + kWallOffset, pb, { "v1" }, 60000, 60000, 0, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, pa, { "u1" }, 60000, 60000, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, pb, { "v1" }, 60000, 60000, 0, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pa, "u1", true, -1, false);
     poller.RecordStatus(kBase + 2000, kBase + kWallOffset + 2000, pb, "v1", true, -1, false);
     assert(poller.Flush());
@@ -474,7 +474,7 @@ int main(int argc, char* argv[])
     const std::string pathC = dir + "/history." + Hex(pc) + ".jsonl";
     PresencePoller poller;
     assert(poller.Init(dir, 13));
-    assert(poller.Tick(kBase, kBase + kWallOffset, pc, { "u1" }, 60000, 60000, 0, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, pc, { "u1" }, 60000, 60000, 0, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pc, "u1", true, -1, false);
     assert(poller.Flush());
     assert(poller.Drain());
@@ -549,7 +549,7 @@ int main(int argc, char* argv[])
 
     PresencePoller poller;
     assert(poller.Init(dir, 11));
-    assert(poller.Tick(kBase, kBase + kWallOffset, pd, { "u1" }, 60000, 60000, 0, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, pd, { "u1" }, 60000, 60000, 0, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pd, "u1", true, -1, false);
     assert(poller.Flush());
     assert(poller.Drain());
@@ -598,7 +598,7 @@ int main(int argc, char* argv[])
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, "Telegram_x",
-                    { "u2", "u3", "u4", "u5", "u6", "u7", "u8" }, 60000, 60000, 0, 0, true);
+                    { "u2", "u3", "u4", "u5", "u6", "u7", "u8" }, 60000, 60000, 0, true);
       for (const std::string& u : due)
       {
         assert(u != "u3");
@@ -618,7 +618,7 @@ int main(int argc, char* argv[])
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, "Telegram_x",
-                    { "u2", "u4", "u5", "u6", "u7", "u8" }, 60000, 60000, 0, 60000, true);
+                    { "u2", "u4", "u5", "u6", "u7", "u8" }, 60000, 60000, 60000, true);
       for (const std::string& u : due)
       {
         (void)u;
@@ -633,9 +633,9 @@ int main(int argc, char* argv[])
       PresencePoller saturator;
       assert(saturator.Init(corruptDir, 6));
       std::vector<std::string> candidates = { "u9" };
-      assert(saturator.Tick(kBase, kBase + kWallOffset, "Telegram_x", candidates, 60000, 60000, 0, 0, true).empty());
-      saturator.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_x", candidates, 60000, 60000, 0, 0, true);
-      saturator.Tick(kBase + 2000, kBase + kWallOffset + 2000, "Telegram_x", candidates, 60000, 60000, 0, 0, true);
+      assert(saturator.Tick(kBase, kBase + kWallOffset, "Telegram_x", candidates, 60000, 60000, 0, true).empty());
+      saturator.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_x", candidates, 60000, 60000, 0, true);
+      saturator.Tick(kBase + 2000, kBase + kWallOffset + 2000, "Telegram_x", candidates, 60000, 60000, 0, true);
       assert(saturator.Flush(true));
       assert(saturator.Drain());
       const std::string state = ReadFile(corruptDir + "/state");
@@ -665,7 +665,7 @@ int main(int argc, char* argv[])
     PresencePoller blocked;
     assert(!blocked.Init(corruptDir, 5));
     assert(!blocked.IsInitialized());
-    assert(blocked.Tick(kBase, kBase + kWallOffset, "Telegram_x", { "u2" }, 60000, 60000, 0, 0, true).empty());
+    assert(blocked.Tick(kBase, kBase + kWallOffset, "Telegram_x", { "u2" }, 60000, 60000, 0, true).empty());
     blocked.RecordStatus(kBase, kBase + kWallOffset, "Telegram_x", "u2", true, -1, false);
     assert(!blocked.Flush());
     assert(chmod((corruptDir + "/state").c_str(), 0600) == 0);
@@ -684,7 +684,7 @@ int main(int argc, char* argv[])
     {
       PresencePoller poller;
       assert(poller.Init(transientDir, 21));
-      assert(poller.Tick(kBase, kBase + kWallOffset, "Telegram_z", { "z1" }, 60000, 60000, 0, 0, true).empty());
+      assert(poller.Tick(kBase, kBase + kWallOffset, "Telegram_z", { "z1" }, 60000, 60000, 0, true).empty());
       assert(poller.Flush(true));
       assert(poller.Drain());
       assert(ReadFile(transientState).find("Telegram_z\tz1\t") != std::string::npos);
@@ -692,7 +692,7 @@ int main(int argc, char* argv[])
       // Make the state save fail (no mkostemp possible), add a new user so a
       // fresh state snapshot is forced, and confirm the worker reports it.
       assert(chmod(transientDir.c_str(), 0500) == 0);
-      poller.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_z", { "z1", "z2" }, 60000, 60000, 0, 0, true);
+      poller.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_z", { "z1", "z2" }, 60000, 60000, 0, true);
       assert(poller.Flush(true));
       std::string workerError;
       bool gotError = false;
@@ -719,12 +719,12 @@ int main(int argc, char* argv[])
     {
       PresencePoller poller;
       assert(poller.Init(transientDir, 22));
-      poller.Tick(kBase, kBase + kWallOffset, "Telegram_z", { "z3" }, 60000, 60000, 0, 0, true);
+      poller.Tick(kBase, kBase + kWallOffset, "Telegram_z", { "z3" }, 60000, 60000, 0, true);
       assert(poller.Flush(true));
       assert(poller.Drain());
 
       assert(chmod(transientDir.c_str(), 0500) == 0);
-      poller.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_z", { "z3", "z4" }, 60000, 60000, 0, 0, true);
+      poller.Tick(kBase + 1000, kBase + kWallOffset + 1000, "Telegram_z", { "z3", "z4" }, 60000, 60000, 0, true);
       assert(poller.Flush(true));
       std::string workerError;
       bool gotError = false;
@@ -750,17 +750,17 @@ int main(int argc, char* argv[])
     PresencePoller poller;
     assert(poller.Init(dir, 61));
     std::vector<std::string> candidates = { "r1" };
-    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 0, 100000, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, candidates, 60000, 60000, 100000, true).empty());
     for (int64_t t = 1000; t <= 200000; t += 1000)
     {
-      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 100000, true);
+      poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 100000, true);
     }
     assert(poller.Flush(true));
     assert(poller.Drain());
 
     // r1 is now hidden and leaves the candidate list entirely.
     std::vector<std::string> noCandidates;
-    poller.Tick(kBase + 201000, kBase + kWallOffset + 201000, profile, noCandidates, 60000, 60000, 0, 100000, true);
+    poller.Tick(kBase + 201000, kBase + kWallOffset + 201000, profile, noCandidates, 60000, 60000, 100000, true);
 
     // A pushed observation for the untracked hidden user must clear the mark.
     poller.RecordStatus(kBase + 202000, kBase + kWallOffset + 202000, profile, "r1", true, -1, false);
@@ -775,7 +775,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 203000; t <= 300000; t += 1000)
     {
       std::vector<std::string> due =
-        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 0, 100000, true);
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, candidates, 60000, 60000, 100000, true);
       if (Contains(due, "r1")) r1Seen = true;
     }
     assert(r1Seen);
@@ -789,7 +789,7 @@ int main(int argc, char* argv[])
     const std::string trickyUser = "x\ty\nz";
     PresencePoller poller;
     assert(poller.Init(dir, 7));
-    assert(poller.Tick(kBase, kBase + kWallOffset, trickyProfile, { trickyUser }, 60000, 60000, 0, 120000, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, trickyProfile, { trickyUser }, 60000, 60000, 120000, true).empty());
     poller.RecordStatus(kBase + 5000, kBase + kWallOffset + 5000, trickyProfile, trickyUser, true, -1, false);
     assert(poller.Flush(true));
     assert(poller.Drain());
@@ -800,7 +800,7 @@ int main(int argc, char* argv[])
     for (int64_t t = 1000; t <= 300000; t += 1000)
     {
       std::vector<std::string> due =
-        reloaded.Tick(kBase + t, kBase + kWallOffset + t, trickyProfile, { trickyUser }, 60000, 60000, 0, 120000, true);
+        reloaded.Tick(kBase + t, kBase + kWallOffset + t, trickyProfile, { trickyUser }, 60000, 60000, 120000, true);
       if (Contains(due, trickyUser) && t > 120000)
       {
         seenAfterWindow = true;
@@ -816,7 +816,7 @@ int main(int argc, char* argv[])
     const std::string pathE = dir + "/history." + Hex(pe) + ".jsonl";
     PresencePoller poller;
     assert(poller.Init(dir, 31));
-    assert(poller.Tick(kBase, kBase + kWallOffset, pe, { "q1" }, 60000, 60000, 0, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, pe, { "q1" }, 60000, 60000, 0, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pe, "q1", true, -1, false);
     assert(poller.Flush());
     assert(poller.Drain());
@@ -849,7 +849,7 @@ int main(int argc, char* argv[])
     const std::string pathF = dir + "/history." + Hex(pf) + ".jsonl";
     PresencePoller poller;
     assert(poller.Init(dir, 71));
-    assert(poller.Tick(kBase, kBase + kWallOffset, pf, { "w1" }, 60000, 60000, 0, 0, true).empty());
+    assert(poller.Tick(kBase, kBase + kWallOffset, pf, { "w1" }, 60000, 60000, 0, true).empty());
     poller.RecordStatus(kBase + 1000, kBase + kWallOffset + 1000, pf, "w1", true, -1, false);
     assert(poller.Flush());
     assert(poller.Drain());
@@ -873,10 +873,10 @@ int main(int argc, char* argv[])
   }
 
   {
-    // Tiered scheduling: the first p_FastCount candidates poll on the fast
-    // interval, the rest on the slow interval, both with a random phase and
-    // jitter. The fast tier re-fires many times while the slow tier barely
-    // does.
+    // Interval gradient: rank 0 polls at the fast interval and the last
+    // candidate at the slow interval, interpolated linearly, each with a
+    // random phase and jitter. Fire counts must be monotone non-increasing
+    // by rank, with the endpoints near their nominal cadences.
     PresencePoller poller;
     assert(poller.Init(dir, 77));
     std::vector<std::string> tiered;
@@ -885,7 +885,7 @@ int main(int argc, char* argv[])
       tiered.push_back("t" + std::to_string(i));
     }
     assert(poller.Tick(kBase, kBase + kWallOffset, profile, tiered,
-                       120000, 5000, 10, 0, true).empty());
+                       120000, 5000, 0, true).empty());
 
     std::unordered_map<std::string, int64_t> firstFire;
     std::unordered_map<std::string, int64_t> lastFire;
@@ -894,7 +894,7 @@ int main(int argc, char* argv[])
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, profile, tiered,
-                    120000, 5000, 10, 0, true);
+                    120000, 5000, 0, true);
       assert(due.size() <= 3); // dispatch budget holds in every tick
       for (const std::string& u : due)
       {
@@ -902,8 +902,8 @@ int main(int argc, char* argv[])
         {
           firstFire[u] = kBase + t;
         }
-        const bool fast = std::stoi(u.substr(1)) < 10;
-        const int64_t interval = fast ? 5000 : 120000;
+        const int rankIdx = std::stoi(u.substr(1));
+        const int64_t interval = 5000 + (120000 - 5000) * (int64_t)rankIdx / 49;
         if (lastFire.count(u))
         {
           // minimum gap: interval minus the +/-20% jitter, exact
@@ -913,44 +913,41 @@ int main(int argc, char* argv[])
         fireCount[u] += 1;
       }
     }
-    assert(firstFire.size() == 50); // all tiers drained within the window
-    // Fast tier cadence: roughly every 5s over 120s.
-    for (int i = 0; i < 10; ++i)
+    assert(firstFire.size() == 50); // all contacts drained within the window
+    // Endpoint cadences: rank 0 near 5 s, rank 49 near 120 s.
+    assert(fireCount["t0"] >= 15);  // ~24 fires expected
+    assert(fireCount["t49"] <= 2);
+    assert(fireCount["t0"] > fireCount["t24"]);
+    assert(fireCount["t24"] > fireCount["t49"]);
+    // Monotone non-increasing by rank (with jitter slack of one).
+    for (int i = 1; i < 50; ++i)
     {
-      const std::string u = "t" + std::to_string(i);
-      assert(fireCount[u] >= 15); // ~24 fires expected; plenty of margin
-    }
-    // Slow tier cadence: at most two fires within 125s (phase + one
-    // reschedule after 120s+jitter is beyond the window).
-    for (int i = 10; i < 50; ++i)
-    {
-      const std::string u = "t" + std::to_string(i);
-      assert(fireCount[u] <= 2);
+      assert(fireCount["t" + std::to_string(i - 1)] >= fireCount["t" + std::to_string(i)] - 1);
     }
   }
 
   {
-    // Tier promotion: a slow contact promoted into the fast tier has its
-    // deadline brought forward instead of waiting out the slow schedule.
+    // Gradient promotion: a contact moved up the ranking has its deadline
+    // brought forward into the faster interval.
     PresencePoller poller;
     assert(poller.Init(dir, 78));
-    std::vector<std::string> slowFirst = { "s1", "s2" }; // all slow: no fast tier
-    assert(poller.Tick(kBase, kBase + kWallOffset, profile, slowFirst,
-                       120000, 5000, 0, 0, true).empty());
-    // Promote s1 into the fast tier at t=3000: candidates reordered.
-    std::vector<std::string> promoted = { "s1", "s2" };
-    bool s1Seen = false;
+    std::vector<std::string> order = { "p0", "p1" }; // p1 rank 1 (~62.5 s)
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, order,
+                       120000, 5000, 0, true).empty());
+    // Promote p1 to rank 0 at t=3000: candidates reordered.
+    std::vector<std::string> promoted = { "p1", "p0" };
+    bool p1Seen = false;
     for (int64_t t = 4000; t <= 10000; t += 1000)
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, profile, promoted,
-                    120000, 5000, 1, 0, true);
+                    120000, 5000, 0, true);
       for (const std::string& u : due)
       {
-        if (u == "s1") s1Seen = true;
+        if (u == "p1") p1Seen = true;
       }
     }
-    assert(s1Seen); // promoted contact sampled within the fast interval
+    assert(p1Seen); // promoted contact sampled within the fast interval
   }
 
   if (ownDir)

@@ -82,25 +82,21 @@ history. In `ui.conf`:
 presence_poll_enabled=1
 presence_poll_interval=120
 presence_poll_fast_interval=5
-presence_poll_fast_count=10
 presence_poll_count=50
 presence_poll_heartbeat_sec=300
 presence_poll_hidden_detect_sec=172800
 ```
 
 - `presence_poll_enabled` (1/0) turns the poller on or off.
-- `presence_poll_interval` is the nominal seconds between polls of each
-  contact outside the fast tier (floored at 10; default 120). Every contact
-  starts at a random offset inside its interval and drifts by +/-20% per
-  reschedule, so requests arrive as small randomized batches, never one big
-  burst; overdue work is re-phased after pauses.
-- `presence_poll_fast_interval` / `presence_poll_fast_count`: the first
-  `presence_poll_fast_count` most-recently-spoken-to contacts poll every
-  `presence_poll_fast_interval` seconds (defaults 10 contacts / 5 s; floored
-  at 5 s and clamped to the slow interval). Setting
-  `presence_poll_fast_count` to 0 disables the fast tier. A contact promoted
-  into the fast tier (for example by a new message) has its next poll
-  brought forward into the fast cadence.
+- `presence_poll_interval` is the seconds between polls of the least-recent
+  contact (floored at 10; default 120) and `presence_poll_fast_interval` is
+  the seconds between polls of the most-recent contact (floored at 5,
+  clamped to the slow interval). Every contact in between gets a linearly
+  interpolated interval by rank, so the people you speak to most are
+  sampled most often. Each poll has a random phase and +/-20% jitter and
+  requests are dispatched in small bounded batches; overdue work is
+  re-phased after pauses. A contact promoted up the ranking (for example by
+  a new message) has its next poll brought forward into the faster cadence.
 - `presence_poll_count` is the number of most recent private chats polled per
   account (50 by default); setting it to 0 disables polling. Groups, self
   chats, status/newsletter ids and protocols without background presence
