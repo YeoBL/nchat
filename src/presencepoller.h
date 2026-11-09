@@ -161,6 +161,7 @@ private:
   static const size_t s_MaxDispatchPerTick = 3;
   static const int64_t s_MaxEligibleDeltaMs = 5 * 60 * 1000; // cap per-tick gap
   static const int64_t s_StateSaveIntervalMs = 60 * 1000;    // soft-dirty checkpoint
+  static const int64_t s_MinDispatchGapMs = 150; // floor between dispatch bursts
 
   static std::string EscapeJson(const std::string& p_Str);
   static std::string HexEncode(const std::string& p_Str);
@@ -198,6 +199,8 @@ private:
   std::unordered_map<std::string, std::unordered_map<std::string, UserState>> m_UserStates;
   std::unordered_map<std::string, std::unordered_map<std::string, LastSample>> m_LastSamples;
   std::unordered_map<std::string, std::unordered_map<std::string, int64_t>> m_NextPollMs;
+  std::unordered_map<std::string, std::unordered_map<std::string, int64_t>> m_ScheduledInterval;
+  std::unordered_map<std::string, int64_t> m_LastDispatchMs;
   std::unordered_map<std::string, std::unordered_set<std::string>> m_Tracked;
   std::unordered_map<std::string, std::unordered_set<std::string>> m_PrevSelected;
   std::unordered_map<std::string, int64_t> m_LastTickMs;
@@ -396,10 +399,12 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
 
   // Drop schedules for users no longer selected.
   auto& nextPoll = m_NextPollMs[p_ProfileId];
+  auto& scheduled = m_ScheduledInterval[p_ProfileId];
   for (auto it = nextPoll.begin(); it != nextPoll.end(); )
   {
     if (!nowSelected.count(it->first))
     {
+      scheduled.erase(it->first);
       it = nextPoll.erase(it);
     }
     else
@@ -422,29 +427,48 @@ inline std::vector<std::string> PresencePoller::Tick(int64_t p_SteadyMs, int64_t
     {
       const int64_t interval = userInterval(rank[userId]);
       nextPoll[userId] = p_SteadyMs + UniformInt(0, interval - 1);
+      scheduled[userId] = interval;
     }
   }
 
-  // Users due now; reschedule with a +/-20% jitter around their tier's
-  // interval. Long-overdue users are re-phased instead of firing a catch-up
-  // burst, and only the per-tick dispatch budget is actually fired and
-  // rescheduled; the rest stay overdue and fire on later ticks.
+  // Dispatch only on ticks at least the minimum gap apart, so a burst of
+  // overdue users cannot exceed s_MaxDispatchPerTick per gap window.
   std::vector<std::string> due;
-  for (const std::string& userId : nowSelected)
+  if (m_LastDispatchMs[p_ProfileId] == 0 ||
+      p_SteadyMs - m_LastDispatchMs[p_ProfileId] >= s_MinDispatchGapMs)
   {
-    int64_t& t = nextPoll[userId];
-    if (t > p_SteadyMs) continue;
-    const int64_t interval = userInterval(rank[userId]);
-    if (t < p_SteadyMs - 2 * interval)
+    // Users due now; reschedule with a +/-20% jitter around their tier's
+    // interval. Long-overdue users are re-phased instead of firing a
+    // catch-up burst, and only the per-tick dispatch budget is actually
+    // fired and rescheduled; the rest stay overdue and fire on later
+    // ticks. Promotion to a faster tier brings the deadline forward so a
+    // contact that becomes active is sampled soon.
+    for (const std::string& userId : nowSelected)
     {
-      t = p_SteadyMs + UniformInt(0, interval - 1);
-      continue;
+      int64_t& t = nextPoll[userId];
+      int64_t& sched = scheduled[userId];
+      const int64_t interval = userInterval(rank[userId]);
+      if (sched != 0 && interval < sched && t > p_SteadyMs)
+      {
+        t = std::min(t, p_SteadyMs + UniformInt(0, interval - 1));
+      }
+      sched = interval;
+      if (t > p_SteadyMs) continue;
+      if (t < p_SteadyMs - 2 * interval)
+      {
+        t = p_SteadyMs + UniformInt(0, interval - 1);
+        continue;
+      }
+      if (due.size() >= s_MaxDispatchPerTick) break;
+      due.push_back(userId);
+      const int64_t jitter = interval / 5;
+      t = p_SteadyMs + interval + UniformInt(-jitter, jitter);
+      if (t <= p_SteadyMs) t = p_SteadyMs + 1000;
     }
-    if (due.size() >= s_MaxDispatchPerTick) break;
-    due.push_back(userId);
-    const int64_t jitter = std::max<int64_t>(1000, interval / 5);
-    t = p_SteadyMs + interval + UniformInt(-jitter, jitter);
-    if (t <= p_SteadyMs) t = p_SteadyMs + 1000;
+    if (!due.empty())
+    {
+      m_LastDispatchMs[p_ProfileId] = p_SteadyMs;
+    }
   }
 
   prev.swap(nowSelected);

@@ -2725,7 +2725,7 @@ void UiModel::Impl::ProcessPresencePoll()
 
   const int64_t pollIntervalSec = std::max<int64_t>(10, UiConfig::GetNum("presence_poll_interval"));
   const int64_t pollIntervalMs = pollIntervalSec * 1000;
-  const int64_t fastIntervalSec = std::max<int64_t>(1, UiConfig::GetNum("presence_poll_fast_interval"));
+  const int64_t fastIntervalSec = std::max<int64_t>(5, UiConfig::GetNum("presence_poll_fast_interval"));
   const int64_t fastIntervalMs = fastIntervalSec * 1000;
   const size_t fastCount =
     static_cast<size_t>(std::max<int64_t>(0, UiConfig::GetNum("presence_poll_fast_count")));
@@ -2820,15 +2820,20 @@ void UiModel::Impl::ProcessPresencePoll()
 
     for (const std::string& userId : due)
     {
+      // Dispatch only while the account can actually receive presence;
+      // an announced-unavailable WhatsApp session must not keep renewing
+      // subscriptions that cannot deliver anything.
+      if (!canObserve)
+      {
+        continue;
+      }
+
       // Re-affirm the last genuine observation so the history keeps proving
       // continued observation. This runs only while the account can
       // actually observe; heartbeats during outages would overstate
       // observation. Display-state guesses are never recorded, so this
       // does nothing for users with no observation yet.
-      if (canObserve)
-      {
-        m_PresencePoller.RecordHeartbeat(steadyMs, nowMs, profileId, userId, heartbeatMs);
-      }
+      m_PresencePoller.RecordHeartbeat(steadyMs, nowMs, profileId, userId, heartbeatMs);
 
       std::shared_ptr<GetPresenceRequest> request = std::make_shared<GetPresenceRequest>();
       request->userId = userId;

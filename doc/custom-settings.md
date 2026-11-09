@@ -92,12 +92,15 @@ presence_poll_hidden_detect_sec=172800
 - `presence_poll_interval` is the nominal seconds between polls of each
   contact outside the fast tier (floored at 10; default 120). Every contact
   starts at a random offset inside its interval and drifts by +/-20% per
-  reschedule, so requests never arrive in one burst. After a long pause the
-  requests are re-phased instead of firing at once.
+  reschedule, so requests arrive as small randomized batches, never one big
+  burst; overdue work is re-phased after pauses.
 - `presence_poll_fast_interval` / `presence_poll_fast_count`: the first
   `presence_poll_fast_count` most-recently-spoken-to contacts poll every
-  `presence_poll_fast_interval` seconds (defaults 10 contacts / 5 s), and
-  the rest every `presence_poll_interval` seconds.
+  `presence_poll_fast_interval` seconds (defaults 10 contacts / 5 s; floored
+  at 5 s and clamped to the slow interval). Setting
+  `presence_poll_fast_count` to 0 disables the fast tier. A contact promoted
+  into the fast tier (for example by a new message) has its next poll
+  brought forward into the fast cadence.
 - `presence_poll_count` is the number of most recent private chats polled per
   account (50 by default); setting it to 0 disables polling. Groups, self
   chats, status/newsletter ids and protocols without background presence
@@ -143,9 +146,12 @@ files stay on this machine and are never uploaded.
 
 ### Latest reported status screen
 
-Run `nchat-presence` or `nchat-presence current` for the grouped current-status
-browser. Contact names lead each row, with the selected contact's identifier and
-timestamp details below. The header shows when the local cache was read.
+Run `nchat-presence` or `nchat-presence current` for one row per person, with
+separate Telegram and WhatsApp columns. Matching complete phone numbers join
+automatically, as do the same service identity across accounts. Each column
+keeps its own status and timestamps. A dash means that service has no contact in
+the current view. The selected-person panel shows both service identities and
+their report details. The header shows when the local cache was read.
 Reports older than five minutes are labelled old or unconfirmed. Cached
 heartbeats do not renew freshness. Flags render as country letters, with emoji
 modifiers and joiners simplified for stable terminal columns.
@@ -153,9 +159,26 @@ modifiers and joiners simplified for stable terminal columns.
 Use arrows or j/k to select, Tab to cycle All/WhatsApp/Telegram, / to search names
 or identifiers, Enter to finish entering a query, Esc to clear, r to read the
 cache again and q to quit. Page Up/Page Down and g/G move through longer lists.
-The layout adapts to narrow terminals. `--plain` prints a grouped snapshot and
+Tab filters people who have the selected service while preserving both columns.
+The layout uses columns from 45 terminal columns and compact person cards below
+that width. `--plain` prints the paired-column snapshot and
 is selected automatically for piped output. `NO_COLOR=1` requests monochrome.
 The screen updates displayed ages between refreshes. Press r for newer records.
+
+When phone metadata is missing, select a person and press **m**. Choose their
+contact on the other service and press Enter to confirm. Matching names appear
+first in the picker. Name equality alone leaves identities separate until this
+confirmation. Search matches all linked aliases and identifiers. Press **u** to
+remove a selected person's manual links. Automatic phone/account matches still
+apply. Multiple accounts retain their records, with the newest genuine report
+chosen for each service column.
+
+Confirmed display links are stored privately in
+`<config>/presence-contact-links.json` with mode `0600`, using a lock and atomic
+replacement. These are local display preferences. Link and Unlink update that
+file. Browsing and refresh read the existing cache and reports. Invalid saved
+preferences preserve the automatic view and display a warning, and a failed save
+retains the previous file.
 
 The weighted review and its checks are in
 [nchat presence UI scorecard](nchat-presence-ui-review.md).

@@ -890,11 +890,12 @@ int main(int argc, char* argv[])
     std::unordered_map<std::string, int64_t> firstFire;
     std::unordered_map<std::string, int64_t> lastFire;
     std::unordered_map<std::string, int> fireCount;
-    for (int64_t t = 1000; t <= 120000; t += 1000)
+    for (int64_t t = 1000; t <= 125000; t += 1000)
     {
       std::vector<std::string> due =
         poller.Tick(kBase + t, kBase + kWallOffset + t, profile, tiered,
                     120000, 5000, 10, 0, true);
+      assert(due.size() <= 3); // dispatch budget holds in every tick
       for (const std::string& u : due)
       {
         if (!firstFire.count(u))
@@ -905,27 +906,51 @@ int main(int argc, char* argv[])
         const int64_t interval = fast ? 5000 : 120000;
         if (lastFire.count(u))
         {
-          // minimum gap: interval minus the +/-20% jitter, with slack
-          assert(kBase + t - lastFire[u] >= interval - interval / 5 - 1000);
+          // minimum gap: interval minus the +/-20% jitter, exact
+          assert(kBase + t - lastFire[u] >= interval - interval / 5);
         }
         lastFire[u] = kBase + t;
         fireCount[u] += 1;
       }
     }
-    assert(firstFire.size() == 50);
+    assert(firstFire.size() == 50); // all tiers drained within the window
     // Fast tier cadence: roughly every 5s over 120s.
     for (int i = 0; i < 10; ++i)
     {
       const std::string u = "t" + std::to_string(i);
       assert(fireCount[u] >= 15); // ~24 fires expected; plenty of margin
     }
-    // Slow tier cadence: at most two fires within 120s (phase + one
+    // Slow tier cadence: at most two fires within 125s (phase + one
     // reschedule after 120s+jitter is beyond the window).
     for (int i = 10; i < 50; ++i)
     {
       const std::string u = "t" + std::to_string(i);
       assert(fireCount[u] <= 2);
     }
+  }
+
+  {
+    // Tier promotion: a slow contact promoted into the fast tier has its
+    // deadline brought forward instead of waiting out the slow schedule.
+    PresencePoller poller;
+    assert(poller.Init(dir, 78));
+    std::vector<std::string> slowFirst = { "s1", "s2" }; // all slow: no fast tier
+    assert(poller.Tick(kBase, kBase + kWallOffset, profile, slowFirst,
+                       120000, 5000, 0, 0, true).empty());
+    // Promote s1 into the fast tier at t=3000: candidates reordered.
+    std::vector<std::string> promoted = { "s1", "s2" };
+    bool s1Seen = false;
+    for (int64_t t = 4000; t <= 10000; t += 1000)
+    {
+      std::vector<std::string> due =
+        poller.Tick(kBase + t, kBase + kWallOffset + t, profile, promoted,
+                    120000, 5000, 1, 0, true);
+      for (const std::string& u : due)
+      {
+        if (u == "s1") s1Seen = true;
+      }
+    }
+    assert(s1Seen); // promoted contact sampled within the fast interval
   }
 
   if (ownDir)
