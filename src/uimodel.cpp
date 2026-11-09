@@ -1922,6 +1922,16 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
               chatMessage.fileInfo = overlay->second.fileInfo;
             }
 
+            if (previous != messages.end())
+            {
+              CacheUtil::PreserveEditedContent(previous->second, chatMessage);
+              if (newMessagesNotify->contentUpdate)
+              {
+                chatMessage.isRead = previous->second.isRead;
+                chatMessage.timeSent = previous->second.timeSent;
+              }
+            }
+
             if (historical && previous != messages.end())
             {
               // A partial phone snapshot is not newer read/download state than

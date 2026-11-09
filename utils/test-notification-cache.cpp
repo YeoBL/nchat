@@ -135,6 +135,54 @@ int main() try
   assert(MessageCache::GetUnreadMessageIds("test", "other' OR 1=1 --").empty());
   assert(MessageCache::GetUnreadMessageIds("missing", "chat").empty());
   assert(MessageCache::GetUnreadChatIds("test") == std::vector<std::string>{"chat"});
+  {
+    // Individual Telegram lookups/edit notifications are not contiguous history.
+    // They must still persist, without filling a gap or resetting sequence state.
+    MessageCache::m_CheckSequence["test"] = true;
+    writer << "INSERT INTO messages(chatId,id,text,timeSent,isRead,isSequence) "
+      "VALUES('edit-sync','existing','original',1000,1,0);";
+    auto notify = std::make_shared<NewMessagesNotify>("test");
+    notify->success = true; notify->chatId = "edit-sync"; notify->sequence = false;
+    notify->contentUpdate = true;
+    ChatMessage edited;
+    edited.id = "existing"; edited.text = "updated Unicode ✓";
+    edited.isEdited = true; edited.isRead = false; edited.timeSent = 9000;
+    notify->chatMessages = {edited};
+    MessageCache::AddFromServiceMessage("test", notify);
+    auto transient = std::make_shared<NewMessagesNotify>(*notify);
+    transient->contentUpdate = false;
+    transient->chatMessages.front().id = "temporary-display";
+    MessageCache::AddFromServiceMessage("test", transient);
+    MessageCache::StopWorker(); // Drain the real service-to-cache queue.
+    std::vector<ChatMessage> stored;
+    assert(MessageCache::GetOneMessage("test", "edit-sync", edited.id, stored));
+    assert(stored.front().text == edited.text && stored.front().isEdited && stored.front().isRead);
+    assert(stored.front().timeSent == 1000);
+    std::vector<ChatMessage> temporary;
+    assert(!MessageCache::GetOneMessage("test", "edit-sync", "temporary-display", temporary));
+    writer << "SELECT isSequence FROM messages WHERE chatId='edit-sync' AND id='existing';" >> count;
+    assert(count == 0 && !MessageCache::m_UpdatedSequence["test"]["edit-sync"]);
+    auto add = std::make_shared<MessageCache::AddMessagesRequest>();
+    add->profileId = "test"; add->chatId = "edit-sync"; add->sequence = false;
+    edited.id = "uncached"; add->chatMessages = {edited};
+    MessageCache::PerformRequest(add);
+    writer << "SELECT isSequence FROM messages WHERE chatId='edit-sync' AND id='uncached';" >> count;
+    assert(count == 0);
+    writer << "UPDATE messages SET isSequence=1 WHERE chatId='edit-sync' AND id='existing';";
+    edited.id = "existing"; edited.text = "second edit"; add->chatMessages = {edited};
+    MessageCache::PerformRequest(add);
+    writer << "SELECT isSequence FROM messages WHERE chatId='edit-sync' AND id='existing';" >> count;
+    assert(count == 1);
+    edited.text = "stale original"; edited.isEdited = false; add->chatMessages = {edited};
+    MessageCache::PerformRequest(add);
+    stored.clear();
+    assert(MessageCache::GetOneMessage("test", "edit-sync", edited.id, stored));
+    assert(stored.front().text == "second edit" && stored.front().isEdited);
+    writer << "DELETE FROM messages WHERE chatId='edit-sync';";
+    MessageCache::m_CheckSequence["test"] = false;
+    MessageCache::Init();
+  }
+  std::cout << "production edits: nonsequence persistence, repeated edits, replay protection and preserved history boundaries passed\n";
   auto membership = std::make_shared<MessageCache::UpdateMembershipRequest>();
   membership->profileId = "test"; membership->chatId = "chat";
   int membershipNotifications = 0;

@@ -102,6 +102,7 @@ private:
     std::string fromMsgId;
     std::vector<ChatMessage> chatMessages;
     bool historical = false;
+    bool sequence = true;
   };
 
   class AddChatsRequest : public Request
@@ -296,7 +297,7 @@ public:
   static void AddProfile(const std::string& p_ProfileId, bool p_CheckSequence, int p_DirVersion, bool p_IsSetup,
                          bool p_AllowReadOnly, bool* p_IsRemoved = nullptr);
   static void AddMessages(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_FromMsgId,
-                          const std::vector<ChatMessage>& p_ChatMessages, bool historical = false);
+                          const std::vector<ChatMessage>& p_ChatMessages, bool historical = false, bool sequence = true);
   static void AddChats(const std::string& p_ProfileId, const std::vector<ChatInfo>& p_ChatInfos);
   static void AddContacts(const std::string& p_ProfileId, bool p_FullSync,
                           const std::vector<ContactInfo>& p_ContactInfos);

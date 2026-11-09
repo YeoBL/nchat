@@ -100,3 +100,16 @@ void CacheUtil::UpdateReactions(const Reactions& p_Source, Reactions& p_Target)
   LOG_INFO("result: %s", ReactionsToString(p_Target).c_str());
 #endif
 }
+
+// An unedited replay cannot supersede content already known to be edited.
+// Read, pin and reaction state can still advance independently.
+void CacheUtil::PreserveEditedContent(const ChatMessage& previous, ChatMessage& incoming)
+{
+  if (!previous.isEdited || incoming.isEdited || incoming.isDeleted) return;
+  incoming.text = previous.text;
+  incoming.fileInfo = previous.fileInfo;
+  incoming.quotedId = previous.quotedId;
+  incoming.quotedText = previous.quotedText;
+  incoming.quotedSender = previous.quotedSender;
+  incoming.isEdited = true;
+}

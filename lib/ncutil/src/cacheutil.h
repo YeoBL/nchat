@@ -14,6 +14,7 @@
 class CacheUtil
 {
 public:
+  static void PreserveEditedContent(const ChatMessage& previous, ChatMessage& incoming);
   static bool IsDefaultReactions(const Reactions& p_Reactions);
   static std::string ReactionsToString(const Reactions& p_Reactions);
   static void UpdateReactions(const Reactions& p_Source, Reactions& p_Target);

@@ -1237,11 +1237,23 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         }
 
         int64_t chatId = StrUtil::NumFromHex<int64_t>(getMessageRequest->chatId);
-        int64_t fromMsgId = StrUtil::NumFromHex<int64_t>(getMessageRequest->msgId);
-        int32_t offset = -1; // to get fromMsgId itself
-        int32_t limit = 1;
-        bool sequence = false; // out-of-sequence single message
-        GetChatHistory(chatId, fromMsgId, offset, limit, sequence);
+        int64_t msgId = StrUtil::NumFromHex<int64_t>(getMessageRequest->msgId);
+        SendQuery(td::td_api::make_object<td::td_api::getMessage>(chatId, msgId),
+          [this, chatId, msgId](Object object)
+          {
+            if (object->get_id() != td::td_api::message::ID) return;
+            auto message = td::move_tl_object_as<td::td_api::message>(object);
+            if (message->chat_id_ != chatId || message->id_ != msgId) return;
+            ChatMessage chatMessage;
+            TdMessageConvert(*message, chatMessage);
+            auto notify = std::make_shared<NewMessagesNotify>(m_ProfileId);
+            notify->success = true;
+            notify->chatId = StrUtil::NumToHex(chatId);
+            notify->chatMessages = {chatMessage};
+            notify->sequence = false;
+            notify->contentUpdate = true;
+            CallMessageHandler(notify);
+          });
       }
       break;
 
