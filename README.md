@@ -7,6 +7,8 @@ commits, shortcuts, verification and service limitations. The recorded vanilla
 baseline is the `vanilla-base` tag (nchat 5.17.26), not the latest upstream branch.
 Optional portable configuration examples are in
 [doc/custom-settings.md](doc/custom-settings.md).
+The [project handover](doc/PROJECT_HANDOVER.md) covers the live macOS installation,
+source map, maintenance workflow, tests, deployment and rollback procedures.
 
 | **Linux** | **Mac** |
 |-----------|---------|
