@@ -359,6 +359,7 @@ objects, making a fresh relevant build important.
 | Screen queue freeze | `python3 utils/test-screen-scroll.py` |
 | Helper upgrade safety | `python3 utils/test-macos-helper-install.py` |
 | Cached-browser synthetic behavior | `python3 utils/nchat-peek-view.py --self-test` |
+| Presence poller scheduling and persistence | `sh utils/test-presence-poller.sh` |
 
 Go tests involving the C++ host logger can need the existing wrapper's native
 stubs. Follow that wrapper when linker symbols are unresolved. A bare test
@@ -485,11 +486,14 @@ publish titles and refresh the visible list while preserving unread state.
 ## Outstanding request at handover
 
 The user most recently requested continuous presence polling for roughly the
-last 50 private contacts on both services, persisted as an activity history while
-nchat runs, with hidden statuses skipped. No implementation had been made at the
-time of this handover. The user has since explicitly re-requested and approved
-this feature, and it is being implemented on this branch. Ordinary active-chat
-presence refresh already exists.
+last 50 private contacts on both services, persisted as an activity history
+while nchat runs, with hidden statuses skipped. No implementation had been
+made at the time of this handover. The user approved the feature on
+9 November 2026; it is implemented on this branch as continuous background
+presence polling for the most recent 30 private chats per account (see the
+`Continuous background presence history` row in `changes.md` and
+`doc/custom-settings.md` for the settings and history format). Ordinary
+active-chat presence refresh also still exists.
 
 Older birthday-gift research and individual chat-deletion tasks belonged to
 separate user requests. They confer no authorization for new message mutations

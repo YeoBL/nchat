@@ -88,9 +88,10 @@ presence_poll_hidden_detect_sec=172800
 
 - `presence_poll_enabled` (1/0) turns the poller on or off.
 - `presence_poll_interval` is the nominal seconds between polls of each
-  contact. Every contact starts at a random offset inside the interval and
-  drifts by +/-20% per reschedule, so requests never arrive in one burst.
-  After a long pause the requests are re-phased instead of firing at once.
+  contact (floored at 10). Every contact starts at a random offset inside
+  the interval and drifts by +/-20% per reschedule, so requests never arrive
+  in one burst. After a long pause the requests are re-phased instead of
+  firing at once.
 - `presence_poll_count` is the number of most recent private chats polled per
   account (30 by default). Groups, self chats, status/newsletter ids and
   protocols without background presence support are excluded.
@@ -99,21 +100,26 @@ presence_poll_hidden_detect_sec=172800
   observation even when the status never changes.
 - `presence_poll_hidden_detect_sec` is the observation window (default 2
   days) after which contacts that never showed any online/last-seen data are
-  treated as having their status hidden and are skipped from polling. Only
-  time actually spent in the poll set counts toward the window; if such a
-  contact later shows data (for example, through a service push), it returns
-  to the poll set. Deleting the contents of `~/.config/nchat/presence/`
-  re-detects everyone from scratch.
+  treated as having their status hidden and are skipped from polling. Setting
+  it to 0 disables hidden detection. Only time actually spent in the poll set
+  while the account can receive presence counts toward the window (pauses,
+  disconnects and announced-offline periods do not); if such a contact later
+  shows data (for example, through a service push), it returns to the poll
+  set. Deleting the contents of `~/.config/nchat/presence/` re-detects
+  everyone from scratch.
 
 The history is stored under `~/.config/nchat/presence/` as one JSONL file per
-account (`history.<hex-encoded-profile>.jsonl`) plus a small state file. Each
-sample line is
+account (`history.<hex-encoded-profile>.jsonl`) plus a small state file.
+Writes happen on a private background thread with fsync, partial-append
+rollback and crash-tail repair, so slow storage never stalls the interface.
+Each sample line is
 `{"ts":<ms>,"u":"<userId>","on":0|1,"seen":<ms|-1>,"recent":0|1}` where `seen`
-values 1 and 2 mean Telegram's coarse "last month"/"last week" status and -1
-means unknown or hidden; heartbeat re-affirmations add `"hb":1`. Lines with
-`"mark":"hidden"` record when a contact was skipped. Only genuine service
-observations are recorded, never guesses derived from the UI display state.
-Telegram samples use the status TDLib already keeps for recent chats;
-WhatsApp samples come from presence subscriptions, so WhatsApp data only
-flows while this installation is online (see `online_status_share`). The
-files stay on this machine and are never uploaded.
+values 1 and 2 mean Telegram's coarse "last month"/"last week" status, 0 is
+reserved, and -1 means unknown or hidden; heartbeat re-affirmations add
+`"hb":1`. Lines with `"mark":"hidden"` record when a contact was skipped.
+Only genuine service observations are recorded, never guesses derived from
+the UI display state. Telegram samples use the status TDLib already keeps
+for recent chats; WhatsApp samples come from presence subscriptions, so
+WhatsApp data only flows while this installation is online (see
+`online_status_share`). The files stay on this machine and are never
+uploaded.
