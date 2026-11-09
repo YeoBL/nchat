@@ -62,9 +62,9 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.dir, "probe-dir", "", "New private nchat-viewonce-probe-* directory under the system temporary directory")
 	fs.Var(&o.senders, "sender", "Allowed sender JID; repeat for phone/LID aliases")
 	fs.DurationVar(&o.lifetime, "lifetime", 20*time.Minute, "Bounded experiment lifetime")
-	fs.StringVar(&o.loginControl, "login-control", "", "Login only: web, android or android-qr9; disconnect immediately after authentication")
-	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (o.loginControl != "" && o.loginControl != "web" && o.loginControl != "android" && o.loginControl != "android-qr9") || (o.loginControl == "" && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
-		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control web|android|android-qr9) [--lifetime 20m]")
+	fs.StringVar(&o.loginControl, "login-control", "", "Login only: web, android, android-qr9 or android-compat; disconnect after authentication")
+	if fs.Parse(args) != nil || fs.NArg() != 0 || o.dir == "" || (o.loginControl != "" && o.loginControl != "web" && o.loginControl != "android" && o.loginControl != "android-qr9" && o.loginControl != "android-compat") || (o.loginControl == "" && len(o.senders) == 0) || o.lifetime < time.Minute || o.lifetime > time.Hour {
+		return options{}, errors.New("use --probe-dir NEW-ABSOLUTE-TEMP-PATH (--sender JID [--sender ALIAS] | --login-control web|android|android-qr9|android-compat) [--lifetime 20m]")
 	}
 	return o, nil
 }
@@ -223,10 +223,22 @@ func configureClient(device *store.Device, mode string) *whatsmeow.Client {
 	store.DeviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{}
 	client := whatsmeow.NewClient(device, waLog.Noop)
 	client.QRClientType = whatsmeow.PairClientChrome
-	if mode == "android-qr9" {
+	if mode == "android-qr9" || mode == "android-compat" {
 		// Current Baileys Android presets map to OTHER_WEB_CLIENT, not Chrome.
 		// This changes one registration field only; it is not a verified fix.
 		client.QRClientType = whatsmeow.PairClientOtherWebClient
+	}
+	if mode == "android-compat" {
+		// Match Baileys' post-pair login flags, without changing registration,
+		// keys, protocol validation, or the production library/profile.
+		client.GetClientPayload = func() *waWa6.ClientPayload {
+			payload := device.GetClientPayload()
+			if payload.DevicePairingData == nil {
+				payload.LidDbMigrated = proto.Bool(false)
+				payload.Lc = nil
+			}
+			return payload
+		}
 	}
 	client.ManualHistorySyncDownload, client.DisableManualHistorySyncReceipt = true, true
 	client.AutomaticMessageRerequestFromPhone, client.EnableDecryptedEventBuffer = false, false
@@ -247,7 +259,10 @@ func connectionDiagnostic(event any) string {
 	case *events.ConnectFailure:
 		return "connect-failure " + strconv.Itoa(int(event.Reason))
 	case *events.LoggedOut:
-		return "logged-out " + strconv.Itoa(int(event.Reason))
+		if event.OnConnect {
+			return "logged-out-on-connect " + strconv.Itoa(int(event.Reason))
+		}
+		return "logged-out-stream " + strconv.Itoa(int(event.Reason))
 	case *events.TemporaryBan:
 		return "temporary-ban " + strconv.Itoa(int(event.Code))
 	case *events.ClientOutdated:

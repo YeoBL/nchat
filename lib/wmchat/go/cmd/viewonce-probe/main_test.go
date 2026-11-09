@@ -22,6 +22,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -79,6 +80,37 @@ func TestTerminalLoginFailureIsExplicit(t *testing.T) {
 	}
 }
 
+func TestAndroidCompatibilityChangesOnlyPostPairLoginFlags(t *testing.T) {
+	base, props, logger := store.BaseClientPayload, store.DeviceProps, signalLog.Logger
+	t.Cleanup(func() { store.BaseClientPayload, store.DeviceProps, signalLog.Logger = base, props, logger })
+	// NewDevice generates synthetic keys in memory; no DB or account is opened.
+	device := (&sqlstore.Container{}).NewDevice()
+	baseline := configureClient(device, "android-qr9")
+	registration := device.GetClientPayload()
+	registrationProps := proto.Clone(store.DeviceProps)
+	compat := configureClient(device, "android-compat")
+	if baseline.GetClientPayload != nil || compat.GetClientPayload == nil ||
+		compat.QRClientType != baseline.QRClientType ||
+		!proto.Equal(registration, compat.GetClientPayload()) || !proto.Equal(registrationProps, store.DeviceProps) {
+		t.Fatal("compatibility variant changed registration or QR baseline")
+	}
+	id := types.NewADJID("100", 0, 7)
+	device.ID = &id
+	want := device.GetClientPayload()
+	want.LidDbMigrated = proto.Bool(false)
+	want.Lc = nil
+	got := compat.GetClientPayload()
+	if !proto.Equal(want, got) || got.LidDbMigrated == nil || got.GetLidDbMigrated() || got.Lc != nil ||
+		!got.GetPassive() || !got.GetPull() || got.GetUserAgent().GetPlatform() != waWa6.ClientPayload_UserAgent_ANDROID || got.WebInfo != nil {
+		t.Fatal("post-pair login changed fields other than the two compatibility flags")
+	}
+	if !device.GetClientPayload().GetLidDbMigrated() || device.GetClientPayload().Lc == nil ||
+		!compat.ManualHistorySyncDownload || !compat.DisableManualHistorySyncReceipt ||
+		compat.AutomaticMessageRerequestFromPhone || compat.EnableDecryptedEventBuffer || compat.UseRetryMessageStore {
+		t.Fatal("variant modified library defaults or privacy limits")
+	}
+}
+
 func TestConnectionDiagnosticsNeverPrintPrivateFields(t *testing.T) {
 	private := "private-ID-key-phone-error"
 	raw := &waBinary.Node{Tag: private}
@@ -89,7 +121,8 @@ func TestConnectionDiagnosticsNeverPrintPrivateFields(t *testing.T) {
 		{&events.PairSuccess{BusinessName: private}, "pair-success"},
 		{&events.PairError{BusinessName: private, Error: errors.New(private)}, "pair-error"},
 		{&events.ConnectFailure{Reason: 409, Message: private, Raw: raw}, "connect-failure 409"},
-		{&events.LoggedOut{Reason: 401}, "logged-out 401"},
+		{&events.LoggedOut{Reason: 401}, "logged-out-stream 401"},
+		{&events.LoggedOut{Reason: 401, OnConnect: true}, "logged-out-on-connect 401"},
 		{&events.TemporaryBan{Code: 101}, "temporary-ban 101"},
 		{&events.ClientOutdated{}, "client-outdated"},
 		{&events.QRScannedWithoutMultidevice{}, "scanned-without-multidevice"},
@@ -292,7 +325,7 @@ func TestArgumentsAreBoundedAndNeverEchoIdentity(t *testing.T) {
 	if err != nil || o.lifetime != 20*time.Minute {
 		t.Fatal("valid options rejected")
 	}
-	for _, mode := range []string{"web", "android", "android-qr9"} {
+	for _, mode := range []string{"web", "android", "android-qr9", "android-compat"} {
 		control, err := parseOptions([]string{"--probe-dir", "/tmp/nchat-viewonce-probe-synthetic", "--login-control", mode})
 		if err != nil || control.loginControl != mode || len(control.senders) != 0 {
 			t.Fatal("login-only control requires no private sender identity")

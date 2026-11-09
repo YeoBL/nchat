@@ -50,6 +50,19 @@ For an authentication-only experimental comparison, use `--login-control android
 with that other new profile. This also skips message inspection and disconnects
 on authentication; it does not perform the fresh-photo delivery test.
 
+`--login-control android-qr9` is a controlled variant: it changes only the QR
+client classification from Chrome (`1`) to OtherWebClient (`9`), leaving Android
+registration/login payloads and privacy limits unchanged. This follows the
+[current Baileys Android QR mapping](https://github.com/WhiskeySockets/Baileys/blob/0af2386292907f7d9742d8d41f830d8c48208fa1/src/Utils/companion-reg-client-utils.ts)
+and [Android browser preset](https://github.com/WhiskeySockets/Baileys/blob/0af2386292907f7d9742d8d41f830d8c48208fa1/src/Utils/browser-utils.ts),
+not the separate Business-account workaround. It is an experiment, not a verified
+fix for the later `401`. Both client types use the same five-field QR deep link.
+
+`--login-control android-compat` uses the `android-qr9` registration and changes
+two post-pair login fields, setting `LidDbMigrated` to false and omitting `Lc`.
+Synthetic checks verify the registration payload and other login fields. This
+variant has no verified successful live login or media-delivery outcome.
+
 In Android modes, a fresh PairSuccess plus stream error `516` permits one explicit
 disconnect/reconnect on the same client and new private session. The handoff is
 queued outside the event callback, handles callback reordering, and is skipped
@@ -57,10 +70,15 @@ after authentication or cancellation. It does not reopen profiles or alter nchat
 This is a bounded experimental handoff, not a general meaning assigned to every
 `516` error or a guarantee of successful Android login.
 
-Both modes emit fixed connection-event categories and numeric failure codes only.
+Login controls emit fixed connection-event categories and numeric failure codes only.
+Logout diagnostics distinguish rejection during connection from stream logout.
 Raw errors, nodes, passkeys and account identifiers are never printed. A phone-side
 failure before a server pairing response may still produce only a QR timeout;
 diagnostics do not guarantee that the phone's error cause is available here.
+Explicit logout, rejected authentication, outdated-client, temporary-ban and
+replaced-stream events stop the probe with a generic error, rather than leaving
+it waiting at "paired" until the deadline. Ordinary disconnects and the one allowed
+`516` handoff are not classified as terminal failures.
 
 Standard output contains only timestamps and Boolean metadata for fresh incoming
 direct messages from the selected aliases: unavailable/view-once/image flags and
@@ -71,7 +89,7 @@ or image bytes are printed.
 ## Safety and limits
 
 - The experimental registration advertises Android-phone capabilities with an
-  independent Chrome QR client type. This is an experiment, not confirmed service
+  independently selected QR client type. This is an experiment, not confirmed service
   compatibility or a production nchat setting.
 - The probe issues no explicit history requests, user-media downloads, presence,
   read receipts, or opened/played receipts. It does not display any photo.
