@@ -174,13 +174,16 @@ signs, parentheses and hyphens work. Results filter as you type. Enter finishes
 the query and arrow/page keys immediately navigate its results. Esc clears, r reads the
 cache again and q to quit. Page Up/Page Down and g/G move through longer lists.
 Tab filters people who have the selected service while preserving both columns.
-Press **Enter** on a selected contact to open their online-period table: the
-times they came online and went offline, merged across services, newest
-first, with an estimated length (`~15m`) per session. `?` marks a session
-whose end the platform never recorded, `open?` a session with no closing
-observation yet, and `~` flags that the start may predate the first
-observation. q or Esc returns to the list. The legacy `show` command still
-prints the raw samples for full detail.
+Press **Enter** on a selected contact to open their online activity, newest
+first. The wide table shows a full date, start/end times including seconds,
+estimated duration and full service name. Cross-midnight ends include their
+own date. Narrow windows show the same details in compact cards. Missing end
+times say **Not recorded**, and their duration is **Unknown**. The `~` prefix
+marks an estimated duration. Online periods begin at the first observed online
+sample, so their actual start may be earlier. The footer shows your position in
+the history. Arrow/page keys and g/G navigate, r reloads while preserving your
+position, and q or Esc returns to contacts. The legacy `show` command prints the
+underlying samples.
 The list itself uses columns from 45 terminal columns and compact person
 cards below that width. `--plain` prints the paired-column snapshot and is
 selected automatically for piped output. `NO_COLOR=1` requests monochrome.
@@ -191,7 +194,10 @@ When phone metadata is missing, select a person and press **m**. Choose their
 contact on the other service by typing their name or number immediately. Use
 arrows to choose and press Enter once to link, or Escape to cancel. The picker
 includes cached private contacts that have no presence observations, excludes
-self/group identities, and places matching names first. A linked counterpart
+self/group identities, and places matching names first. People already paired
+with the source service are excluded. A conflicting second link to the same
+account is rejected under the preference lock. Use u to unlink before changing
+a match. A linked counterpart
 without an observation shows **No report**. Name equality alone leaves identities separate until this
 confirmation. Search matches all linked aliases, identifiers and full cached numbers. Press **u** to
 remove a selected person's manual links. Automatic phone/account matches still
@@ -200,8 +206,8 @@ chosen for each service column.
 
 Confirmed display links are stored privately in
 `<config>/presence-contact-links.json` with mode `0600`, using a lock and atomic
-replacement. These are local display preferences. Link and Unlink update that
-file. Browsing and refresh read the existing cache and reports. Invalid saved
+replacement. These private preferences group display rows and supply matched contacts to
+the core presence poller. Link and Unlink update that file. Browsing and refresh read the existing cache and reports. Invalid saved
 preferences preserve the automatic view and display a warning, and a failed save
 retains the previous file.
 

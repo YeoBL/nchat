@@ -130,3 +130,23 @@ passed. The replaced helper is retained under
 `~/.local/.nchat-helper-install/backups/20261109T112815Z-presence-contact-search/`.
 The assisted preference writes were read back and all planned pairs resolved to
 combined rows. Recovery details remain private under the configuration directory.
+
+## History and matching follow-up on 10 November 2026
+
+The earlier numeric score describes the current-status view. The user reported
+confusing day offsets in the history view and an incorrect saved match that
+made one person's row appear under another name. Those reports are recorded
+separately from the earlier self-assessment.
+
+The history now has explicit date columns, seconds, full service names,
+readable unknown-end labels, a visible range counter and compact cards below
+67 terminal columns. Reload preserves the viewed position. Synthetic checks
+cover midnight crossings, 26–120-column layouts and tiny-terminal exit, while
+native PTYs open history, resize and return to contacts. The picker omits people
+already paired with the source service, and conflicting duplicate endpoints
+are rejected under the preference lock. Tests confirm rejected writes preserve
+the old preferences. The reported local associations were repaired privately.
+
+Both the expanded UI suite and the original helper self-test pass. This records
+the tested changes without assigning a new score or claiming user acceptance of
+the revised layout.
