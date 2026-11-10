@@ -394,6 +394,19 @@ their own truthful verification status.
 
 ## Incidents and constraints to preserve
 
+### Group mention boundaries
+
+Commit `3eabd00a` fixes consecutive Option+2 selections being inserted as
+`@Name@Name` while `UiModel::Impl::ParseMentions` treated that as a single token.
+`OnKeySelectMention` inserts separators and is available during editing.
+The shared parser recognizes `@` as the boundary of adjacent mentions and
+accepts the display-name phone fallback used by the picker. Sending and
+editing both call this parser. `utils/test-ui-feature-integration.cpp` drives
+the production picker and model with fake providers and verifies the recipient
+maps for send/edit, quoted names, punctuation, old joined text, phone fallbacks
+and cancellation. Recipient-side notifications require a live user check.
+
+
 ### Last-seen reports after a logging gap
 
 Implementation `8195b994` fixes the history reader discarding exact offline
