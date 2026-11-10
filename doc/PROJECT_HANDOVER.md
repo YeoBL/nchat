@@ -394,6 +394,23 @@ their own truthful verification status.
 
 ## Incidents and constraints to preserve
 
+### Cross-service presence selection
+
+Implementation `68bc2050` changes `UiModel::Impl::ProcessPresencePoll` to use a
+shared set built by `SelectPresenceContacts` and `src/presencecontacts.h`.
+Each account contributes its most recent `presence_poll_count` private chats.
+Complete phone matches and the existing private `presence-contact-links.json`
+manual links connect their counterparts across Telegram and WhatsApp. Every
+known private identity in a selected group is tracked, including accounts with
+no conversation for that identity. The final set can exceed the initial count.
+The graph refreshes at most once a second. Existing per-service scheduling,
+availability and hidden-status behavior still apply. Manual-link validation
+falls back to automatic matching on invalid/unreadable snapshots and does not
+write the user's matching preferences. `utils/test-notification-handlers.cpp`
+contains the production-model regression, including counterpart persistence.
+Activation and live verification are recorded in `changes.md`.
+
+
 ### Complete emoji rendering in Kitty
 
 The `codex/full-emoji-rendering` feature replaces split-component rendering in

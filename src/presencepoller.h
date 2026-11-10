@@ -81,7 +81,7 @@ public:
   };
 
   // Scheduling tick, called with the current candidate list (most recent
-  // private chats first, already truncated by the caller). p_SteadyMs must be
+  // private contacts first, selected across services by the caller). p_SteadyMs must be
   // monotonic; p_WallMs is used only for stored timestamps. p_CanObserve is
   // false while the account is disconnected or announced offline; no eligible
   // time accrues then. Poll intervals follow an exponential gradient across

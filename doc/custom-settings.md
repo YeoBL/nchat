@@ -103,10 +103,20 @@ presence_poll_hidden_detect_sec=172800
   polls every contact at this one flat cadence (default 5 s). Each
   Telegram poll is a local TDLib cache read — no per-user server request —
   so the frequent flat rate costs no server load.
-- `presence_poll_count` is the number of most recent private chats polled per
-  account (50 by default); setting it to 0 disables polling. Groups, self
-  chats, status/newsletter ids and protocols without background presence
-  support are excluded.
+- `presence_poll_count` selects the most recent private chats per account
+  (50 by default). Their matched Telegram and WhatsApp contacts are also
+  included, even outside the other account's recent-chat limit. The final
+  tracked set can therefore exceed this count. Setting it to 0 disables
+  polling. Groups, self chats, status/newsletter ids and protocols without
+  background presence support are excluded.
+- Cross-service selection uses complete phone numbers and the existing saved
+  matches in `presence-contact-links.json`, with the same matching rules as
+  the presence viewer. Edit manual matches with `m` in `nchat-presence`.
+  Matching and recent-chat changes refresh within about one second. A person's
+  most recent selected conversation determines their polling priority on both
+  services. Known private contacts can be sampled even without a conversation
+  on that service. Each service retains its own visibility and hidden-status
+  handling, and requests keep the existing dispatch limits.
 - `presence_poll_heartbeat_sec` re-records the last known status of a contact
   this often (`"hb":1` lines). Heartbeat lines are cached re-affirmations of
   the most recent genuine observation: they prove the poller kept running,
