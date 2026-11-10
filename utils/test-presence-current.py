@@ -52,7 +52,7 @@ class Window:
     def get_wch(self): return next(self.keys)
 
 
-def terminal_check(args, width, interrupt=False, linking=False):
+def terminal_check(args, width, interrupt=False, linking=False, history_query='jamie'):
     child, master = pty.fork()
     if child == 0:
         os.environ['TERM'] = 'xterm-256color'
@@ -95,15 +95,15 @@ def terminal_check(args, width, interrupt=False, linking=False):
                 read_for(.03)
             check(not json.loads(preference.read_text())['links'], 'Native Unlink failed')
         history_start = len(output)
-        os.write(master, b'/jamie\n\n')
+        os.write(master, ('/' + history_query + '\n\n').encode())
         deadline = time.monotonic() + 2
         while b'Online activity' not in output[history_start:] and time.monotonic() < deadline:
             read_for(.03)
         history = output[history_start:]
         check(b'Online activity' in history and b'DURATION' in history and b'SERVICE' in history,
               'Native history view misses the contact, date table or service heading')
-        check(b'Not recorded' in history and b'Telegram' in history,
-              'Native history view hides unknown ends or full service names')
+        check((b'Unknown' if history_query == 'alex' else b'Not recorded') in history
+              and b'Telegram' in history, 'Native history view hides missing starts/ends or full service names')
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 40, 0, 0))
         os.kill(child, signal.SIGWINCH)
         read_for(.1)
@@ -263,9 +263,48 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     ])
     check(len(rolled) == 2 and rolled[0]['end_kind'] == 'unknown',
           'Backward timestamp jump must break the run')
-    # Merged view: newest first across services; header carries both states.
+    # A restart or missed transition can leave an exact last-seen report
+    # with no observed online start. It still belongs in the activity view.
+    reports = app.online_intervals([
+        dict(ts=t0, u='x', on=0, seen=t0 - 600_000),
+        dict(ts=t0 + 1000, u='x', on=0, seen=t0 - 600_000),
+        dict(ts=t0 + 2000, u='x', on=1, seen=-1),
+        dict(ts=t0 + 4000, u='x', on=0, seen=t0 + 3500),
+        dict(ts=t0 + 5000, u='x', on=0, seen=t0 + 3000),
+        dict(ts=t0 + 6000, u='x', on=0, seen=t0 + 3500),
+        dict(ts=t0 + 10_000, u='x', on=0, seen=t0 + 9000),
+        dict(ts=t0 + 11_000, u='x', on=0, seen=t0 + 9000, hb=1),
+        dict(ts=t0 + 12_000, u='x', on=0, seen=t0 + 11_000, hb=1),
+        dict(ts=t0 + 13_000, u='x', on=0, seen=1),
+        dict(ts=t0 + 14_000, u='x', on=0, seen=2),
+        dict(ts=t0 + 15_000, u='x', on=0, seen=t0 + 99_000),
+    ])
+    points = [item for item in reports if item['end_kind'] == 'last_seen']
+    check(len(reports) == 3 and len(points) == 2, 'Repeated or covered last-seen values became extra sessions')
+    check([item['end_ts'] for item in points] == [t0 - 600_000, t0 + 9000],
+          'A later last-seen report was lost, or a coarse/future/heartbeat value became activity')
+    check(all(item['start_ts'] is None and item['last_online_ts'] is None for item in points),
+          'A last-seen report invented an online start')
+    check(app.duration_text(None, t0) == '?', 'Missing starts produce an invented duration')
+    for width in (25, 39, 65, 66, 79, 119):
+        lines = app.interval_lines(dict(points[-1], service='WhatsApp'), width, now)
+        text = '\n'.join(lines)
+        check(lines[0].startswith('* ') and 'Unknown' in text and 'WhatsApp' in text,
+              'Last-seen row lacks its marker, unknown start/duration or service')
+        check(app.short_time(t0 + 9000, now) in text and '~' not in text,
+              'Last-seen row omits the reported time or fabricates an estimated duration')
+        check(all(sum(max(0, app._libc.wcwidth(char)) for char in line) <= width for line in lines),
+              'Last-seen row crosses the terminal edge')
+    hidden_gap = app.online_intervals([
+        dict(ts=t0, u='x', on=1, seen=-1),
+        dict(ts=t0 + 100_000, u='x', mark='hidden'),
+        dict(ts=t0 + 101_000, u='x', on=0, seen=t0 + 90_000),
+    ])
+    check(len(hidden_gap) == 2 and hidden_gap[-1]['end_kind'] == 'last_seen',
+          'An unobserved hidden gap incorrectly swallowed a later last-seen report')
+    # Merged activity is ordered by the actual period start or last-seen time.
     alex_intervals = app.person_intervals(alex_person, args)
-    check(alex_intervals == sorted(alex_intervals, key=lambda item: item['start_ts'], reverse=True),
+    check(alex_intervals == sorted(alex_intervals, key=lambda item: item['start_ts'] or item['end_ts'], reverse=True),
           'Merged intervals are not newest first')
     check('Alex' in app.history_header(alex_person, now, 80)
           and 'Online activity' in app.history_header(alex_person, now, 80),
@@ -291,6 +330,13 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     missing = app.interval_lines(dict(crossing, end_ts=None, end_kind='open'), 79, midnight)
     check('Not recorded' in missing[0] and 'Unknown' in missing[0] and 'open?' not in missing[0],
           'Missing end implies a live online claim or an estimated duration')
+    point_person = dict(alex_person, name='Last-seen fixture')
+    window = Window(['q'], 80, 24)
+    with patch.object(app, 'person_intervals', return_value=[dict(points[-1], service='WhatsApp')]):
+        app.browse_person(window, args, point_person)
+    frame = '\n'.join(value[0] for _, value in sorted(window.frames[0].items()))
+    check('last-seen reports' in frame and 'Unknown' in frame and '* = last-seen report' in frame,
+          'Activity screen does not explain its new last-seen rows')
     window = Window(['j', 'G', 'r', 'q'], 80, 24)
     synthetic = [
         dict(start_ts=t0, end_ts=t0 + 900_000, end_kind='exact', service='WhatsApp'),
@@ -306,7 +352,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     check(any('~15m' in frame and 'Not recorded' in frame and 'WhatsApp' in frame for frame in frames),
           'History rows hide known durations or unknown ends')
     check('~ = estimated duration' in frames[-1] and 'q/Esc Back' in frames[-1]
-          and 'of 2 periods' in frames[-1], 'History lacks interpretation, position or exit controls')
+          and 'of 2 entries' in frames[-1], 'History lacks interpretation, position or exit controls')
     for width, height in ((26, 12), (40, 24), (66, 24), (67, 24), (120, 30), (20, 8)):
         window = Window(['G', 'r', 'q'], width, height)
         many = [dict(crossing, start_ts=crossing['start_ts'] - index * 3600_000) for index in range(30)]
@@ -316,7 +362,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
             check(all(sum(max(0, app._libc.wcwidth(char)) for char in text) < width
                       for text, _ in frame.values()), 'History overflows after resize or paging')
         if width >= 26 and height >= 12:
-            check('of 30 periods' in window.frames[1][height - 4][0], 'History position is missing')
+            check('of 30 entries' in window.frames[1][height - 4][0], 'History position is missing')
             check(window.frames[1][height - 4][0] == window.frames[2][height - 4][0],
                   'Reload jumps away from the viewed history')
             check('q/Esc Back' in window.frames[-1][height - 1][0], 'History exit control is clipped')
@@ -371,6 +417,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     before = {str(path): hashlib.sha256(path.read_bytes()).digest() for path in root.rglob('*') if path.is_file()}
     terminal_check(args, 80)
     terminal_check(args, 120)
+    terminal_check(args, 80, history_query='alex')
     terminal_check(args, 80, interrupt=True)
     after = {str(path): hashlib.sha256(path.read_bytes()).digest() for path in root.rglob('*') if path.is_file()}
     check(before == after, 'Current-status browsing modified source data')
