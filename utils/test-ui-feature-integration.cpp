@@ -19,6 +19,7 @@
 #include "messagecache.h"
 #include "protocolutil.h"
 #include "strutil.h"
+#include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uicontroller.h"
@@ -137,6 +138,18 @@ struct EditingProtocol : FakeProtocol
   }
   std::string profile, composeTarget, composeText;
   std::vector<std::shared_ptr<EditMessageRequest>> edits;
+};
+
+struct MentionProtocol : EditingProtocol
+{
+  bool IsGroupChat(const std::string& chat) const override { return chat == "alpha"; }
+  void SendRequest(std::shared_ptr<RequestMessage> request) override
+  {
+    if (request->GetMessageType() == SendMessageRequestType)
+      sends.push_back(std::static_pointer_cast<SendMessageRequest>(request));
+    EditingProtocol::SendRequest(request);
+  }
+  std::vector<std::shared_ptr<SendMessageRequest>> sends;
 };
 
 struct PermissionEditingProtocol : EditingProtocol
@@ -318,6 +331,61 @@ int main()
   assert(UiKeyConfig::GetStr("folders") == "KEY_F4");
   assert(UiKeyConfig::GetStr("bookmarks") == "KEY_F5");
   assert(UiKeyConfig::GetStr("bulk_select") == "KEY_F6");
+  {
+    auto mentions = std::make_shared<MentionProtocol>();
+    UiModel model;
+    Populate(model, mentions);
+    auto members = std::make_shared<NewGroupMembersNotify>(Profile);
+    members->chatId = "alpha";
+    members->contactInfos = {{"person-nora", "Nora", "", false, false},
+                            {"person-robin", "Robin", "", false, false},
+                            {"person-taylor", "Taylor Lee", "", false, false},
+                            {"person-phone", "+1555••004", "15550000004", false, false}};
+    model.MessageHandler(members);
+    auto& impl = model.GetImpl();
+    const std::map<std::string, std::string> expected = {
+      {"Nora", "person-nora"}, {"Robin", "person-robin"}, {"Taylor Lee", "person-taylor"}};
+    assert(impl.ParseMentions(Profile, "alpha", "@Nora@Robin@[Taylor Lee]") == expected);
+    assert(impl.ParseMentions(Profile, "alpha", "@Nora,@Robin!@[Taylor Lee]?") == expected);
+    assert(impl.ParseMentions(Profile, "alpha", "@Nora @Robin @[Taylor Lee]") == expected);
+    assert(impl.ParseMentions(Profile, "alpha", "@NoraOther @unknown").empty());
+    assert(impl.ParseMentions(Profile, "alpha", "@+15550000004").at("+15550000004") == "person-phone");
+    impl.ReplaceDraft("Hi");
+    for (const auto& name : {"Nora", "Robin", "Taylor Lee"})
+    {
+      Choose("Mention", name);
+      Run(model, "select_mention");
+    }
+    assert(Entry(model) == L"Hi @Nora @Robin @[Taylor Lee] ");
+    Type(model, L"will lunch work?");
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    assert(mentions->sends.size() == 1 && mentions->sends.back()->chatMessage.mentions == expected);
+    assert(mentions->sends.back()->chatMessage.text == "Hi @Nora @Robin @[Taylor Lee] will lunch work?");
+    // Old adjacent mentions must survive the same path when edited.
+    auto& original = impl.GetMessages(Profile, "alpha").at("loaded-message");
+    original.text = "@Nora@Robin@[Taylor Lee]";
+    original.isOutgoing = true;
+    original.timeSent = TimeUtil::GetCurrentTimeMSec();
+    impl.SetSelectMessageActive(true); impl.GetMessageOffset(Profile, "alpha") = 0;
+    model.KeyHandler(UiKeyConfig::GetKey("edit_msg"));
+    assert(impl.GetEditMessageActive());
+    // The picker used to return immediately while an editor was open.
+    Choose("Mention", "+15550000004");
+    Run(model, "select_mention");
+    assert(Entry(model).find(L"@+15550000004 ") != std::wstring::npos);
+    model.KeyHandler(UiKeyConfig::GetKey("send_msg"));
+    assert(mentions->edits.size() == 1);
+    auto edited = expected; edited["+15550000004"] = "person-phone";
+    assert(mentions->edits.back()->chatMessage.mentions == edited);
+    // Cancellation adds no text and preserves the draft cursor.
+    impl.ReplaceDraft("Keep this draft");
+    const int cursor = impl.GetEntryPos();
+    Key("Mention", "cancel"); Run(model, "select_mention");
+    assert(Entry(model) == L"Keep this draft" && impl.GetEntryPos() == cursor);
+    impl.ReplaceDraft("");
+    model.Cleanup();
+    std::cout << "PASS: Option-2 inserts separated mentions, adjacent legacy names and phone fallbacks retain recipient IDs, and picker/send/edit/cancel use the production UI paths\n";
+  }
   auto protocol = std::make_shared<FakeProtocol>();
   {
     UiModel model;
