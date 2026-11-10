@@ -39,6 +39,7 @@
 #include "../src/terminalbadge.h"
 #include "test-message-info-dialog.h"
 #include "sysutil.h"
+#include "../src/presencecontacts.h"
 
 // Do not run the real thumbnail helper against the user's terminal in UI tests.
 bool SysUtil::RunCommand(const std::string& command, std::string*)
@@ -304,6 +305,95 @@ static void TestPresencePollModel()
   Status::Clear(profile, Status::FlagOnline);
   UiConfig::SetNum("presence_poll_enabled", 0);
   std::cout << "PASS: presence poll wiring, candidate gating and history flush through the production model\n";
+}
+
+static void TestPairedPresencePoll()
+{
+  const int previousCount = UiConfig::GetNum("presence_poll_count");
+  UiConfig::SetNum("presence_poll_enabled", 1);
+  UiConfig::SetNum("presence_poll_count", 1);
+  const std::string telegram = "Telegram_paired_test", whatsapp = "WhatsAppMd_paired_test";
+  const auto tgA = StrUtil::StrToHex("101"), tgB = StrUtil::StrToHex("102");
+  const std::string waA = "15550000001@s.whatsapp.net", waB = "15550000002@s.whatsapp.net";
+  const std::string manual = "555555555555555@lid", noChat = "15550000001@lid";
+  const std::string unmatched = "15550000003@s.whatsapp.net";
+  UiModel::Impl model(nullptr);
+  auto tg = std::make_shared<PollTestProtocol>(), wa = std::make_shared<PollTestProtocol>();
+  model.m_Protocols[telegram] = tg; model.m_Protocols[whatsapp] = wa;
+  Status::Set(telegram, Status::FlagOnline); Status::Set(whatsapp, Status::FlagOnline);
+  auto add = [&](const std::string& profile, const std::string& id, int64_t time, const std::string& phone) {
+    model.m_ChatInfos[profile][id].lastMessageTime = time;
+    model.m_ContactInfos[profile][id].phone = phone;
+    model.m_ContactInfos[profile][id].name = "Same display name";
+  };
+  add(telegram, tgA, 100, "+1 (555) 000-0001");
+  add(telegram, tgB, 1, "0015550000002");
+  add(whatsapp, waB, 90, "");
+  add(whatsapp, waA, 2, "");
+  add(whatsapp, unmatched, 0, "");
+  model.m_ContactInfos[whatsapp][manual].name = "Manual match";
+  model.m_ContactInfos[whatsapp][noChat].phone = "15550000001";
+  add(whatsapp, "group-one", 999, "15550000001");
+  add(whatsapp, "selfchat", 998, "15550000001");
+  add(whatsapp, "other-self@s.whatsapp.net", 997, "15550000001");
+  model.m_ContactInfos[whatsapp]["other-self@s.whatsapp.net"].isSelf = true;
+  add(whatsapp, "updates@newsletter", 996, "15550000001");
+  add(whatsapp, "status@broadcast", 995, "15550000001");
+  model.m_ContactInfos[telegram][StrUtil::StrToHex("-100")].phone = "15550000001";
+  model.m_ContactInfos[whatsapp]["15550000002@lid"].name = "LID digits are not a phone";
+  const auto linksPath = FileUtil::GetApplicationDir() + "/presence-contact-links.json";
+  const auto links = std::string("{\"version\":1,\"links\":[[[\"") + telegram + "\",\"" + tgA +
+    "\"],[\"" + whatsapp + "\",\"" + manual + "\"]]]}";
+  FileUtil::WriteFile(linksPath, links); assert(chmod(linksPath.c_str(), 0600) == 0);
+  model.ProcessPresencePoll();
+  const auto& tracked = model.m_PresencePoller.m_Tracked;
+  assert(tracked.at(telegram) == (std::unordered_set<std::string>{tgA, tgB}));
+  assert(tracked.at(whatsapp) == (std::unordered_set<std::string>{waA, waB, manual, noChat}));
+  assert(model.m_PresenceContacts.at(whatsapp).front() != waB); // Telegram recency promotes A's counterpart.
+  assert(model.m_PresenceContacts.at(telegram).front() == tgA);
+  assert(PresenceContacts::Phone("+1 (555) 000-0001") == "15550000001");
+  assert(PresenceContacts::Phone("+1555••••001").empty());
+  assert(PresenceContacts::Phone("555+0000001").empty());
+
+  // The added WhatsApp counterpart now records genuine updates, independently
+  // of its own chat's rank. No protocol message/read operation is issued.
+  auto status = std::make_shared<ReceiveStatusNotify>(whatsapp);
+  status->userId = waA; status->isOnline = false; status->timeSeen = 1794266606000;
+  model.MessageHandler(status);
+  model.m_LastPresenceFlushMs = 0; model.ProcessPresencePoll();
+  assert(model.m_PresencePoller.Drain());
+  const auto history = FileUtil::ReadFile(FileUtil::GetApplicationDir() + "/presence/history." +
+                                        StrUtil::StrToHex(whatsapp) + ".jsonl");
+  assert(history.find(waA) != std::string::npos && history.find("1794266606000") != std::string::npos);
+
+  // Viewer link edits are picked up on the next selection refresh. Invalid
+  // snapshots fall back to phone matches and cannot add arbitrary identities.
+  FileUtil::WriteFile(linksPath, "{\"version\":1,\"links\":[[false,false]]}");
+  model.SelectPresenceContacts(1);
+  assert(!model.m_PresenceLinksError.empty());
+  assert(model.m_PresenceContacts.at(whatsapp).size() == 3);
+  FileUtil::WriteFile(linksPath, links); assert(chmod(linksPath.c_str(), 0644) == 0);
+  model.SelectPresenceContacts(1);
+  assert(!model.m_PresenceLinksError.empty());
+  assert(model.m_PresenceContacts.at(whatsapp).size() == 3);
+  assert(chmod(linksPath.c_str(), 0600) == 0);
+  model.SelectPresenceContacts(1);
+  assert(model.m_PresenceLinksError.empty());
+  assert(model.m_PresenceContacts.at(whatsapp).size() == 4);
+  assert(unlink(linksPath.c_str()) == 0);
+  assert(symlink("missing", linksPath.c_str()) == 0);
+  model.SelectPresenceContacts(1);
+  assert(!model.m_PresenceLinksError.empty());
+  assert(unlink(linksPath.c_str()) == 0);
+  model.SelectPresenceContacts(1);
+  assert(model.m_PresenceLinksError.empty());
+  assert(model.m_PresenceContacts.at(whatsapp).size() == 3);
+  model.SelectPresenceContacts(0);
+  assert(model.m_PresenceContacts.empty());
+  Status::Clear(telegram, Status::FlagOnline); Status::Clear(whatsapp, Status::FlagOnline);
+  UiConfig::SetNum("presence_poll_count", previousCount);
+  UiConfig::SetNum("presence_poll_enabled", 0);
+  std::cout << "PASS: paired presence selection in both directions, phone/manual links, aliases without chats, exclusions, live link edits and counterpart history persistence\n";
 }
 
 static void TestViewOnceTerminal(const std::string& root)
@@ -589,6 +679,7 @@ int main(int argc, char** argv)
   UiConfig::SetNum("presence_poll_enabled", 0);
   TestPresenceStatus();
   TestPresencePollModel();
+  TestPairedPresencePoll();
   {
     UiModel::Impl model(nullptr);
     const std::string profile = "WhatsAppMd_live_group_names", chat = "12030004@g.us";
