@@ -150,3 +150,9 @@ the old preferences. The reported local associations were repaired privately.
 Both the expanded UI suite and the original helper self-test pass. This records
 the tested changes without assigning a new score or claiming user acceptance of
 the revised layout.
+
+The merged helper was installed atomically on 10 November 2026. Its bytes match
+the tested source. Installed self-tests and a real-cache plain invocation pass.
+A private copy of the predecessor is retained under
+`~/.local/.nchat-helper-install/backups/` in the dated presence-history-ux
+folder. Existing helper sessions need to be reopened to load the new code.
