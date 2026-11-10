@@ -408,7 +408,13 @@ availability and hidden-status behavior still apply. Manual-link validation
 falls back to automatic matching on invalid/unreadable snapshots and does not
 write the user's matching preferences. `utils/test-notification-handlers.cpp`
 contains the production-model regression, including counterpart persistence.
-Activation and live verification are recorded in `changes.md`.
+The full build, production notification/rendering regressions, standalone
+scheduling/persistence tests and presence viewer self-test passed. Restarted on
+10 November 2026 in original Screen `15976.nchat`, window `0`, shell `15977`,
+terminal `ttys002`, core PID `54177`. The frame returned Online. The previously
+unrecorded WhatsApp counterpart entered the tracked set, delivered a real
+last-seen update, and appeared in the installed viewer alongside Telegram.
+No test message or explicit read receipt was sent. See `changes.md`.
 
 
 ### Complete emoji rendering in Kitty
