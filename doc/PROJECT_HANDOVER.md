@@ -410,7 +410,10 @@ periods are suppressed using sorted coverage ranges. History data on disk is
 read through the existing parser. The expanded presence UI regression covers
 these cases and native last-seen-only history. The original helper self-test
 also passes. A real-cache comparison confirms a newer current-day report is
-included. A complete session cannot be reconstructed without its start.
+included. The tested helper was installed atomically with a private recovery
+copy of its predecessor. Installed bytes and self-tests were checked. Open
+helper sessions need reopening. A complete session cannot be reconstructed
+without its start.
 
 ### Presence history layout and incorrect manual matches
 
