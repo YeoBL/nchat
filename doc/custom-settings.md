@@ -178,8 +178,12 @@ Press **Enter** on a selected contact to open their online activity, newest
 first. The wide table shows a full date, start/end times including seconds,
 estimated duration and full service name. Cross-midnight ends include their
 own date. Narrow windows show the same details in compact cards. Missing end
-times say **Not recorded**, and their duration is **Unknown**. The `~` prefix
-marks an estimated duration. Online periods begin at the first observed online
+times say **Not recorded**, and their duration is **Unknown**. Exact last-seen
+reports outside observed online periods are also shown, marked with `*`.
+Their reported time appears in the End column, with Unknown start and duration.
+This includes activity reported after a logging gap, such as a computer restart.
+Repeated timestamps and reports covered by an observed period are suppressed.
+The `~` prefix marks an estimated duration. Online periods begin at the first observed online
 sample, so their actual start may be earlier. The footer shows your position in
 the history. Arrow/page keys and g/G navigate, r reloads while preserving your
 position, and q or Esc returns to contacts. The legacy `show` command prints the

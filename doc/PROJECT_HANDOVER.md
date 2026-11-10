@@ -394,6 +394,24 @@ their own truthful verification status.
 
 ## Incidents and constraints to preserve
 
+### Last-seen reports after a logging gap
+
+Implementation `8195b994` fixes the history reader discarding exact offline
+last-seen timestamps unless an online start had also been observed. After a
+computer restart, the collector can receive a newer last-seen value while
+having missed that session's start. `online_intervals` now retains such reports
+as `end_kind=last_seen`, `start_ts=None`, with the reported time in `end_ts`.
+`person_intervals` sorts them by the reported time alongside observed periods.
+The table marks them `*` and shows Unknown start/duration.
+
+Heartbeats, coarse statuses and seen values after their report timestamps do
+not create point observations. Repeated timestamps and points within observed
+periods are suppressed using sorted coverage ranges. History data on disk is
+read through the existing parser. The expanded presence UI regression covers
+these cases and native last-seen-only history. The original helper self-test
+also passes. A real-cache comparison confirms a newer current-day report is
+included. A complete session cannot be reconstructed without its start.
+
 ### Presence history layout and incorrect manual matches
 
 On 10 November 2026, a contact appeared to disappear because saved manual links

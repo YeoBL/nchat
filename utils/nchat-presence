@@ -858,7 +858,7 @@ def print_current(args):
 def online_intervals(records):
     """Consume one account's validated records in append order and return
     its online intervals: {start_ts, last_online_ts, end_ts, closed_at,
-    end_kind} with end_kind in ('exact', 'unknown', 'hidden', 'open').
+    end_kind}. A last_seen row has a known end and no recorded start.
 
     Heartbeats neither start nor close sessions. A genuine online record
     starts (or extends) a run; the first genuine offline record closes it,
@@ -866,10 +866,13 @@ def online_intervals(records):
     exact timestamp between the last online observation and the offline
     record. A hidden marker closes a run with an unknown end. A backward
     timestamp jump breaks a run (unknown end) and starts a new segment.
+    Exact last-seen reports outside observed runs are retained as point
+    observations, with duplicates and timestamps already covered suppressed.
     """
     intervals = []
     run = None
     previous_ts = None
+    last_seen = {}
 
     def finish(current, end_ts, closed_at, end_kind):
         current.update(end_ts=end_ts, closed_at=closed_at, end_kind=end_kind)
@@ -894,20 +897,34 @@ def online_intervals(records):
                 run = {'start_ts': ts, 'last_online_ts': ts}
             else:
                 run['last_online_ts'] = max(run['last_online_ts'], ts)
-        elif run is not None:
+        else:
             seen = record.get('seen', -1)
-            if isinstance(seen, int) and seen > 2 and run['last_online_ts'] <= seen <= ts:
-                finish(run, seen, ts, 'exact')
-            else:
-                finish(run, None, ts, 'unknown')
-            run = None
+            exact_seen = isinstance(seen, int) and 2 < seen <= ts
+            if exact_seen:
+                last_seen.setdefault(seen, ts)
+            if run is not None:
+                if exact_seen and run['last_online_ts'] <= seen:
+                    finish(run, seen, ts, 'exact')
+                else:
+                    finish(run, None, ts, 'unknown')
+                run = None
     if run is not None:
         finish(run, None, None, 'open')
+    covered = sorted((item['start_ts'], item['end_ts'] if item['end_kind'] == 'exact'
+                      else item['last_online_ts']) for item in intervals)
+    cursor = 0
+    for seen, reported_at in sorted(last_seen.items()):
+        while cursor < len(covered) and covered[cursor][1] < seen:
+            cursor += 1
+        if cursor < len(covered) and covered[cursor][0] <= seen:
+            continue
+        intervals.append(dict(start_ts=None, last_online_ts=None, end_ts=seen,
+                              closed_at=reported_at, end_kind='last_seen'))
     return intervals
 
 
 def person_intervals(person, args):
-    """Online intervals for every account of a person, merged newest first."""
+    """Observed periods and last-seen points, merged by activity time."""
     merged = []
     for member in person['members']:
         profile, uid = member['key']
@@ -915,7 +932,7 @@ def person_intervals(person, args):
                    if record['u'] == uid]
         for interval in online_intervals(records):
             merged.append(dict(interval, service=member['service']))
-    merged.sort(key=lambda item: item['start_ts'], reverse=True)
+    merged.sort(key=lambda item: item['start_ts'] or item['end_ts'], reverse=True)
     return merged
 
 
@@ -925,8 +942,8 @@ def short_time(timestamp, now):
 
 
 def duration_text(start_ts, end_ts):
-    """Estimated duration with a ~ prefix; '?' when the end is unknown."""
-    if end_ts is None or end_ts < start_ts:
+    """Estimated duration with a ~ prefix, or ? for a missing endpoint."""
+    if start_ts is None or end_ts is None or end_ts < start_ts:
         return '?'
     seconds = (end_ts - start_ts) // 1000
     if seconds < 60:
@@ -946,11 +963,13 @@ def history_header(person, now, width):
 
 def interval_lines(interval, width, now):
     """Explicit dates, full service names and a compact card on narrow screens."""
-    start_date = datetime.datetime.fromtimestamp(interval['start_ts'] / 1000).astimezone()
+    activity_ts = interval['start_ts'] or interval['end_ts']
+    start_date = datetime.datetime.fromtimestamp(activity_ts / 1000).astimezone()
     date = start_date.strftime('%d %b %Y')
-    start = short_time(interval['start_ts'], now)
+    start = short_time(interval['start_ts'], now) if interval['start_ts'] else 'Unknown'
+    prefix = '* ' if interval['end_kind'] == 'last_seen' else '  '
     end, end_date = 'Not recorded', None
-    if interval['end_kind'] == 'exact':
+    if interval['end_kind'] in ('exact', 'last_seen'):
         end = short_time(interval['end_ts'], now)
         end_date = datetime.datetime.fromtimestamp(interval['end_ts'] / 1000).astimezone()
     length = duration_text(interval['start_ts'],
@@ -961,12 +980,12 @@ def interval_lines(interval, width, now):
         if end_date and end_date.date() != start_date.date():
             end = end_date.strftime('%d %b ') + end
         values = (date, start, end, length, interval['service'])
-        return ['  ' + ' │ '.join(pad_screen(value, size) for value, size in
+        return [prefix + ' │ '.join(pad_screen(value, size) for value, size in
                                  zip(values, (11, 8, 15, 10, 8)))]
     duration = 'Duration ' + length
     if end_date and end_date.date() != start_date.date():
         duration = length + ' · ends ' + end_date.strftime('%d %b')
-    return [fit_screen('  ' + date + ' · ' + interval['service'], width),
+    return [fit_screen(prefix + date + ' · ' + interval['service'], width),
             fit_screen('  ' + start + ' → ' + end, width),
             fit_screen('  ' + duration, width)]
 
@@ -993,7 +1012,7 @@ def browse_person(win, args, person):
         scroll = max(0, min(scroll, max(0, len(intervals) - page)))
         win.erase()
         put(0, ' ' + history_header(person, now, width - 2), curses.A_BOLD)
-        put(1, ' Online periods · newest first')
+        put(1, ' Online periods and last-seen reports · newest first')
         put(2, ' Local times · refreshed ' + loaded_at.strftime('%H:%M:%S %Z'),
             curses.A_DIM)
         if row_height == 1:
@@ -1009,9 +1028,9 @@ def browse_person(win, args, person):
         if not intervals:
             put(5, ' No online periods recorded yet.')
         first, last = (scroll + 1, min(scroll + page, len(intervals))) if intervals else (0, 0)
-        put(height - 4, ' ' + str(first) + '–' + str(last) + ' of ' + str(len(intervals)) + ' periods', curses.A_DIM)
-        put(height - 3, ' ~ = estimated duration · Unknown = end not recorded' if width >= 54
-            else ' ~ estimated · Unknown end', curses.A_DIM)
+        put(height - 4, ' ' + str(first) + '–' + str(last) + ' of ' + str(len(intervals)) + ' entries', curses.A_DIM)
+        put(height - 3, ' * = last-seen report · ~ = estimated duration' if width >= 54
+            else ' * Last seen · ~ estimated', curses.A_DIM)
         put(height - 2, ' ↑↓/j k Scroll  PgUp/PgDn Page  g/G Ends  r Refresh' if width >= 54
             else ' ↑↓ Scroll · r Refresh')
         put(height - 1, ' q/Esc Back to contacts')
