@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <cwctype>
 #include <sstream>
 #include <iomanip>
 #include <thread>
@@ -1629,9 +1630,11 @@ std::map<std::string, std::string> UiModel::Impl::ParseMentions(const std::strin
     if (cit != m_ContactInfos.end())
     {
       auto cit2 = cit->second.find(memberId);
-      if (cit2 != cit->second.end() && !cit2->second.name.empty())
+      if (cit2 != cit->second.end())
       {
-        nameMemberMap[cit2->second.name] = memberId;
+        if (!cit2->second.name.empty()) nameMemberMap[cit2->second.name] = memberId;
+        const auto name = GetContactListName(p_ProfileId, memberId, false, true);
+        if (!name.empty()) nameMemberMap[name] = memberId;
       }
     }
   }
@@ -1663,7 +1666,8 @@ std::map<std::string, std::string> UiModel::Impl::ParseMentions(const std::strin
 
       // Simple mention: @Word
       size_t end = pos + 1;
-      while (end < p_Text.size() && p_Text[end] != ' ' && p_Text[end] != '\n' && p_Text[end] != '\t')
+      while (end < p_Text.size() && p_Text[end] != ' ' && p_Text[end] != '\n' &&
+             p_Text[end] != '\t' && p_Text[end] != '@')
       {
         ++end;
       }
@@ -5938,8 +5942,6 @@ void UiModel::OnKeySelectMention()
   bool isGroup = false;
   {
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
-    if (GetImpl().GetEditMessageActive()) return;
-
     profileId = GetImpl().GetCurrentChat().first;
     chatId = GetImpl().GetCurrentChat().second;
     isGroup = GetImpl().GetChatInfoIsGroup(profileId, chatId);
@@ -5982,7 +5984,13 @@ void UiModel::OnKeySelectMention()
     }
 
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
-    GetImpl().InsertText(StrUtil::ToWString(mentionText));
+    auto& model = GetImpl();
+    const auto& entry = model.GetEntryStr();
+    const int position = model.GetEntryPos();
+    // Delimit consecutive selections and leave the cursor ready for prose.
+    std::wstring insertion = StrUtil::ToWString(mentionText) + L" ";
+    if (position > 0 && !std::iswspace(entry[position - 1])) insertion.insert(0, L" ");
+    model.InsertText(insertion);
   }
   else
   {

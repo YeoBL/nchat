@@ -262,3 +262,13 @@ terminals retain the existing compatibility rendering. `NCHAT_FULL_EMOJI=0`
 disables Kitty glyph painting for troubleshooting. `NCHAT_KITTY_CONFIG_DIR`
 selects an alternative helper folder. This covers emoji sequences and combining
 accents, rather than being a general complex-script shaping engine.
+
+### Group mentions
+
+Press Option+2 in a group chat, type a member's name to filter, then press
+Enter to insert the mention. Consecutive selections are separated by spaces,
+and the cursor is ready for the message text. The same picker works while
+editing a group message. Names with spaces use the configured bracketed form.
+Sending and editing resolve adjacent legacy mentions such as
+`@Nora@Robin` as separate recipients. Phone-number display fallbacks use the
+same member lookup as the picker.
