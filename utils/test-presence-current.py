@@ -366,6 +366,21 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
         with contextlib.redirect_stdout(io.StringIO()) as output:
             app.print_current(link_args)
         check(output.getvalue().count('Alex Smith') == 1, 'Plain output repeats a confirmed person')
+        already_linked = app.current_people(link_args)
+        new_contact = dict(telegram, key=('Telegram_fixture', 'new-person'), name='Different person', phone='')
+        source = dict(already_linked[0], name='Different person', members=[new_contact], key=(new_contact['key'],))
+        window = Window(['\x1b'], 80)
+        chosen = app.pick_person_link(window, source, already_linked)
+        check(chosen is None and 'No unpaired match' in window.frames[0][4][0],
+              'Picker offers an already paired person and hides the conflicting service')
+        before_conflict = link_path.read_bytes()
+        for pair in ((new_contact['key'], whatsapp['key']), (whatsapp['key'], new_contact['key'])):
+            try:
+                app.save_contact_link(link_args, pair=pair)
+                check(False, 'A second same-account identity was silently linked to the same counterpart')
+            except ValueError:
+                pass
+        check(link_path.read_bytes() == before_conflict, 'Rejected duplicate matching changed preferences')
         previous = link_path.read_bytes()
         try:
             app.save_contact_link(link_args, pair=(('Telegram_fixture', '\x00bad'), whatsapp['key']))
