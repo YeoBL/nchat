@@ -404,7 +404,11 @@ accepts the display-name phone fallback used by the picker. Sending and
 editing both call this parser. `utils/test-ui-feature-integration.cpp` drives
 the production picker and model with fake providers and verifies the recipient
 maps for send/edit, quoted names, punctuation, old joined text, phone fallbacks
-and cancellation. Recipient-side notifications require a live user check.
+and cancellation. Full build, expanded UI integration and notification/rendering
+regressions passed. Activated on 10 November 2026 in original Screen
+`1529.nchat`, window `0`, shell `1533`, terminal `ttys001`, core PID `10625`.
+The frame returned Online. Recipient-side notifications require a live user
+check.
 
 
 ### Last-seen reports after a logging gap
