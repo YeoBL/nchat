@@ -101,6 +101,7 @@ private:
     bool Process();
     void ProcessTimers();
     void ProcessPresencePoll();
+    void SelectPresenceContacts(size_t p_Count);
 
     std::string GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId);
     void UpdateChatInfoLastMessageTime(const std::string& p_ProfileId, const std::string& p_ChatId);
@@ -304,6 +305,9 @@ private:
     PresencePoller m_PresencePoller;
     int64_t m_NextPresenceInitRetryMs = 0;
     int64_t m_LastPresenceFlushMs = 0;
+    int64_t m_NextPresenceSelectionMs = 0;
+    std::map<std::string, std::vector<std::string>> m_PresenceContacts;
+    std::string m_PresenceLinksError;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> m_GroupMembers;
     int64_t m_GroupMembersUpdateTime = 0;

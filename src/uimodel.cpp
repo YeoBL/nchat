@@ -41,6 +41,7 @@
 #include "uiclientactiondialog.h"
 #include "featuremedia.h"
 #include "featureutil.h"
+#include "presencecontacts.h"
 #include "uichatlistdialog.h"
 #include "uiconfig.h"
 #include "uicontactlistdialog.h"
@@ -2708,6 +2709,49 @@ void UiModel::Impl::ProcessTimers()
   ProcessPresencePoll();
 }
 
+void UiModel::Impl::SelectPresenceContacts(size_t p_Count)
+{
+  std::vector<PresenceContacts::Contact> contacts;
+  for (const auto& profile : m_Protocols)
+  {
+    if (!profile.second->HasFeature(FeatureBackgroundPresencePoll)) continue;
+    const auto& profileId = profile.first;
+    const auto selfId = profile.second->GetSelfId();
+    const auto book = m_ContactInfos.find(profileId);
+    auto eligible = [&](const std::string& id) {
+      if (id == selfId || GetChatInfoIsGroup(profileId, id) ||
+          HasIdSuffix(id, "@newsletter") || HasIdSuffix(id, "@broadcast")) return false;
+      return book == m_ContactInfos.end() || !book->second.count(id) || !book->second.at(id).isSelf;
+    };
+    auto phone = [&](const std::string& id) {
+      if (PresenceContacts::Service(profileId) == "WhatsApp" && HasIdSuffix(id, "@s.whatsapp.net"))
+        return id.substr(0, id.size() - std::string("@s.whatsapp.net").size());
+      return book != m_ContactInfos.end() && book->second.count(id) ? book->second.at(id).phone : "";
+    };
+    std::set<std::string> present;
+    const auto chats = m_ChatInfos.find(profileId);
+    if (chats != m_ChatInfos.end())
+      for (const auto& chat : chats->second)
+        if (eligible(chat.first))
+        {
+          contacts.push_back({{profileId, chat.first}, phone(chat.first), chat.second.lastMessageTime, true});
+          present.insert(chat.first);
+        }
+    // A matched private contact can be queried even when this account has
+    // no conversation with them. Never create or open a chat to do so.
+    if (book != m_ContactInfos.end())
+      for (const auto& contact : book->second)
+        if (!present.count(contact.first) && PresenceContacts::PrivateId({profileId, contact.first}) &&
+            eligible(contact.first))
+          contacts.push_back({{profileId, contact.first}, phone(contact.first), 0, false});
+  }
+  std::string error;
+  const auto links = PresenceContacts::ReadLinks(FileUtil::GetApplicationDir() + "/presence-contact-links.json", error);
+  if (!error.empty() && error != m_PresenceLinksError) LOG_WARNING("%s; using automatic presence matches", error.c_str());
+  m_PresenceLinksError = error;
+  m_PresenceContacts = PresenceContacts::Select(std::move(contacts), p_Count, links);
+}
+
 void UiModel::Impl::ProcessPresencePoll()
 {
   const int64_t steadyMs = SteadyTimeMSec();
@@ -2751,6 +2795,13 @@ void UiModel::Impl::ProcessPresencePoll()
     return; // a non-positive count disables polling
   }
   const size_t pollCount = static_cast<size_t>(pollCountRaw);
+  // Rebuild the shared contact graph at most once per second. Scheduling
+  // still ticks normally, including disconnect and hidden-status handling.
+  if (steadyMs >= m_NextPresenceSelectionMs)
+  {
+    m_NextPresenceSelectionMs = steadyMs + 1000;
+    SelectPresenceContacts(pollCount);
+  }
   const int64_t hiddenDetectMs =
     1000 * std::max<int64_t>(0, UiConfig::GetNum("presence_poll_hidden_detect_sec"));
   const int64_t heartbeatSec =
@@ -2776,59 +2827,9 @@ void UiModel::Impl::ProcessPresencePoll()
       canObserve = canObserve && !(profileFlags & Status::FlagAway) &&
         (UiConfig::GetNum("online_status_share") != 0);
     }
-    const std::string selfId = profile.second->GetSelfId();
-    const auto chatInfosIt = m_ChatInfos.find(profileId);
-    if (chatInfosIt == m_ChatInfos.end())
-    {
-      continue;
-    }
-
-    // The most recent private chats of this account. Self chats and
-    // WhatsApp status/newsletter ids cannot carry contact presence and are
-    // filtered out so they do not consume poll slots.
-    std::vector<std::pair<std::string, int64_t>> candidates;
-    for (const auto& chat : chatInfosIt->second)
-    {
-      const std::string& chatId = chat.first;
-      if (GetChatInfoIsGroup(profileId, chatId))
-      {
-        continue;
-      }
-      if (!selfId.empty() && chatId == selfId)
-      {
-        continue;
-      }
-      if (HasIdSuffix(chatId, "@newsletter") || HasIdSuffix(chatId, "@broadcast"))
-      {
-        continue;
-      }
-      const auto contactIt = m_ContactInfos.find(profileId);
-      if (contactIt != m_ContactInfos.end())
-      {
-        const auto it = contactIt->second.find(chatId);
-        if (it != contactIt->second.end() && it->second.isSelf)
-        {
-          continue;
-        }
-      }
-      candidates.push_back(std::make_pair(chatId, chat.second.lastMessageTime));
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const std::pair<std::string, int64_t>& p_A, const std::pair<std::string, int64_t>& p_B)
-              {
-                if (p_A.second != p_B.second) return p_A.second > p_B.second;
-                return p_A.first < p_B.first;
-              });
-    std::vector<std::string> orderedIds;
-    orderedIds.reserve(candidates.size());
-    for (const auto& candidate : candidates)
-    {
-      orderedIds.push_back(candidate.first);
-    }
-    if (orderedIds.size() > pollCount)
-    {
-      orderedIds.resize(pollCount);
-    }
+    const auto selected = m_PresenceContacts.find(profileId);
+    const std::vector<std::string> empty;
+    const auto& orderedIds = selected == m_PresenceContacts.end() ? empty : selected->second;
 
     // WhatsApp uses the exponential gradient; Telegram polls everyone at
     // one flat cadence (a local cache read per contact, no server request).
