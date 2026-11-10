@@ -94,6 +94,21 @@ def terminal_check(args, width, interrupt=False, linking=False):
             while json.loads(preference.read_text())['links'] and time.monotonic() < deadline:
                 read_for(.03)
             check(not json.loads(preference.read_text())['links'], 'Native Unlink failed')
+        history_start = len(output)
+        os.write(master, b'/jamie\n\n')
+        deadline = time.monotonic() + 2
+        while b'Online activity' not in output[history_start:] and time.monotonic() < deadline:
+            read_for(.03)
+        history = output[history_start:]
+        check(b'Online activity' in history and b'DURATION' in history and b'SERVICE' in history,
+              'Native history view misses the contact, date table or service heading')
+        check(b'Not recorded' in history and b'Telegram' in history,
+              'Native history view hides unknown ends or full service names')
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 40, 0, 0))
+        os.kill(child, signal.SIGWINCH)
+        read_for(.1)
+        os.write(master, b'q')
+        read_for(.1)
         for keys in [b'j', b'\t', b'/jamie\n', b'\x1b', b'r', b'\x1b[6~']:
             os.write(master, keys)
             read_for(.08)
@@ -253,15 +268,29 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     check(alex_intervals == sorted(alex_intervals, key=lambda item: item['start_ts'], reverse=True),
           'Merged intervals are not newest first')
     check('Alex' in app.history_header(alex_person, now, 80)
-          and ('TG' in app.history_header(alex_person, now, 80)
-               or 'WA' in app.history_header(alex_person, now, 80)),
-          'History header misses the name or a service state')
-    for width in (40, 60, 80, 120):
-        line = app.interval_line(dict(start_ts=t0, end_ts=t0 + 900_000,
-                                      end_kind='exact', service='WhatsApp'), width, now)
-        check(sum(max(0, app._libc.wcwidth(char)) for char in line) <= width,
-              'Interval row exceeds terminal width')
-        check('~15m' in line and ('→' in line or '│' in line), 'Interval row lost its range or duration')
+          and 'Online activity' in app.history_header(alex_person, now, 80),
+          'History header misses the contact or its purpose')
+    for width in (25, 39, 59, 65, 66, 79, 119):
+        lines = app.interval_lines(dict(start_ts=t0, end_ts=t0 + 900_000,
+                                       end_kind='exact', service='WhatsApp'), width, now)
+        check(all(sum(max(0, app._libc.wcwidth(char)) for char in line) <= width for line in lines),
+              'History crosses the terminal width')
+        text = '\n'.join(lines)
+        check('~15m' in text and 'WhatsApp' in text and ('→' in text or '│' in text),
+              'History lost its service, range or duration')
+        check(len(lines) == (1 if width >= 66 else 3), 'History layout switches at the wrong width')
+    midnight = int(app.datetime.datetime(2026, 11, 10).timestamp() * 1000)
+    crossing = dict(start_ts=midnight - 3000, end_ts=midnight + 6000,
+                    end_kind='exact', service='Telegram')
+    wide = app.interval_lines(crossing, 79, midnight)
+    check(all(value in wide[0] for value in ('09 Nov 2026', '23:59:57', '10 Nov 00:00:06', '~9s', 'Telegram')),
+          'Dates, seconds or midnight crossing are ambiguous')
+    check('+1' not in wide[0] and '+2' not in wide[0], 'Relative day offsets remain in history')
+    narrow = app.interval_lines(crossing, 25, midnight)
+    check('00:00:06' in narrow[1] and 'ends 10 Nov' in narrow[2], 'Narrow midnight crossing loses the end date')
+    missing = app.interval_lines(dict(crossing, end_ts=None, end_kind='open'), 79, midnight)
+    check('Not recorded' in missing[0] and 'Unknown' in missing[0] and 'open?' not in missing[0],
+          'Missing end implies a live online claim or an estimated duration')
     window = Window(['j', 'G', 'r', 'q'], 80, 24)
     synthetic = [
         dict(start_ts=t0, end_ts=t0 + 900_000, end_kind='exact', service='WhatsApp'),
@@ -272,9 +301,27 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
         app.browse_person(window, args, alex_person)
     frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
     check('Online periods' in frames[0], 'Person table missing its heading')
-    check(any('START' in frame and 'LENGTH' in frame for frame in frames), 'Wide table lacks column headings')
-    check(any('~15m' in frame and 'open?' in frame for frame in frames), 'Interval rows missing')
-    check('~ = estimate' in frames[-1] and 'q/Esc Back' in frames[-1], 'Table footer hints missing')
+    check(any('DATE' in frame and 'START' in frame and 'DURATION' in frame and 'SERVICE' in frame
+              for frame in frames), 'Wide table lacks meaningful column headings')
+    check(any('~15m' in frame and 'Not recorded' in frame and 'WhatsApp' in frame for frame in frames),
+          'History rows hide known durations or unknown ends')
+    check('~ = estimated duration' in frames[-1] and 'q/Esc Back' in frames[-1]
+          and 'of 2 periods' in frames[-1], 'History lacks interpretation, position or exit controls')
+    for width, height in ((26, 12), (40, 24), (66, 24), (67, 24), (120, 30), (20, 8)):
+        window = Window(['G', 'r', 'q'], width, height)
+        many = [dict(crossing, start_ts=crossing['start_ts'] - index * 3600_000) for index in range(30)]
+        with patch.object(app, 'person_intervals', return_value=many):
+            app.browse_person(window, args, alex_person)
+        for frame in window.frames:
+            check(all(sum(max(0, app._libc.wcwidth(char)) for char in text) < width
+                      for text, _ in frame.values()), 'History overflows after resize or paging')
+        if width >= 26 and height >= 12:
+            check('of 30 periods' in window.frames[1][height - 4][0], 'History position is missing')
+            check(window.frames[1][height - 4][0] == window.frames[2][height - 4][0],
+                  'Reload jumps away from the viewed history')
+            check('q/Esc Back' in window.frames[-1][height - 1][0], 'History exit control is clipped')
+        else:
+            check('q Back' in window.frames[-1][0][0], 'Tiny history view cannot be exited')
     window = Window(['\n', 'q', 'q'], 80, 24)
     with patch.object(curses, 'curs_set'), patch.object(curses, 'has_colors', return_value=False):
         app.browse_current(window, args)
@@ -366,6 +413,21 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
         with contextlib.redirect_stdout(io.StringIO()) as output:
             app.print_current(link_args)
         check(output.getvalue().count('Alex Smith') == 1, 'Plain output repeats a confirmed person')
+        already_linked = app.current_people(link_args)
+        new_contact = dict(telegram, key=('Telegram_fixture', 'new-person'), name='Different person', phone='')
+        source = dict(already_linked[0], name='Different person', members=[new_contact], key=(new_contact['key'],))
+        window = Window(['\x1b'], 80)
+        chosen = app.pick_person_link(window, source, already_linked)
+        check(chosen is None and 'No unpaired match' in window.frames[0][4][0],
+              'Picker offers an already paired person and hides the conflicting service')
+        before_conflict = link_path.read_bytes()
+        for pair in ((new_contact['key'], whatsapp['key']), (whatsapp['key'], new_contact['key'])):
+            try:
+                app.save_contact_link(link_args, pair=pair)
+                check(False, 'A second same-account identity was silently linked to the same counterpart')
+            except ValueError:
+                pass
+        check(link_path.read_bytes() == before_conflict, 'Rejected duplicate matching changed preferences')
         previous = link_path.read_bytes()
         try:
             app.save_contact_link(link_args, pair=(('Telegram_fixture', '\x00bad'), whatsapp['key']))

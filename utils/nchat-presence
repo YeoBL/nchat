@@ -573,6 +573,12 @@ def save_contact_link(args, pair=None, remove=()):
         removed = set(remove)
         links = [link for link in links if not removed.intersection(link)]
         if pair and tuple(pair) not in links and tuple(reversed(pair)) not in links:
+            for existing in links:
+                for endpoint, counterpart in (pair, tuple(reversed(pair))):
+                    if endpoint in existing:
+                        other = existing[1] if existing[0] == endpoint else existing[0]
+                        if other[0] == counterpart[0] and other != counterpart:
+                            raise ValueError('Account already linked. Use u to unlink first.')
             links.append(tuple(pair))
         if len(links) > 1000:
             raise ValueError('Too many local contact links')
@@ -914,16 +920,8 @@ def person_intervals(person, args):
 
 
 def short_time(timestamp, now):
-    """Compact clock time with date rollover: HH:MM today, +N HH:MM within
-    99 days, YYYYMMDD beyond."""
-    local = datetime.datetime.fromtimestamp(timestamp / 1000).astimezone()
-    today = datetime.datetime.fromtimestamp(now / 1000).astimezone().date()
-    days = (today - local.date()).days
-    if days <= 0:
-        return local.strftime('%H:%M')
-    if days <= 99:
-        return '+' + str(days) + ' ' + local.strftime('%H:%M')
-    return local.strftime('%Y%m%d')
+    """Clock time with seconds. Dates have their own history column."""
+    return datetime.datetime.fromtimestamp(timestamp / 1000).astimezone().strftime('%H:%M:%S')
 
 
 def duration_text(start_ts, end_ts):
@@ -943,47 +941,41 @@ def duration_text(start_ts, end_ts):
 
 
 def history_header(person, now, width):
-    """One line: truncated name, then per-service freshness states."""
-    parts = []
-    for platform in ('Telegram', 'WhatsApp'):
-        item = service_contact(person, platform)
-        if item:
-            state, _, _ = current_fields(item, now)
-            state = state.replace('Offline (old)', 'Offline/old')
-            parts.append(('TG' if platform == 'Telegram' else 'WA') + ' ' + state)
-    statuses = ' | '.join(parts)
-    if not statuses:
-        return fit_screen(person['name'] + ' · No status records', width)
-    name_width = width - len(statuses) - 4
-    name = fit_screen(person['name'], name_width) if name_width > 1 else ''
-    return fit_screen((name + '  |  ' + statuses).strip(), width)
+    return fit_screen(person['name'] + ' · Online activity', width)
 
 
-def interval_line(interval, width, now):
-    """One aligned table row for an online interval, wide or compact."""
+def interval_lines(interval, width, now):
+    """Explicit dates, full service names and a compact card on narrow screens."""
+    start_date = datetime.datetime.fromtimestamp(interval['start_ts'] / 1000).astimezone()
+    date = start_date.strftime('%d %b %Y')
     start = short_time(interval['start_ts'], now)
+    end, end_date = 'Not recorded', None
     if interval['end_kind'] == 'exact':
         end = short_time(interval['end_ts'], now)
-    elif interval['end_kind'] == 'open':
-        end = 'open?'
-    else:
-        end = 'unknown'
+        end_date = datetime.datetime.fromtimestamp(interval['end_ts'] / 1000).astimezone()
     length = duration_text(interval['start_ts'],
                            interval['end_ts'] if interval['end_kind'] == 'exact' else None)
-    service = 'TG' if interval['service'] == 'Telegram' else 'WA'
-    if width >= 60:
-        return '  ' + ' │ '.join(pad_screen(value, size) for value, size in
-                                 ((start, 13), (end, 13), (length, 11), (service, 4)))
-    return '  ' + service + ' ' + start + ' → ' + end + ' ' + length
+    if length == '?':
+        length = 'Unknown'
+    if width >= 66:
+        if end_date and end_date.date() != start_date.date():
+            end = end_date.strftime('%d %b ') + end
+        values = (date, start, end, length, interval['service'])
+        return ['  ' + ' │ '.join(pad_screen(value, size) for value, size in
+                                 zip(values, (11, 8, 15, 10, 8)))]
+    duration = 'Duration ' + length
+    if end_date and end_date.date() != start_date.date():
+        duration = length + ' · ends ' + end_date.strftime('%d %b')
+    return [fit_screen('  ' + date + ' · ' + interval['service'], width),
+            fit_screen('  ' + start + ' → ' + end, width),
+            fit_screen('  ' + duration, width)]
 
 
 def browse_person(win, args, person):
     import curses
 
-    def load():
-        return person_intervals(person, args)
-
-    intervals = load()
+    intervals = person_intervals(person, args)
+    loaded_at = datetime.datetime.now().astimezone()
     scroll = 0
 
     def put(y, text, attribute=0):
@@ -991,30 +983,41 @@ def browse_person(win, args, person):
             try:
                 win.addstr(y, 0, fit_screen(text, width - 1), attribute)
             except curses.error:
-                pass  # A terminal resize can race drawing.
+                pass
 
     while True:
         height, width = win.getmaxyx()
         now = int(time.time() * 1000)
-        page = max(1, height - 7)
+        row_height = 1 if width - 1 >= 66 else 3
+        page = max(1, (height - 9) // row_height)
         scroll = max(0, min(scroll, max(0, len(intervals) - page)))
         win.erase()
-        put(0, ' ' + history_header(person, now, width - 1), curses.A_BOLD)
-        put(1, ' Online periods · newest first · ' + str(len(intervals)) + ' logged session(s)',
+        put(0, ' ' + history_header(person, now, width - 2), curses.A_BOLD)
+        put(1, ' Online periods · newest first')
+        put(2, ' Local times · refreshed ' + loaded_at.strftime('%H:%M:%S %Z'),
             curses.A_DIM)
-        if width >= 60:
-            put(2, '  ' + ' │ '.join(pad_screen(value, size) for value, size in
-                                     (('START', 13), ('END', 13), ('LENGTH', 11), ('SRV', 4))),
-                curses.A_BOLD)
+        if row_height == 1:
+            put(4, '  ' + ' │ '.join(pad_screen(value, size) for value, size in
+                                     zip(('DATE', 'START', 'END', 'DURATION', 'SERVICE'),
+                                         (11, 8, 15, 10, 8))), curses.A_BOLD)
         else:
-            put(2, '  TIME RANGE · LENGTH', curses.A_BOLD)
+            put(4, ' Date · Service / Start → End', curses.A_BOLD)
         for i, interval in enumerate(intervals[scroll:scroll + page]):
-            put(3 + i, interval_line(interval, width - 1, now))
+            for line, text in enumerate(interval_lines(interval, width - 1, now)):
+                put(5 + i * row_height + line, text,
+                    curses.A_BOLD if row_height > 1 and line == 0 else 0)
         if not intervals:
-            put(4, ' No online periods recorded yet.')
-        put(height - 3, ' ~ = estimate · ? = end not recorded', curses.A_DIM)
-        put(height - 2, ' ↑↓/j k Scroll  PgUp/PgDn Page  g/G Ends  r Reload')
-        put(height - 1, ' q/Esc Back to list')
+            put(5, ' No online periods recorded yet.')
+        first, last = (scroll + 1, min(scroll + page, len(intervals))) if intervals else (0, 0)
+        put(height - 4, ' ' + str(first) + '–' + str(last) + ' of ' + str(len(intervals)) + ' periods', curses.A_DIM)
+        put(height - 3, ' ~ = estimated duration · Unknown = end not recorded' if width >= 54
+            else ' ~ estimated · Unknown end', curses.A_DIM)
+        put(height - 2, ' ↑↓/j k Scroll  PgUp/PgDn Page  g/G Ends  r Refresh' if width >= 54
+            else ' ↑↓ Scroll · r Refresh')
+        put(height - 1, ' q/Esc Back to contacts')
+        if height < 12 or width < 26:
+            win.erase()
+            put(0, 'q Back · Enlarge terminal')
         win.refresh()
         try:
             key = win.get_wch()
@@ -1025,8 +1028,9 @@ def browse_person(win, args, person):
         if key in ('q', 'Q', '\x1b', '\x03'):
             return
         if key in ('r', 'R'):
-            intervals = load()
-            scroll = 0
+            intervals = person_intervals(person, args)
+            loaded_at = datetime.datetime.now().astimezone()
+            scroll = min(scroll, max(0, len(intervals) - page))
         elif key in (curses.KEY_DOWN, 'j'):
             scroll += 1
         elif key in (curses.KEY_UP, 'k'):
@@ -1044,6 +1048,8 @@ def pick_person_link(win, source, people):
     services = {item['service'] for item in source['members']}
     candidates = []
     for person in people:
+        if services.intersection(item['service'] for item in person['members']):
+            continue
         members = [item for item in person['members'] if item['service'] in {'Telegram', 'WhatsApp'} - services]
         if members:
             preferred = max(members, key=lambda item: (item['named'], len(item['name'].split()), len(item['name'])))
@@ -1063,14 +1069,14 @@ def pick_person_link(win, source, people):
             top = selected - page + 1
         win.erase()
         content = [(0, 'Link ' + source['name'], curses.A_BOLD),
-                   (1, 'Type a name or number, then choose the same person', 0),
+                   (1, 'Choose the same person on the other service', 0),
                    (2, 'Search name/number  ' + query + '_', curses.A_REVERSE)]
         for index, person in enumerate(rows[top:top + page], top):
             item = person['members'][0]
             content.append((4 + index - top, person['name'] + ' · ' + item['identifier'],
                             curses.A_REVERSE if index == selected else 0))
         if not rows:
-            content.append((4, 'No matching contact. Esc cancels.', 0))
+            content.append((4, 'No unpaired match. Esc cancels.', 0))
         content.extend([(height - 2, '↑↓ Choose  Enter Link', 0),
                         (height - 1, 'Type to search  Esc Cancel', 0)])
         for y, text, attribute in content:
@@ -1252,7 +1258,7 @@ def browse_current(win, args):
             try:
                 if key == 'm':
                     if all(service_contact(person, value) for value in ('Telegram', 'WhatsApp')):
-                        note = 'This person already has both services'
+                        note = 'Already paired · u unlinks the match first'
                         continue
                     with contextlib.redirect_stderr(io.StringIO()):
                         candidates = current_people(args, include_cached=True)
@@ -1272,7 +1278,9 @@ def browse_current(win, args):
                 visible = current_rows(contacts, query, service)
                 anchor = person['members'][0]['key']
                 selection = next((i for i, value in enumerate(visible) if anchor in value['key']), 0)
-            except (OSError, ValueError):
+            except ValueError as error:
+                note = clean(str(error))
+            except OSError:
                 note = 'Could not save the local link. Check preferences and permissions.'
         elif key in ('r', 'R'):
             errors = io.StringIO()

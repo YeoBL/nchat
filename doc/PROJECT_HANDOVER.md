@@ -394,6 +394,25 @@ their own truthful verification status.
 
 ## Incidents and constraints to preserve
 
+### Presence history layout and incorrect manual matches
+
+On 10 November 2026, a contact appeared to disappear because saved manual links
+merged distinct Telegram identities into one WhatsApp person. The viewer chose
+one of their names for the combined row. The reported associations were repaired
+privately with a recovery copy under
+`~/.local/state/nchat/presence-link-backups/`. Private identities and matching
+preferences are excluded from Git. The core reads preference changes on its
+next selection refresh.
+
+`e172760c` excludes already-paired people from the other-service picker and
+rejects a second conflicting same-account identity at the preference writer.
+`c183761f` replaces the history's `+N` day offsets with full dates and seconds,
+full service names, explicit unknown ends, compact narrow layouts and a range
+counter. Reload retains history position. `utils/test-presence-current.py`
+checks both the matching failure and the layouts, including native PTY history
+entry, resize and exit. The installed Python helper must be reopened to load
+new code. No core restart is required for these helper changes.
+
 ### Cross-service presence selection
 
 Implementation `68bc2050` changes `UiModel::Impl::ProcessPresencePoll` to use a
