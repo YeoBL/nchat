@@ -213,7 +213,6 @@ private:
                        Reactions& p_Reactions);
   void GetReactionsEmojis(td::td_api::object_ptr<td::td_api::availableReactions>& p_AvailableReactions,
                           std::set<std::string>& p_Emojis);
-  int64_t GetDummyUserId(const std::string& p_Name);
   void UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId);
   void UpdateLastReadInboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId);
   bool TrackForumMessage(const td::td_api::message& p_Message);
@@ -4518,13 +4517,6 @@ void TgChat::Impl::GetReactionsEmojis(td::td_api::object_ptr<td::td_api::availab
   ReactionsArrayToEmojiSet(p_AvailableReactions->top_reactions_, p_Emojis);
   ReactionsArrayToEmojiSet(p_AvailableReactions->recent_reactions_, p_Emojis);
   ReactionsArrayToEmojiSet(p_AvailableReactions->popular_reactions_, p_Emojis);
-}
-
-int64_t TgChat::Impl::GetDummyUserId(const std::string& p_Name)
-{
-  uint64_t id = static_cast<uint64_t>(std::hash<std::string>{ }(p_Name)) & 0x00ffffffffffffff;
-  id |= (1ll << 60); // tdlib userid use int53, set bit to ensure no clash
-  return id;
 }
 
 void TgChat::Impl::UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId)
