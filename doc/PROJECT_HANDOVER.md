@@ -7,6 +7,16 @@ on GitHub. The operational snapshot was checked on **9 November 2026**, in
 Europe/London. Process IDs, terminal names and connection state require a fresh
 check before an action.
 
+## Telegram sponsored ads — 11 November 2026
+
+The Telegram provider no longer fetches or injects sponsored messages into channel
+history. This applies automatically across Telegram profiles. Ordinary channel
+posts still use the regular message path. Sponsored rows were memory-only, so a
+core restart removes existing displayed ads. The shared legacy deferred request
+is retained as a no-op. Regression coverage is in
+`utils/test-telegram-edit-permissions.cpp`, run with its companion shell script.
+See `changes.md` for implementation commits, verification and activation.
+
 ## Start here
 
 1. Work in `/Users/bingl/.local/src/nchat-inline`. The Codex chat's default
