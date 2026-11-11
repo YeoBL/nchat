@@ -739,7 +739,12 @@ and complete cached numbers, including formatted number queries.
 Its source is `utils/nchat-presence` and its installed entry point is
 `/Users/bingl/.local/bin/nchat-presence`. Use `current --plain` for grouped text.
 Tab changes service, / or Ctrl+F (also f) searches names/numbers, r reloads the
-cache and q quits. Search filters while typing. Arrow/page keys leave text-entry
+cache immediately and q quits. Both status and an open history detect changed
+local history, contact databases/WALs and manual links every second. Unchanged
+files are checked by metadata without reparsing. Automatic refresh retains the
+query, selected identity and history anchor, and retries read failures. Existing
+viewer processes must be reopened once to load an installed helper update.
+Search filters while typing. Arrow/page keys leave text-entry
 mode and navigate results.
 The view labels stale reports after five minutes and ignores heartbeat records
 for freshness. Regression coverage is `python3 utils/test-presence-current.py`.

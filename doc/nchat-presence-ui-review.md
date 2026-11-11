@@ -98,7 +98,10 @@ farther through the list. `nchat-presence current --plain` prints a grouped
 snapshot. `NO_COLOR=1 nchat-presence` requests monochrome display.
 
 The five-minute stale threshold is a presentation choice. Report age advances
-between refreshes. New cached data appears after r. Emoji modifiers and joined
+between refreshes. New cached data appears automatically within about one second
+in both the status table and the open activity history. File metadata checks
+avoid reparsing unchanged records. Search, selection and the viewed history
+period stay in place. Press r to force an immediate reload. Emoji modifiers and joined
 styling are simplified for stable terminal columns, while the underlying names
 remain intact in the cache.
 
@@ -156,3 +159,13 @@ the tested source. Installed self-tests and a real-cache plain invocation pass.
 A private copy of the predecessor is retained under
 `~/.local/.nchat-helper-install/backups/` in the dated presence-history-ux
 folder. Existing helper sessions need to be reopened to load the new code.
+
+## Live refresh verification — 11 November 2026
+
+The terminal regression appends an online record while the status table is idle,
+then an offline record while that person's history is open. Both changes appear
+without a refresh key or restart. Synthetic checks also cover automatic recovery,
+selection/history anchors, contact-link and SQLite WAL changes, and skipping
+unchanged history. The complete viewer suite and helper self-test pass. The
+installed helper matches the tested source. Previously running copies require
+one reopen to load this change.
