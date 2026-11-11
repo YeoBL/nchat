@@ -132,6 +132,62 @@ def terminal_check(args, width, interrupt=False, linking=False, history_query='j
         os.close(master)
 
 
+def terminal_live_check():
+    with tempfile.TemporaryDirectory(prefix='nchat-live-ui-') as temporary:
+        directory = Path(temporary) / 'presence'
+        directory.mkdir()
+        path = directory / ('history.' + 'Telegram_live'.encode().hex() + '.jsonl')
+        base = int(time.time() * 1000) - 120_000
+        path.write_text(json.dumps(dict(ts=base, u='100', on=0, seen=base)) + '\n')
+        child, master = pty.fork()
+        if child == 0:
+            os.environ['TERM'] = 'xterm-256color'
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 120, 0, 0))
+            os.execv(sys.executable, [sys.executable, str(SCRIPT), '--no-names', '--dir', str(directory)])
+        output, finished = bytearray(), False
+        try:
+            def wait_for(text, start=0):
+                deadline = time.monotonic() + 4
+                while time.monotonic() < deadline:
+                    if text in output[start:]:
+                        return
+                    if select.select([master], [], [], .05)[0]:
+                        output.extend(os.read(master, 65536))
+                check(False, 'Live terminal did not display ' + repr(text))
+
+            wait_for(b'Latest status')
+            checkpoint = len(output)
+            with path.open('a') as stream:
+                stream.write(json.dumps(dict(ts=base + 60_000, u='100', on=1, seen=-1)) + '\n')
+            wait_for(b'Online', checkpoint)  # No key press or refresh command.
+            os.write(master, b'\n')
+            wait_for(b'Online activity')
+            checkpoint = len(output)
+            end = base + 61_000
+            with path.open('a') as stream:
+                stream.write(json.dumps(dict(ts=end, u='100', on=0, seen=end)) + '\n')
+            wait_for(app.short_time(end, end).encode(), checkpoint)
+            os.write(master, b'qq')
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], .05)[0]:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        pass
+                pid, status = os.waitpid(child, os.WNOHANG)
+                if pid:
+                    finished = True
+                    check(os.waitstatus_to_exitcode(status) == 0, 'Live terminal failed to exit')
+                    break
+            check(finished and b'Traceback' not in output, 'Live terminal failed')
+        finally:
+            if not finished:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            os.close(master)
+
+
 with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
     root = Path(temporary)
     directory = root / 'presence'
@@ -203,7 +259,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
         frames = ['\n'.join(value[0] for _, value in sorted(frame.items())) for frame in window.frames]
         check('WHATSAPP' in frames[2] and 'Jamie' not in frames[2], 'Tab does not filter the service')
         check(any('jamie_' in frame for frame in frames), 'Search does not update as typed')
-        check(any('Refreshed' in frame for frame in frames), 'Refresh completion missing')
+        check(any('Live' in frame and 'updated' in frame for frame in frames), 'Live refresh indicator missing')
         check(any('Alex' in frame and '123' in frame for frame in frames), 'Selected identity detail missing')
         for frame in window.frames:
             check('q Quit' in frame[23][0], 'Quit help is clipped or absent')
@@ -394,6 +450,49 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
         app.browse_current(window, args)
     check('retry' in window.frames[1][21][0], 'Refresh failure has no recovery action')
     check('Alex' in window.frames[1][18][0], 'Refresh failure destroyed the last good view')
+    # Idle ticks inspect metadata but do not reparse unchanged history.
+    window = Window([curses.KEY_RESIZE, curses.KEY_RESIZE, 'q'], 120)
+    with patch.object(app, 'current_people', return_value=people) as reloads, \
+         patch.object(app, 'presence_revision', return_value=('unchanged',)), \
+         patch.object(app.time, 'monotonic', side_effect=iter(range(1000))), \
+         patch.object(curses, 'curs_set'):
+        app.browse_current(window, args)
+    check(reloads.call_count == 1, 'Idle refresh repeatedly reparses unchanged files')
+    window = Window([curses.KEY_RESIZE, curses.KEY_RESIZE, 'q'], 120)
+    with patch.object(app, 'current_people', return_value=people) as reloads, \
+         patch.object(app, 'presence_revision', side_effect=[('same',), OSError('temporary read failure'), ('same',)]), \
+         patch.object(app.time, 'monotonic', side_effect=iter(range(1000))), \
+         patch.object(curses, 'curs_set'):
+        app.browse_current(window, args)
+    check(reloads.call_count == 2 and 'Live updates' in window.frames[2][21][0],
+          'Automatic retry needs another file change to recover after a temporary read failure')
+    inserted = dict(people[0], key=(('Telegram_new', '9000'),), name='A new person')
+    window = Window(['j', 'q'], 120)
+    with patch.object(app, 'current_people', side_effect=[people, [inserted] + people]), \
+         patch.object(app, 'presence_revision', side_effect=[('old',), ('new',)]), \
+         patch.object(app.time, 'monotonic', side_effect=iter(range(1000))), \
+         patch.object(curses, 'curs_set'):
+        app.browse_current(window, args)
+    check(people[1]['name'] in window.frames[1][18][0], 'Automatic updates change the selected person')
+    window = Window(['j', 'q'], 120)
+    many = [dict(crossing, start_ts=crossing['start_ts'] - index * 3600_000) for index in range(30)]
+    inserted = dict(crossing, start_ts=crossing['start_ts'] + 3600_000)
+    with patch.object(app, 'person_intervals', side_effect=[many, [inserted] + many]), \
+         patch.object(app, 'presence_revision', side_effect=[('old',), ('new',)]), \
+         patch.object(app.time, 'monotonic', side_effect=iter(range(1000))):
+        app.browse_person(window, args, alex_person)
+    check('3–17 of 31' in window.frames[1][20][0], 'New history rows move the viewed period')
+    revision = app.presence_revision(args)
+    preference = root / 'presence-contact-links.json'
+    preference.write_text('{"version":1,"links":[]}')
+    check(app.presence_revision(args) != revision, 'Link replacement is invisible to automatic refresh')
+    preference.unlink()
+    database = root / 'history' / 'Telegram_fixture' / 'db.sqlite'
+    wal = Path(str(database) + '-wal')
+    wal.write_bytes(b'synthetic WAL metadata change')
+    check(app.presence_revision(args) != revision, 'Contact WAL changes are invisible to automatic refresh')
+    wal.unlink()
+
     empty_args = argparse.Namespace(**dict(vars(args), dir=str(root / 'missing')))
     with contextlib.redirect_stdout(io.StringIO()) as output:
         app.print_current(empty_args)
@@ -589,5 +688,7 @@ with tempfile.TemporaryDirectory(prefix='nchat-current-ui-') as temporary:
             check(expected in window.frames[1][18][0], 'Paging uses physical lines instead of people')
     terminal_check(args, 80, linking=True)
 
+terminal_live_check()
+print('PASS: status and open history reload new records while idle in a real terminal')
 print('PASS: paired service columns, phone matching, manual link/cancel/unlink, private atomic/concurrent preferences, freshness, names, navigation, resize and legacy current-view checks; synthetic data only')
 print('Synthetic 10,000-record refresh: %.3fs; source files unchanged' % elapsed)

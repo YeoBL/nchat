@@ -468,6 +468,23 @@ def cmd_list(args):
                  state, count, online, heartbeats))
 
 
+def presence_revision(args):
+    """Detect local updates without parsing unchanged history on every tick."""
+    paths = set(Path(args.dir).glob('history.*.jsonl'))
+    paths.add(Path(args.appdir) / 'presence-contact-links.json')
+    if not args.no_names:
+        for database in (Path(args.appdir) / 'history').glob('*/db.sqlite'):
+            paths.update((database, Path(str(database) + '-wal')))
+    revision = []
+    for path in sorted(paths):
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            continue  # A writer may rotate or replace a file during the scan.
+        revision.append((str(path), info.st_ino, info.st_size, info.st_mtime_ns))
+    return tuple(revision)
+
+
 def current_contacts(args):
     """Keep only each contact's last reported state. Heartbeats aren't observations."""
     if not os.path.isdir(args.dir):
@@ -993,9 +1010,10 @@ def interval_lines(interval, width, now):
 def browse_person(win, args, person):
     import curses
 
-    intervals = person_intervals(person, args)
-    loaded_at = datetime.datetime.now().astimezone()
-    scroll = 0
+    win.timeout(1000)
+    intervals, scroll = [], 0
+    loaded_at, loaded_revision = None, None
+    next_check, refresh_requested, refresh_error = 0, True, False
 
     def put(y, text, attribute=0):
         if 0 <= y < height and width > 1:
@@ -1005,6 +1023,26 @@ def browse_person(win, args, person):
                 pass
 
     while True:
+        if refresh_requested or time.monotonic() >= next_check:
+            next_check = time.monotonic() + 1
+            try:
+                revision = presence_revision(args)
+                if refresh_requested or revision != loaded_revision:
+                    anchor = intervals[scroll] if 0 < scroll < len(intervals) else None
+                    with contextlib.redirect_stderr(io.StringIO()) as errors:
+                        updated = person_intervals(person, args)
+                    intervals = updated
+                    if anchor:
+                        scroll = next((i for i, item in enumerate(intervals)
+                                       if (item['service'], item['start_ts'] or item['end_ts']) ==
+                                       (anchor['service'], anchor['start_ts'] or anchor['end_ts'])), scroll)
+                    loaded_at = datetime.datetime.now().astimezone()
+                    refresh_error = bool(errors.getvalue())
+                    loaded_revision = None if refresh_error else revision
+            except (OSError, SystemExit):
+                refresh_error = True
+                loaded_revision = None
+            refresh_requested = False
         height, width = win.getmaxyx()
         now = int(time.time() * 1000)
         row_height = 1 if width - 1 >= 66 else 3
@@ -1013,7 +1051,8 @@ def browse_person(win, args, person):
         win.erase()
         put(0, ' ' + history_header(person, now, width - 2), curses.A_BOLD)
         put(1, ' Online periods and last-seen reports · newest first')
-        put(2, ' Local times · refreshed ' + loaded_at.strftime('%H:%M:%S %Z'),
+        put(2, ' Could not read some records · retrying automatically' if refresh_error else
+            ' Local times · Live · updated ' + (loaded_at.strftime('%H:%M:%S %Z') if loaded_at else '—'),
             curses.A_DIM)
         if row_height == 1:
             put(4, '  ' + ' │ '.join(pad_screen(value, size) for value, size in
@@ -1047,9 +1086,7 @@ def browse_person(win, args, person):
         if key in ('q', 'Q', '\x1b', '\x03'):
             return
         if key in ('r', 'R'):
-            intervals = person_intervals(person, args)
-            loaded_at = datetime.datetime.now().astimezone()
-            scroll = min(scroll, max(0, len(intervals) - page))
+            refresh_requested = True
         elif key in (curses.KEY_DOWN, 'j'):
             scroll += 1
         elif key in (curses.KEY_UP, 'k'):
@@ -1147,14 +1184,37 @@ def browse_current(win, args):
         pass
     win.keypad(True)
     win.timeout(1000)
-    errors = io.StringIO()
-    with contextlib.redirect_stderr(errors):
-        contacts = current_people(args)
+    contacts = []
     query, service, searching, selection, top = args.pattern, 'All', False, 0, 0
-    loaded_at = datetime.datetime.now().astimezone()
-    note = ('Some cache records could not be read. r retries.' if errors.getvalue()
-            else 'm links contacts · u removes manual links · r refreshes')
+    loaded_at, loaded_revision = None, None
+    next_check, refresh_requested = 0, True
+    note = 'Live updates · m links contacts · u removes manual links'
     while True:
+        if refresh_requested or time.monotonic() >= next_check:
+            next_check = time.monotonic() + 1
+            errors = io.StringIO()
+            try:
+                revision = presence_revision(args)
+                if refresh_requested or revision != loaded_revision:
+                    previous = current_rows(contacts, query, service)
+                    anchor = previous[min(selection, len(previous) - 1)]['key'] if previous else None
+                    with contextlib.redirect_stderr(errors):
+                        updated = current_people(args)
+                    contacts = updated
+                    visible = current_rows(contacts, query, service)
+                    selection = next((i for i, item in enumerate(visible)
+                                      if anchor and set(anchor).intersection(item['key'])), 0)
+                    loaded_at = datetime.datetime.now().astimezone()
+                    if errors.getvalue():
+                        loaded_revision = None
+                        note = 'Some cache records could not be read · retrying automatically'
+                    else:
+                        loaded_revision = revision
+                        note = 'Live updates · m links contacts · u removes manual links'
+            except (OSError, SystemExit):
+                loaded_revision = None
+                note = 'Could not refresh the cache · retrying automatically · r retries now'
+            refresh_requested = False
         rows = current_rows(contacts, query, service)
         selection = min(selection, max(0, len(rows) - 1))
         selected = rows[selection]['key'] if rows else None
@@ -1181,7 +1241,7 @@ def browse_current(win, args):
                     pass  # A terminal resize can race drawing.
 
         put(0, ' NCHAT  /  Latest status', curses.A_BOLD)
-        put(1, ' Read at ' + loaded_at.strftime('%H:%M %Z') + '  ·  ' + str(len(rows)) + ' people · >5m = old')
+        put(1, ' Live · updated ' + (loaded_at.strftime('%H:%M:%S %Z') if loaded_at else '—') + ' · ' + str(len(rows)) + ' people · >5m = old')
         label = 'SEARCH name/number  ' + query + '_' if searching else (
             ('ALL PEOPLE' if service == 'All' else 'WITH ' + service.upper()) + ' · ' +
             ('Find ' + query if query else '/ or Ctrl+F to search names/numbers'))
@@ -1302,18 +1362,7 @@ def browse_current(win, args):
             except OSError:
                 note = 'Could not save the local link. Check preferences and permissions.'
         elif key in ('r', 'R'):
-            errors = io.StringIO()
-            try:
-                with contextlib.redirect_stderr(errors):
-                    contacts = current_people(args)
-                visible = current_rows(contacts, query, service)
-                selection = next((i for i, item in enumerate(visible) if selected and set(selected).intersection(item['key'])), 0)
-                loaded_at = datetime.datetime.now().astimezone()
-                note = 'Refreshed ' + loaded_at.strftime('%H:%M')
-                if errors.getvalue():
-                    note += '  ·  Some cache records could not be read'
-            except (OSError, SystemExit):
-                note = 'Could not refresh the cache. Press r to retry.'
+            refresh_requested = True
 
 
 def cmd_current(args):
@@ -1592,7 +1641,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
         description="Browse one row per person with Telegram and WhatsApp columns. "
-                    "The default screen supports arrows, Tab, / search, r refresh and q quit. "
+                    "Status and history update automatically. Use arrows, Tab, / search, r refresh and q quit. "
                     "Read the local nchat presence history under "
                     "~/.config/nchat/presence/. Patterns match user ids/numbers "
                     "and, when the local cache is readable, display names.")
