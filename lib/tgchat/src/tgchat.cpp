@@ -49,9 +49,6 @@
 #include "strutil.h"
 #include "timeutil.h"
 
-// For development testing of sponsored messages only
-// #define SIMULATED_SPONSORED_MESSAGES
-
 static const int s_TdlibDate = 20260611;
 
 namespace detail
@@ -203,10 +200,6 @@ private:
   void TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessage& p_ChatMessage);
   void DownloadFile(std::string p_ChatId, std::string p_MsgId, std::string p_FileId, std::string p_DownloadId,
                     DownloadFileAction p_DownloadFileAction);
-  void RequestSponsoredMessagesIfNeeded();
-  void GetSponsoredMessages(const std::string& p_ChatId);
-  void ViewSponsoredMessage(const std::string& p_ChatId, const std::string& p_MsgId);
-  bool IsSponsoredMessageId(const std::string& p_MsgId);
   bool IsGroup(int64_t p_UserId);
   bool IsSelf(int64_t p_UserId);
   std::string GetContactName(int64_t p_UserId);
@@ -258,8 +251,6 @@ private:
   TelegramMuteState m_NotificationMutes;
   std::map<int64_t, std::vector<int32_t>> m_ActiveStories;
   int64_t m_CurrentChat = 0;
-  const char m_SponsoredMessageMsgIdPrefix = '+';
-  std::map<std::string, std::set<std::string>> m_SponsoredMessageIds;
   int m_ProfileDirVersion = 0;
   bool m_WasOnline = false;
   std::mutex m_Mutex;
@@ -1552,9 +1543,10 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           std::static_pointer_cast<MarkMessageReadRequest>(p_RequestMessage);
         int64_t chatId = StrUtil::NumFromHex<int64_t>(markMessageReadRequest->chatId);
 
-        if (IsSponsoredMessageId(markMessageReadRequest->msgId))
+        if (StrUtil::NumHasPrefix(markMessageReadRequest->msgId, '+'))
         {
-          ViewSponsoredMessage(markMessageReadRequest->chatId, markMessageReadRequest->msgId);
+          // Legacy sponsored IDs are synthetic and have no regular read marker.
+          if (markMessageReadRequest->onResult) markMessageReadRequest->onResult(false);
           return;
         }
 
@@ -2038,18 +2030,13 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           }
 
           m_CurrentChat = chatId;
-          RequestSponsoredMessagesIfNeeded();
         }
       }
       break;
 
+    // Retain the shared request type for compatibility with existing callers.
+    // Sponsored messages are no longer requested or injected into history.
     case DeferGetSponsoredMessagesRequestType:
-      {
-        std::shared_ptr<DeferGetSponsoredMessagesRequest> deferGetSponsoredMessagesRequest =
-          std::static_pointer_cast<DeferGetSponsoredMessagesRequest>(p_RequestMessage);
-        std::string chatId = deferGetSponsoredMessagesRequest->chatId;
-        GetSponsoredMessages(chatId);
-      }
       break;
 
     case GetAvailableReactionsRequestType:
@@ -4302,208 +4289,6 @@ void TgChat::Impl::DownloadFile(std::string p_ChatId, std::string p_MsgId, std::
   catch (...)
   {
   }
-}
-
-void TgChat::Impl::RequestSponsoredMessagesIfNeeded()
-{
-  if (m_ChatTypes[m_CurrentChat] != ChatSuperGroupChannel) return;
-
-#ifdef SIMULATED_SPONSORED_MESSAGES
-  const int64_t intervalTime = 10 * 1000; // 10 sec
-#else
-  const int64_t intervalTime = 5 * 60 * 1000; // 5 min
-#endif
-  static std::map<int64_t, int64_t> lastTime;
-  const int64_t nowTime = TimeUtil::GetCurrentTimeMSec();
-
-  if ((nowTime - lastTime[m_CurrentChat]) >= intervalTime)
-  {
-    lastTime[m_CurrentChat] = nowTime;
-    std::shared_ptr<DeferGetSponsoredMessagesRequest> deferGetSponsoredMessagesRequest =
-      std::make_shared<DeferGetSponsoredMessagesRequest>();
-    deferGetSponsoredMessagesRequest->chatId = StrUtil::NumToHex(m_CurrentChat);
-    SendRequest(deferGetSponsoredMessagesRequest);
-  }
-}
-
-void TgChat::Impl::GetSponsoredMessages(const std::string& p_ChatId)
-{
-  LOG_DEBUG("get sponsored messages %s", p_ChatId.c_str());
-
-  // delete previous sponsored message(s) for this chat
-  for (auto it =
-         m_SponsoredMessageIds[p_ChatId].begin(); it != m_SponsoredMessageIds[p_ChatId].end();
-       /* incremented in loop */)
-  {
-    const std::string msgId = *it;
-    std::shared_ptr<DeleteMessageNotify> deleteMessageNotify = std::make_shared<DeleteMessageNotify>(m_ProfileId);
-    deleteMessageNotify->success = true;
-    deleteMessageNotify->chatId = p_ChatId;
-    deleteMessageNotify->msgId = msgId;
-    CallMessageHandler(deleteMessageNotify);
-    it = m_SponsoredMessageIds[p_ChatId].erase(it);
-  }
-
-#ifdef SIMULATED_SPONSORED_MESSAGES
-  // fake/simulated sponsored messages for dev/testing
-  static int64_t sponsoredMessageId = 0;
-  std::vector<ChatMessage> chatMessages;
-  int num = 1 + (rand() % 2);
-  for (int i = 0; i < num; ++i)
-  {
-    ++sponsoredMessageId;
-
-    ChatMessage chatMessage;
-    chatMessage.id = StrUtil::NumAddPrefix(StrUtil::NumToHex(sponsoredMessageId), m_SponsoredMessageMsgIdPrefix);
-    chatMessage.timeSent = std::numeric_limits<int64_t>::max();
-    chatMessage.isOutgoing = false;
-    if ((sponsoredMessageId % 3) == 0)
-    {
-      chatMessage.text = "This is a long sponsored message. In fact, it has the maximum length "
-        "allowed on the platform – 160 characters\xF0\x9F\x98\xAC\xF0\x9F\x98\xAC. It's "
-        "promoting a bot with a start parameter."
-        "\n[https://t.me/QuizBot?start=GreatMinds]";
-      chatMessage.senderId = "393833303030323332";
-    }
-    else if ((sponsoredMessageId % 3) == 1)
-    {
-      chatMessage.text = "This is a regular sponsored message, it is promoting a channel."
-        "\n[https://t.me/c/1001997501]";
-      chatMessage.senderId = "2D31303031303031393937353031";
-    }
-    else if ((sponsoredMessageId % 3) == 2)
-    {
-      chatMessage.text = "This sponsored message is promoting a particular post in a channel."
-        "\n[https://t.me/c/1006503122/172]";
-      chatMessage.senderId = "2D31303031303036353033313232";
-    }
-
-    chatMessage.link = chatMessage.senderId;
-    chatMessages.push_back(chatMessage);
-    m_SponsoredMessageIds[p_ChatId].insert(chatMessage.id);
-    LOG_DEBUG("new sponsored message %s (%d)", chatMessage.id.c_str(), sponsoredMessageId);
-
-    // request chat type for senders
-    const std::vector<std::string> chatIds = { chatMessage.senderId };
-    std::shared_ptr<DeferGetChatDetailsRequest> deferGetChatDetailsRequest =
-      std::make_shared<DeferGetChatDetailsRequest>();
-    deferGetChatDetailsRequest->isGetTypeOnly = true;
-    deferGetChatDetailsRequest->chatIds = chatIds;
-    SendRequest(deferGetChatDetailsRequest);
-  }
-
-  std::shared_ptr<NewMessagesNotify> newMessagesNotify = std::make_shared<NewMessagesNotify>(m_ProfileId);
-  newMessagesNotify->success = true;
-  newMessagesNotify->chatId = p_ChatId;
-  newMessagesNotify->chatMessages = chatMessages;
-  newMessagesNotify->fromMsgId = "";
-  newMessagesNotify->cached = true; // do not cache sponsored messages
-  newMessagesNotify->sequence = false;
-  CallMessageHandler(newMessagesNotify);
-#else
-  // sponsored messages from telegram
-  const int64_t chatId = StrUtil::NumFromHex<int64_t>(p_ChatId);
-  SendQuery(td::td_api::make_object<td::td_api::getChatSponsoredMessages>(chatId),
-            [this, p_ChatId, chatId](Object object)
-  {
-    if (object->get_id() == td::td_api::error::ID) return;
-
-    auto sponsoredMessages = td::move_tl_object_as<td::td_api::sponsoredMessages>(object);
-
-    std::vector<ChatMessage> chatMessages;
-    for (auto it = sponsoredMessages->messages_.begin(); it != sponsoredMessages->messages_.end(); ++it)
-    {
-      auto sponsoredMessage = td::move_tl_object_as<td::td_api::sponsoredMessage>(*it);
-
-      const int64_t sponsoredMessageId = sponsoredMessage->message_id_;
-
-      ChatMessage chatMessage;
-      TdMessageContentConvert(*sponsoredMessage->content_, chatId, chatMessage.text, chatMessage.fileInfo);
-
-      chatMessage.id = StrUtil::NumAddPrefix(StrUtil::NumToHex(sponsoredMessageId), m_SponsoredMessageMsgIdPrefix);
-      chatMessage.timeSent = std::numeric_limits<int64_t>::max();
-      chatMessage.isOutgoing = false;
-
-      const std::string contactName = sponsoredMessage->title_;
-      const int64_t contactId = GetDummyUserId(contactName);
-      chatMessage.senderId = StrUtil::NumToHex(contactId);
-
-      td::td_api::object_ptr<td::td_api::InternalLinkType> link;
-      std::string url = sponsoredMessage->sponsor_->url_;
-      if (!url.empty())
-      {
-        chatMessage.text += "\n" + url + "";
-      }
-
-      chatMessages.push_back(chatMessage);
-      m_SponsoredMessageIds[p_ChatId].insert(chatMessage.id);
-      LOG_DEBUG("new sponsored message %s (%lld)", chatMessage.id.c_str(), sponsoredMessageId);
-
-      // provide info for sender
-      ContactInfo contactInfo;
-      contactInfo.id = StrUtil::NumToHex(contactId);
-      contactInfo.name = contactName;
-      contactInfo.isSelf = IsSelf(contactId);
-      m_ContactInfos[contactId] = contactInfo;
-
-      std::vector<ContactInfo> contactInfos;
-      contactInfos.push_back(contactInfo);
-
-      std::shared_ptr<NewContactsNotify> newContactsNotify =
-        std::make_shared<NewContactsNotify>(m_ProfileId);
-      newContactsNotify->contactInfos = contactInfos;
-      CallMessageHandler(newContactsNotify);
-    }
-
-    std::shared_ptr<NewMessagesNotify> newMessagesNotify = std::make_shared<NewMessagesNotify>(m_ProfileId);
-    newMessagesNotify->success = true;
-    newMessagesNotify->chatId = p_ChatId;
-    newMessagesNotify->chatMessages = chatMessages;
-    newMessagesNotify->fromMsgId = "";
-    newMessagesNotify->cached = true; // do not cache sponsored messages
-    newMessagesNotify->sequence = false;
-    CallMessageHandler(newMessagesNotify);
-  });
-#endif
-}
-
-void TgChat::Impl::ViewSponsoredMessage(const std::string& p_ChatId, const std::string& p_MsgId)
-{
-  if (!m_SponsoredMessageIds[p_ChatId].count(p_MsgId)) return;
-
-  const int64_t msgId = StrUtil::NumFromHex<std::int64_t>(p_MsgId);
-  LOG_DEBUG("view sponsored message %s (%lld)", p_MsgId.c_str(), msgId);
-
-#ifdef SIMULATED_SPONSORED_MESSAGES
-  // fake/simulated sponsored messages for dev/testing
-#else
-  // sponsored messages from telegram
-  const int64_t chatId = StrUtil::NumFromHex<int64_t>(p_ChatId);
-  const std::vector<std::int64_t> msgIds = { msgId };
-  auto view_messages = td::td_api::make_object<td::td_api::viewMessages>();
-  view_messages->chat_id_ = chatId;
-  view_messages->message_ids_ = msgIds;
-  view_messages->force_read_ = true;
-  view_messages->source_ = td::td_api::make_object<td::td_api::messageSourceChatHistory>();
-
-  SendQuery(std::move(view_messages), [msgId](Object object)
-  {
-    if (object->get_id() == td::td_api::error::ID)
-    {
-      auto error = td::td_api::move_object_as<td::td_api::error>(object);
-      LOG_WARNING("view sponsored message failed %lld code %d (%s)", msgId, error->code_, error->message_.c_str());
-    }
-    else
-    {
-      LOG_TRACE("view sponsored message ok %lld", msgId);
-    }
-  });
-#endif
-}
-
-bool TgChat::Impl::IsSponsoredMessageId(const std::string& p_MsgId)
-{
-  return StrUtil::NumHasPrefix(p_MsgId, m_SponsoredMessageMsgIdPrefix);
 }
 
 bool TgChat::Impl::IsGroup(int64_t p_UserId)

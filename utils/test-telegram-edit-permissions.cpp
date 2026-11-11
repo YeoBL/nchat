@@ -106,6 +106,28 @@ struct TelegramMuteHandlerTest
       impl.PerformRequest(request);
       assert(impl.m_CurrentQueryId == 2); // Same-chat status refreshes do not repeat history reads.
     }
+    {
+      TgChat::Impl impl;
+      impl.m_ChatTypes[1001] = TgChat::Impl::ChatSuperGroupChannel;
+      auto open = std::make_shared<SetCurrentChatRequest>();
+      open->chatId = StrUtil::NumToHex(int64_t(1001));
+      impl.PerformRequest(open);
+      assert(impl.m_CurrentQueryId == 2 && impl.m_Handlers.size() == 2);
+      assert(impl.m_RequestsQueue.empty()); // No deferred ad fetch when opening channels.
+      impl.PerformRequest(open);
+      auto legacy = std::make_shared<DeferGetSponsoredMessagesRequest>();
+      legacy->chatId = open->chatId;
+      impl.PerformRequest(legacy);
+      int acknowledgements = 0;
+      auto read = std::make_shared<MarkMessageReadRequest>();
+      read->chatId = open->chatId; read->msgId = StrUtil::NumAddPrefix(StrUtil::NumToHex(int64_t(1)), '+');
+      read->onResult = [&](bool ok) { assert(!ok); ++acknowledgements; };
+      impl.PerformRequest(read);
+      assert(acknowledgements == 1);
+      assert(impl.m_CurrentQueryId == 2 && impl.m_Handlers.size() == 2);
+      assert(impl.m_RequestsQueue.empty()); // No ad query, notification or impression.
+    }
+    std::cout << "PASS: Telegram channel opens and legacy requests cannot fetch or display sponsored messages\n";
     std::cout << "PASS: Telegram content/edit updates fetch and deliver the exact edited message without view/read queries\n";
     std::cout << "PASS: Telegram edit permission follows can_be_edited for old text/captions, rejects denied/missing/unsupported content and errors; no edits or read queries\n";
   }
