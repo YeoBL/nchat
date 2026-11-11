@@ -22,6 +22,11 @@ independently runnable. The widget snapshots were independently compiled.
 |---|---|---|---|
 | Remove Telegram sponsored ads | Automatic for every Telegram account and channel. Removes sponsored-message fetching, synthetic history/contact insertion and ad-view reporting. Legacy deferred ad requests safely do nothing. | [e5e27772](https://github.com/YeoBL/nchat/commit/e5e27772), [helper cleanup c49ab0de](https://github.com/YeoBL/nchat/commit/c49ab0de) | Real provider regression checks channel opens, repeated opens and legacy ad/read requests without an ad query or notification. Telegram edit/content regressions, full build and notification/rendering suite pass. Ordinary posts published by a channel remain visible. Existing sponsored rows were memory-only and disappear on core restart. Live channel appearance has not been checked. |
 
+Activated on 11 November after testing. Core exited cleanly and restarted in
+Screen `1529.nchat`, window `0` (`zsh`), original shell `1533` and `ttys001`.
+New core PID `95268` reached the `Online` indicator. The selected window was
+confirmed after restart. No live channel was opened for this test.
+
 ## GitHub backup and rollback checkpoints — 9 November 2026
 
 The default GitHub branch is `codex/personal-features`. The existing 163
