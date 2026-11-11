@@ -163,7 +163,11 @@ separate Telegram and WhatsApp columns. Matching complete phone numbers join
 automatically, as do the same service identity across accounts. Each column
 keeps its own status and timestamps. A dash means that service has no contact in
 the current view. The selected-person panel shows both service identities and
-their report details. The header shows when the local cache was read.
+their report details. The header shows when the local cache was read. Both the
+status list and open activity history check for local updates every second.
+They reload changed files automatically while preserving your search, selected
+person and the history period you are viewing. Temporary read errors retry
+automatically. An already-running viewer needs one reopen after an upgrade.
 Reports older than five minutes are labelled old or unconfirmed. Cached
 heartbeats do not renew freshness. Flags render as country letters, with emoji
 modifiers and joiners simplified for stable terminal columns.

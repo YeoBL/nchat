@@ -16,6 +16,15 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## Automatic presence viewer updates — 11 November 2026
+
+| Change | Access / effect | Implementation commit | Verification / limits |
+|---|---|---|---|
+| Live status and online-activity history | Run `nchat-presence`. The current table and an open person's history check local files every second and reload when records, contact names or manual links change. Search, selected contact and the viewed history period are retained. `r` forces a refresh. Read failures retry automatically. | [4323d54c](https://github.com/YeoBL/nchat/commit/4323d54c) | Python self-test and current-view suite pass, including real terminal appends while idle in both screens, selection/history anchoring, recovery and avoiding repeat parsing of unchanged files. Installed helper matches tested source. Local 56-person load measured 0.080s, idle metadata checks averaged 0.000147s. Display timing depends on the running core writing its observations. Reopen an already-running viewer once to load this update. Plain/legacy commands print snapshots. |
+
+Installed atomically with the verified previous helper retained privately under
+`~/.local/.nchat-helper-install/backups/20261111T231230Z-presence-live-refresh/`.
+
 ## Telegram sponsored advertisements — 11 November 2026
 
 | Change | Access / effect | Implementation commit | Verification / limits |
