@@ -77,15 +77,17 @@ func TestWhatsAppMuteDeadlineAndRecovery(t *testing.T) {
 	action(time.Time{}, false)
 	expect(0)
 	// Finite mutes expire while idle, with no incoming event or app restart.
-	action(time.Now().Add(50*time.Millisecond), true)
+	action(time.Now().Add(200*time.Millisecond), true)
 	expect(1)
 	expect(0)
-	// A remute cancels the old expiry. A full snapshot also restores the current setting.
-	action(time.Now().Add(50*time.Millisecond), true)
+	// A copied history importer shares expiry cancellation with live events.
+	importer := *handler
+	settings.set(time.Now().Add(200 * time.Millisecond))
+	importer.refreshChatMute(client, jid)
 	expect(1)
 	action(store.MutedForever, true)
 	expect(1)
-	time.Sleep(80 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	select {
 	case <-reports:
 		t.Fatal("old timer undid remute")
@@ -111,10 +113,10 @@ func TestWhatsAppMuteDeadlineAndRecovery(t *testing.T) {
 	settings.mu.Lock()
 	settings.err = nil
 	settings.mu.Unlock()
-	action(time.Now().Add(50*time.Millisecond), true)
+	action(time.Now().Add(200*time.Millisecond), true)
 	expect(1)
 	handler.stopMuteTimers()
-	time.Sleep(80 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	select {
 	case <-reports:
 		t.Fatal("cleanup left a live mute timer")

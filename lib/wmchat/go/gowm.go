@@ -277,7 +277,7 @@ func AddConn(conn *whatsmeow.Client, path string, sendType int) int {
 	states[connId] = None
 	timeReads[connId] = make(map[string]time.Time)
 	expirations[connId] = make(map[string]uint32)
-	handlers[connId] = &WmEventHandler{connId: connId}
+	handlers[connId] = &WmEventHandler{connId: connId, mutes: &chatMuteState{}}
 	sendTypes[connId] = sendType
 	namesSynced[connId] = false
 	var loadErr error
@@ -895,9 +895,7 @@ func (s *ncSignalLogger) Configure(ss string) {
 
 // event handling
 type WmEventHandler struct {
-	muteMu sync.Mutex
-	muteTimers map[string]*time.Timer
-	muteClosed bool
+	mutes *chatMuteState // Shared by copied history importers for this connection.
 	notifyMute func(int, string, int) // Optional offline mute sink.
 	connId int
 	importedHistory bool
@@ -1232,7 +1230,7 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 
 	conversations := historySync.Data.GetConversations()
 	for _, conversation := range conversations {
-		LOG_TRACE(fmt.Sprintf("HandleHistorySync Conversation %#v", *conversation))
+		LOG_TRACE(fmt.Sprintf("HandleHistorySync Conversation %#v", conversation))
 
 		chatJid, _ := types.ParseJID(conversation.GetID())
 
@@ -1472,9 +1470,10 @@ func (handler *WmEventHandler) HandleMute(mute *events.Mute) {
 			until = time.UnixMilli(muteAction.GetMuteEndTimestamp())
 		}
 	}
-	handler.muteMu.Lock()
-	defer handler.muteMu.Unlock()
-	handler.publishMuteLocked(client, mute.JID, chatId, until)
+	state := handler.chatMutes()
+	state.Lock()
+	defer state.Unlock()
+	handler.publishMuteLocked(state, client, mute.JID, chatId, until)
 }
 
 func (handler *WmEventHandler) HandleArchive(archive *events.Archive) {
