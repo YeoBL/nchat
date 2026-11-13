@@ -62,7 +62,7 @@ set(LIB "libgostat${LIBSUFFIX}")
 # Rebuild when either protocol's authored sources, module files, or vendored
 # dependency trees change (mirrors the standalone modules' EXT_SRCS glob).
 set(SRCS
-  ${WM_GO_DIR}/gowm.go ${WM_GO_DIR}/cgowm.go ${WM_GO_DIR}/go.mod ${WM_GO_DIR}/go.sum
+  ${WM_GO_DIR}/gowm.go ${WM_GO_DIR}/cgowm.go ${WM_GO_DIR}/mute_state.go ${WM_GO_DIR}/go.mod ${WM_GO_DIR}/go.sum
   ${SG_GO_DIR}/gosg.go ${SG_GO_DIR}/cgosg.go ${SG_GO_DIR}/go.mod ${SG_GO_DIR}/go.sum
   ${CMAKE_CURRENT_SOURCE_DIR}/assemble.sh)
 file(GLOB_RECURSE WM_EXT_SRCS ${WM_GO_DIR}/ext/*.go)

@@ -291,6 +291,9 @@ func AddConn(conn *whatsmeow.Client, path string, sendType int) int {
 }
 
 func RemoveConn(connId int) {
+	if handler := GetHandler(connId); handler != nil {
+		handler.stopMuteTimers()
+	}
 	closeActionMessages(GetPath(connId))
 	mx.Lock()
 	SaveMap(GetContactsStorePath(paths[connId]), contacts[connId])
@@ -892,6 +895,10 @@ func (s *ncSignalLogger) Configure(ss string) {
 
 // event handling
 type WmEventHandler struct {
+	muteMu sync.Mutex
+	muteTimers map[string]*time.Timer
+	muteClosed bool
+	notifyMute func(int, string, int) // Optional offline mute sink.
 	connId int
 	importedHistory bool
 	notifyMessage messageNotifyFunc // Optional per-handler sink for offline bridge fixtures.
@@ -908,6 +915,10 @@ func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
 		if evt.Name == appstate.WAPatchCriticalBlock {
 			LOG_TRACE("AppStateSyncComplete WAPatchCriticalBlock")
 			handler.HandleConnected()
+		} else if evt.Name == appstate.WAPatchRegularLow {
+			if client := GetClient(handler.connId); client != nil {
+				handler.refreshKnownChatMutes(client)
+			}
 		} else if evt.Name == appstate.WAPatchRegular {
 			LOG_TRACE("AppStateSyncComplete WAPatchRegular")
 			handler.HandleSyncContacts()
@@ -1067,6 +1078,7 @@ func (handler *WmEventHandler) HandleConnected() {
 		return
 	}
 	handler.ReplayCachedPolls()
+	handler.refreshKnownChatMutes(client)
 
 	if len(client.Store.PushName) == 0 {
 		return
@@ -1270,8 +1282,8 @@ func (handler *WmEventHandler) HandleHistorySync(historySync *events.HistorySync
 				}
 			}
 			if settings.Found {
-				mutedUntil := settings.MutedUntil.Unix()
-				isMuted = (mutedUntil == -1) || (mutedUntil > time.Now().Unix())
+				isMuted = settings.MutedUntil == store.MutedForever || settings.MutedUntil.After(time.Now())
+				handler.refreshChatMute(client, chatJid)
 				isPinned = settings.Pinned
 				isArchived = isArchived || settings.Archived
 			} else {
@@ -1452,10 +1464,17 @@ func (handler *WmEventHandler) HandleMute(mute *events.Mute) {
 		return
 	}
 
-	isMuted := muteAction.GetMuted()
-
-	LOG_TRACE(fmt.Sprintf("Call CWmUpdateMuteNotify %s %s", chatId, strconv.FormatBool(isMuted)))
-	CWmUpdateMuteNotify(connId, chatId, BoolToInt(isMuted))
+	var until time.Time
+	if muteAction.GetMuted() {
+		if muteAction.GetMuteEndTimestamp() < 0 {
+			until = store.MutedForever
+		} else {
+			until = time.UnixMilli(muteAction.GetMuteEndTimestamp())
+		}
+	}
+	handler.muteMu.Lock()
+	defer handler.muteMu.Unlock()
+	handler.publishMuteLocked(client, mute.JID, chatId, until)
 }
 
 func (handler *WmEventHandler) HandleArchive(archive *events.Archive) {
@@ -1654,6 +1673,13 @@ func GetContacts(connId int) {
 		var aliasUserIdNames map[string]string = make(map[string]string)  // public
 		var senderUserIdNames map[string]string = make(map[string]string) // public/phone
 
+		// Reconcile persisted mute flags even when no fresh history is downloaded.
+		if handler := GetHandler(connId); handler != nil {
+			for jid := range contacts {
+				handler.refreshChatMute(client, jid)
+			}
+		}
+
 		// add regular data first (address book names)
 		for jid, contactInfo := range contacts {
 			if jid.Server != types.HiddenUserServer {
@@ -1789,6 +1815,9 @@ func GetContacts(connId int) {
 			LOG_TRACE(fmt.Sprintf("Call CWmNewContactsNotify %s %s", groupId, groupName))
 			CWmNewContactsNotify(connId, groupId, groupName, groupPhone, isSelf, isAlias, notify)
 			AddContactName(connId, groupId, groupName)
+			if handler := GetHandler(connId); handler != nil {
+				handler.refreshChatMute(client, group.JID)
+			}
 
 			if group.GroupEphemeral.IsEphemeral {
 				SetExpiration(connId, groupId, group.GroupEphemeral.DisappearingTimer)
