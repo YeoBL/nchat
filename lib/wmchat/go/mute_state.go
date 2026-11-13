@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -9,18 +10,33 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-// Called with muteMu held. Replacing a timer also handles remutes and unmuting
+type chatMuteState struct {
+	sync.Mutex
+	timers map[string]*time.Timer
+	closed bool
+}
+
+func (handler *WmEventHandler) chatMutes() *chatMuteState {
+	mx.Lock()
+	defer mx.Unlock()
+	if handler.mutes == nil {
+		handler.mutes = &chatMuteState{}
+	}
+	return handler.mutes
+}
+
+// Called with the connection's mute state locked. Replacing a timer also handles remutes and unmuting
 // from another device. Expiry rereads the store so an old timer cannot undo a remute.
-func (handler *WmEventHandler) publishMuteLocked(client *whatsmeow.Client, jid types.JID, chatID string, until time.Time) {
-	if handler.muteClosed || GetClient(handler.connId) != client {
+func (handler *WmEventHandler) publishMuteLocked(state *chatMuteState, client *whatsmeow.Client, jid types.JID, chatID string, until time.Time) {
+	if state.closed || GetClient(handler.connId) != client {
 		return
 	}
-	if handler.muteTimers == nil {
-		handler.muteTimers = make(map[string]*time.Timer)
+	if state.timers == nil {
+		state.timers = make(map[string]*time.Timer)
 	}
-	if timer := handler.muteTimers[chatID]; timer != nil {
+	if timer := state.timers[chatID]; timer != nil {
 		timer.Stop()
-		delete(handler.muteTimers, chatID)
+		delete(state.timers, chatID)
 	}
 	muted := until == store.MutedForever || until.After(time.Now())
 	notify := handler.notifyMute
@@ -29,16 +45,17 @@ func (handler *WmEventHandler) publishMuteLocked(client *whatsmeow.Client, jid t
 	}
 	notify(handler.connId, chatID, BoolToInt(muted))
 	if muted && until != store.MutedForever {
-		handler.muteTimers[chatID] = time.AfterFunc(time.Until(until), func() {
+		state.timers[chatID] = time.AfterFunc(time.Until(until), func() {
 			handler.refreshChatMute(client, jid)
 		})
 	}
 }
 
 func (handler *WmEventHandler) refreshChatMute(client *whatsmeow.Client, jid types.JID) {
-	handler.muteMu.Lock()
-	defer handler.muteMu.Unlock()
-	if handler.muteClosed || GetClient(handler.connId) != client || client.Store.ChatSettings == nil {
+	state := handler.chatMutes()
+	state.Lock()
+	defer state.Unlock()
+	if state.closed || GetClient(handler.connId) != client || client.Store.ChatSettings == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -52,25 +69,26 @@ func (handler *WmEventHandler) refreshChatMute(client *whatsmeow.Client, jid typ
 	chatID := GetChatId(client, &jid, nil)
 	if err != nil || !settings.Found {
 		// Retain the known state on a read failure and retry an expiring timer.
-		if timer := handler.muteTimers[chatID]; timer != nil {
+		if timer := state.timers[chatID]; timer != nil {
 			timer.Stop()
-			handler.muteTimers[chatID] = time.AfterFunc(30*time.Second, func() {
+			state.timers[chatID] = time.AfterFunc(30*time.Second, func() {
 				handler.refreshChatMute(client, jid)
 			})
 		}
 		return
 	}
-	handler.publishMuteLocked(client, jid, chatID, settings.MutedUntil)
+	handler.publishMuteLocked(state, client, jid, chatID, settings.MutedUntil)
 }
 
 func (handler *WmEventHandler) stopMuteTimers() {
-	handler.muteMu.Lock()
-	defer handler.muteMu.Unlock()
-	handler.muteClosed = true
-	for _, timer := range handler.muteTimers {
+	state := handler.chatMutes()
+	state.Lock()
+	defer state.Unlock()
+	state.closed = true
+	for _, timer := range state.timers {
 		timer.Stop()
 	}
-	handler.muteTimers = nil
+	state.timers = nil
 }
 
 // Cached names include groups. Reconcile them at connect and after full mute
