@@ -41,7 +41,7 @@ endif()
 # Build Go library / C archive
 set(TARGET cgowm)
 set(GOPATH ${OUTPUT_DIR})
-set(SRCS gowm.go cgowm.go go.mod go.sum)
+set(SRCS gowm.go cgowm.go mute_state.go go.mod go.sum)
 file(GLOB ACTION_SRCS CONFIGURE_DEPENDS actions*.go)
 list(APPEND SRCS ${ACTION_SRCS})
 file(GLOB_RECURSE EXT_SRCS ext/*.go)
