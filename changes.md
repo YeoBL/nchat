@@ -16,6 +16,18 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## WhatsApp mute expiry and unmute recovery — 13 November 2026
+
+| Change | Access / effect | Implementation commit | Verification / limits |
+|---|---|---|---|
+| Expired WhatsApp mutes stop suppressing widget notifications | Automatic. Live mute events use their deadline. Finite mutes schedule an expiry check against the current store, and remuting cancels the old timer. Connecting, full settings snapshots and contact/history sync reconcile persisted mute settings into nchat's cache. Failed or unknown lookups preserve the known setting and expiry reads retry. | [273dcb94](https://github.com/YeoBL/nchat/commit/273dcb94), [shared importer/timer fix ce211285](https://github.com/YeoBL/nchat/commit/ce211285) | Full WhatsApp `go test -race -count=1 .`, `go vet .`, CMake build and notification/rendering suite pass. Synthetic cases cover expired replay, idle expiry, remute cancellation across copied history handlers, snapshot recovery, failed/unknown reads and cleanup. Live verification repaired the reported group's stale cached mute flag from 1 to 0. No eligible newer unread messages remained at verification, so a new incoming-message notification roundtrip remains unverified. |
+
+Activated after testing in the original Screen `1529.nchat`, window `0` (`zsh`),
+shell `1533`, terminal `ttys001`. New core PID `51861` is serving the widget bridge.
+The installed widget's snapshot reports no cache errors and sync is active.
+Older orphaned unread flags behind the latest incoming read remain excluded by
+the existing read-progress rule.
+
 ## Automatic presence viewer updates — 11 November 2026
 
 | Change | Access / effect | Implementation commit | Verification / limits |

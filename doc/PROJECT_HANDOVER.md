@@ -137,6 +137,7 @@ reads cached history and sends explicit actions through narrow filesystem IPC.
 | Shared account requests and result types | `lib/common/src/protocol.h` | Both service implementations and every caller |
 | Telegram client and events | `lib/tgchat/src/tgchat.cpp` | TDLib callbacks, mute/membership/forum handling |
 | Telegram tools | `lib/tgchat/src/tgfeatures.inc`, `tgfeatures_manage.inc`, `tgfeatures_social.inc`, `tgfeatures_util.h` | Actual Telegram requests, pagination, permission/error handling |
+| WhatsApp mute expiry/reconciliation | `lib/wmchat/go/mute_state.go`, `gowm.go` | Per-connection timers shared across copied history importers, reconnect/full-snapshot/contact sync, cleanup and offline fixtures |
 | WhatsApp C++ bridge | `lib/wmchat/src/wmchat.cpp` | `lib/wmchat/go/cgowm.go`, `gowm.go`, native callback types |
 | WhatsApp account actions | `lib/wmchat/go/actions*.go` | The relevant messages, contacts, channels, history or status file |
 | WhatsApp receipts and historical recovery | `lib/wmchat/go/receipts.go`, `actions_history.go` | `src/uimessageinfodialog.h`, cache ledger, exact history anchors |
@@ -209,6 +210,14 @@ online_status_share=1
 status_enabled=1
 status_broadcast=1
 ```
+
+WhatsApp mute actions must be interpreted with their end timestamp. A historical
+`muted=true` action can already be expired. `mute_state.go` rereads stored settings
+on connection and full regular-low snapshots, schedules finite expiry checks,
+and republishes effective state through the normal C++/cache callbacks. Timers
+are shared by pointer across copied history importers and stopped on connection
+cleanup. Unknown or failed lookups preserve the known setting. The relevant
+regression is `TestWhatsAppMuteDeadlineAndRecovery` in the Go package.
 
 The widget still filters muted chats even though this user's terminal allows
 its configured muted notification policy. Opening a chat through ordinary
