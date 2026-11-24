@@ -8,8 +8,8 @@
 #include "uihistoryview.h"
 
 #include <algorithm>
-#include <chrono>
 #include <map>
+#include <sys/stat.h>
 
 #include "appconfig.h"
 #include "apputil.h"
@@ -26,10 +26,11 @@
 namespace
 {
   constexpr int s_DefaultThumbnailRows = 18;
-  constexpr int64_t s_ThumbnailDebounceMs = 500;
   // All thumbnail output runs on the UI thread, after curses finishes drawing.
   std::string s_PendingThumbnailCommand;
-  std::chrono::steady_clock::time_point s_ThumbnailDue;
+  std::map<std::string, unsigned> s_VisibleThumbnailIds;
+  std::map<std::string, unsigned> s_PendingThumbnailIds;
+  unsigned s_NextThumbnailId = 200;
   unsigned s_ThumbnailDialogDepth = 0;
   uint64_t s_ThumbnailRevision = 0;
   const std::wstring s_ThumbnailLine = L"\x1";
@@ -111,8 +112,11 @@ UiHistoryView::UiHistoryView(const UiViewParams& p_Params)
 
 UiHistoryView::~UiHistoryView()
 {
+  const bool hadImages = m_ThumbnailsVisible || !s_VisibleThumbnailIds.empty();
   s_PendingThumbnailCommand.clear();
-  if (m_ThumbnailsVisible)
+  s_PendingThumbnailIds.clear();
+  s_VisibleThumbnailIds.clear();
+  if (hadImages)
   {
     SysUtil::RunCommand(ThumbnailCommand());
   }
@@ -578,39 +582,50 @@ void UiHistoryView::Draw()
     return;
   }
 
-  std::string thumbnailCommand = ThumbnailCommand();
+  std::map<std::string, unsigned> frameIds;
+  std::map<std::string, unsigned> occurrences;
+  std::string placements;
   for (const auto& placement : thumbnailPlacements)
   {
-    thumbnailCommand += " '" + StrUtil::EscapeSingleQuote(placement.path) + "' " +
+    struct stat info = {};
+    if (stat(placement.path.c_str(), &info) != 0) continue;
+    const std::string key = placement.path + "\n" + std::to_string(info.st_mtime) + ":" +
+      std::to_string(info.st_size) + ":" + std::to_string(occurrences[placement.path]++);
+    const auto previous = s_VisibleThumbnailIds.find(key);
+    const bool reuse = previous != s_VisibleThumbnailIds.end();
+    const unsigned id = reuse ? previous->second : s_NextThumbnailId++;
+    frameIds[key] = id;
+    placements += " '" + StrUtil::EscapeSingleQuote(placement.path) + "' " +
       std::to_string(m_X + 1) + " " + std::to_string(m_Y + placement.row + 1) + " " +
-      std::to_string(placement.width) + " " + std::to_string(placement.rows);
+      std::to_string(placement.width) + " " + std::to_string(placement.rows) + " " +
+      std::to_string(id) + " " + (reuse ? "1" : "0");
   }
+  std::string removedIds;
+  for (const auto& previous : s_VisibleThumbnailIds)
+    if (!frameIds.count(previous.first))
+      removedIds += (removedIds.empty() ? "" : ",") + std::to_string(previous.second);
+  const std::string thumbnailCommand = ThumbnailCommand() + " --frame '" + removedIds + "'" + placements;
   const bool selectionActive = m_Model->GetSelectMessageActiveLocked();
   if ((thumbnailCommand != m_ThumbnailCommand) ||
-      (!thumbnailPlacements.empty() && selectionActive != m_ThumbnailSelectionActive))
+      (!frameIds.empty() && selectionActive != m_ThumbnailSelectionActive))
   {
-    if (m_ThumbnailsVisible)
-    {
-      SysUtil::RunCommand(ThumbnailCommand());
-      m_ThumbnailsVisible = false;
-    }
-
+    // The helper updates existing placements and retires only removed images.
     m_ThumbnailCommand = thumbnailCommand;
-    m_ThumbnailCommandHasImages = !thumbnailPlacements.empty();
+    m_ThumbnailCommandHasImages = !frameIds.empty();
     m_ThumbnailsVisible = m_ThumbnailCommandHasImages;
-
     s_PendingThumbnailCommand = m_ThumbnailCommand;
-    s_ThumbnailDue = std::chrono::steady_clock::now() +
-      std::chrono::milliseconds(s_ThumbnailDebounceMs);
+    s_PendingThumbnailIds = std::move(frameIds);
   }
-  // Repaint image placements after selection background changes under them.
   m_ThumbnailSelectionActive = selectionActive;
+
 }
 
 void UiHistoryView::SuspendThumbnails()
 {
   ++s_ThumbnailDialogDepth;
   s_PendingThumbnailCommand.clear();
+  s_PendingThumbnailIds.clear();
+  s_VisibleThumbnailIds.clear();
   SysUtil::RunCommand(ThumbnailCommand());
 }
 
@@ -622,12 +637,19 @@ void UiHistoryView::ResumeThumbnails()
 
 void UiHistoryView::FlushThumbnails()
 {
-  if ((s_ThumbnailDialogDepth == 0) && !s_PendingThumbnailCommand.empty() &&
-      (std::chrono::steady_clock::now() >= s_ThumbnailDue))
+  if ((s_ThumbnailDialogDepth == 0) && !s_PendingThumbnailCommand.empty())
   {
     const std::string command = std::move(s_PendingThumbnailCommand);
     s_PendingThumbnailCommand.clear();
-    SysUtil::RunCommand(command);
+    if (SysUtil::RunCommand(command))
+      s_VisibleThumbnailIds = std::move(s_PendingThumbnailIds);
+    else
+    {
+      // A partial upload must be retried on the next redraw, with fresh IDs.
+      s_VisibleThumbnailIds.clear();
+      SysUtil::RunCommand(ThumbnailCommand());
+    }
+    s_PendingThumbnailIds.clear();
   }
 }
 

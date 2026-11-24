@@ -492,16 +492,18 @@ static void TestViewOnceTerminal(const std::string& root)
     {
       impl.m_SelectMessageActive = selected;
       const auto previousCommands = thumbnailCommands.size();
+      const bool hadImage = history.m_ThumbnailCommandHasImages;
       {
         std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
         history.SetDirty(true); history.Draw();
       }
       assert(history.m_ThumbnailCommandHasImages);
-      std::this_thread::sleep_for(std::chrono::milliseconds(550));
+      if (hadImage) assert(thumbnailCommands.size() == previousCommands); // No image-clearing flash.
       UiHistoryView::FlushThumbnails();
       assert(thumbnailCommands.size() > previousCommands);
       assert(thumbnailCommands.back().find(path) != std::string::npos &&
              thumbnailCommands.back().find("--rows") == std::string::npos);
+      assert(thumbnailCommands.back().back() == (hadImage ? '1' : '0'));
       int firstContentRow = -1;
       for (int y = 0; y < history.m_PaddedH; ++y)
       {
@@ -519,6 +521,18 @@ static void TestViewOnceTerminal(const std::string& root)
       assert(firstContentRow > 0 && firstContentRow < history.m_PaddedH - 10);
       assert(message.text == original);
     }
+    const auto previousPlacement = thumbnailCommands.back();
+    const auto previousCommands = thumbnailCommands.size();
+    message.text += "\nextra line"; // Move the same image up by one row.
+    {
+      std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
+      history.SetDirty(true); history.Draw();
+    }
+    assert(thumbnailCommands.size() == previousCommands);
+    UiHistoryView::FlushThumbnails();
+    assert(thumbnailCommands.size() == previousCommands + 1);
+    assert(thumbnailCommands.back() != previousPlacement && thumbnailCommands.back().back() == '1');
+    std::cout << "PASS: scrolling and selection changes reuse existing image IDs without clearing or retransmitting pixels\n";
     std::cout << "PASS: selected message forms a full-width block across caption, blank lines, wrapped URL, image space and reactions; deselection clears it\n";
   }
   FileUtil::RmFile(path);

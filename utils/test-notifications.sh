@@ -40,6 +40,8 @@ fi
 if [[ -x /Applications/kitty.app/Contents/MacOS/kitty ]]; then
   /Applications/kitty.app/Contents/MacOS/kitty +runpy \
     "import runpy, sys; sys.argv = ['utils/test-history-terminal.py', '$notification_test_dir']; runpy.run_path(sys.argv[0], run_name='__main__')"
+  /Applications/kitty.app/Contents/MacOS/kitty +runpy \
+    "import runpy; runpy.run_path('utils/test-thumbnail-placements.py', run_name='__main__')"
 fi
 if [[ "${1:-}" == "--live-badge" ]]; then
   clang++ -std=c++14 utils/test-terminal-badge.cpp -o "$notification_test_dir/badge"
