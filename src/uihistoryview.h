@@ -35,5 +35,6 @@ private:
   std::string m_ThumbnailCommand;
   bool m_ThumbnailCommandHasImages = false;
   bool m_ThumbnailsVisible = false;
+  bool m_ThumbnailSelectionActive = false;
   uint64_t m_ThumbnailRevision = 0;
 };

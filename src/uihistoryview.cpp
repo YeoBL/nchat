@@ -434,6 +434,15 @@ void UiHistoryView::Draw()
       bool isQuote = (wline->rfind(quoteIndicator, 0) == 0);
       bool isReaction = (reactionLines == 1) && (std::distance(wline, wlines.rbegin()) == 0);
 
+      if (isSelectedMessage)
+      {
+        // Paint the whole row independently of text wrapping, including image
+        // space and blank lines. Keep the text itself unpadded for long URLs.
+        wattron(m_PaddedWin, attributeText | colorPairText);
+        mvwhline(m_PaddedWin, y, 0, ' ', m_PaddedW);
+        wattroff(m_PaddedWin, attributeText | colorPairText);
+      }
+
       if (isThumbnail)
       {
         if (!thumbnailPath.empty() && (thumbnailRow == 0))
@@ -452,7 +461,7 @@ void UiHistoryView::Draw()
       }
       else if (isReaction)
       {
-        wattron(m_PaddedWin, attributeTextNormal | colorPairTextReaction);
+        wattron(m_PaddedWin, attributeText | colorPairTextReaction);
       }
       else
       {
@@ -478,7 +487,7 @@ void UiHistoryView::Draw()
       }
       else if (!isThumbnail && isReaction)
       {
-        wattroff(m_PaddedWin, attributeTextNormal | colorPairTextReaction);
+        wattroff(m_PaddedWin, attributeText | colorPairTextReaction);
       }
       else if (!isThumbnail)
       {
@@ -576,7 +585,9 @@ void UiHistoryView::Draw()
       std::to_string(m_X + 1) + " " + std::to_string(m_Y + placement.row + 1) + " " +
       std::to_string(placement.width) + " " + std::to_string(placement.rows);
   }
-  if (thumbnailCommand != m_ThumbnailCommand)
+  const bool selectionActive = m_Model->GetSelectMessageActiveLocked();
+  if ((thumbnailCommand != m_ThumbnailCommand) ||
+      (!thumbnailPlacements.empty() && selectionActive != m_ThumbnailSelectionActive))
   {
     if (m_ThumbnailsVisible)
     {
@@ -592,6 +603,8 @@ void UiHistoryView::Draw()
     s_ThumbnailDue = std::chrono::steady_clock::now() +
       std::chrono::milliseconds(s_ThumbnailDebounceMs);
   }
+  // Repaint image placements after selection background changes under them.
+  m_ThumbnailSelectionActive = selectionActive;
 }
 
 void UiHistoryView::SuspendThumbnails()
