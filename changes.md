@@ -16,6 +16,15 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## White selection highlighting — 24 November 2026
+
+| Change | Access / effect | Configuration record | Verification / limits |
+|---|---|---|---|
+| White background for the selected chat and message | Existing `color.conf` settings `list_attr_selected`, `history_text_attr_selected`, `history_name_attr_selected` changed from `bold` to `reverse` in the installed monochrome theme. The chat row and selected message heading/body invert to light background with dark text. | [f07d6d98](https://github.com/YeoBL/nchat/commit/f07d6d98), reapplication snippet in `doc/custom-settings.md` | A temporary native ncurses check using production `UiColorConfig` verified all three attributes and white/black reversal across selected row cells. Installed settings confirmed after clean restart in Screen `2003.nchat`, window `0`, original shell `2004` and `ttys001`; new core PID `65789` reached Online. This is local configuration using existing vanilla selection rendering. Other themes can produce different reverse colours. Live Kitty appearance was not visually checked. |
+
+The preceding colour configuration is retained privately at
+`~/.local/state/nchat/config-backups/20261124T230512Z-before-white-selection/color.conf`.
+
 ## WhatsApp mute expiry and unmute recovery — 13 November 2026
 
 | Change | Access / effect | Implementation commit | Verification / limits |
