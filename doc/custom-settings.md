@@ -276,3 +276,21 @@ editing a group message. Names with spaces use the configured bracketed form.
 Sending and editing resolve adjacent legacy mentions such as
 `@Nora@Robin` as separate recipients. Phone-number display fallbacks use the
 same member lookup as the picker.
+
+## Selected chat and message highlighting
+
+The installed monochrome configuration uses a white selection background with
+dark text. Set these existing entries in `~/.config/nchat/color.conf` to restore
+this appearance after changing themes.
+
+```ini
+list_attr_selected=reverse
+history_text_attr_selected=reverse
+history_name_attr_selected=reverse
+```
+
+The chat setting highlights the full selected row. The history settings apply to
+the selected message's text and heading. Message highlighting appears while
+message-selection mode is active. Restart nchat after changing these settings,
+using the same Screen session and window. Shut it down before editing because
+nchat saves its loaded colour configuration during shutdown.
