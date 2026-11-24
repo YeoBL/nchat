@@ -36,7 +36,18 @@ if [[ ${1:-} == --rows ]]; then
   exit $?
 fi
 
-(( $# % 5 == 0 )) || exit 2
+frame_mode=0
+removed_ids=""
+if [[ ${1:-} == --frame ]]; then
+  (( $# >= 2 )) || exit 2
+  frame_mode=1
+  removed_ids=$2
+  shift 2
+  [[ $removed_ids != *[^0-9,]* ]] || exit 2
+  (( $# % 7 == 0 )) || exit 2
+else
+  (( $# % 5 == 0 )) || exit 2
+fi
 
 render_tty=/dev/tty
 if [[ -n ${STY:-} ]]; then
@@ -50,32 +61,54 @@ fi
 
 # Prepare every image before touching the cursor: no conversion may outlive a
 # saved terminal cursor and race a subsequent curses/screen redraw.
-render_payload=$'\e7\e_Ga=d,d=A,q=2\e\\'
+render_payload=$'\e7'
+if (( frame_mode )); then
+  for removed_id in ${(s:,:)removed_ids}; do
+    [[ -n $removed_id ]] && render_payload+=$'\e_Ga=d,d=I,q=2,i='"$removed_id"$'\e\\'
+  done
+else
+  render_payload+=$'\e_Ga=d,d=A,q=2\e\\'
+fi
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/nchat-thumbnails"
 /bin/mkdir -p "$cache_dir"
 
 image_id=200
+failed=0
 while (( $# >= 5 )); do
   image=$1 x=$2 y=$3 width=$4 height=$5
-  shift 5
-  [[ -f $image ]] || continue
+  reuse=0
+  if (( frame_mode )); then
+    image_id=$6 reuse=$7
+    [[ $image_id == <-> && $reuse == [01] && $x == <-> && $y == <-> && $width == <-> && $height == <-> ]] || exit 2
+    shift 7
+  else
+    shift 5
+  fi
+  [[ -f $image ]] || { failed=1; continue; }
+  if (( reuse )); then
+    printf -v placement '\033[%d;%dH\033_Ga=p,q=2,i=%d,p=1,c=%d,r=%d,C=1\033\\' \
+      "$(( y + 1 ))" "$(( x + 1 ))" "$image_id" "$width" "$height"
+    render_payload+=$placement
+    continue
+  fi
 
-  file_state=$(/usr/bin/stat -f '%m:%z' "$image") || continue
+  file_state=$(/usr/bin/stat -f '%m:%z' "$image") || { failed=1; continue; }
   cache_key=$(printf '%s:%s' "$image" "$file_state" |
     /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')
   png="$cache_dir/$cache_key.png"
 
   if [[ ! -s $png ]]; then
-    temporary_png=$(/usr/bin/mktemp -t nchat-tty-graphics-protocol.XXXXXX) || continue
+    temporary_png=$(/usr/bin/mktemp -t nchat-tty-graphics-protocol.XXXXXX) || { failed=1; continue; }
     if ! /usr/bin/sips -s format png -Z 756 "$image" --out "$temporary_png" >/dev/null 2>&1; then
       /bin/unlink "$temporary_png"
+      failed=1
       continue
     fi
-    /bin/mv "$temporary_png" "$png"
+    /bin/mv "$temporary_png" "$png" || { /bin/unlink "$temporary_png"; failed=1; continue; }
   fi
 
   encoded_path=$(printf '%s' "$png" | /usr/bin/base64 | /usr/bin/tr -d '\n')
-  printf -v placement '\033[%d;%dH\033_Ga=T,f=100,t=f,q=2,i=%d,c=%d,r=%d,C=1;%s\033\\' \
+  printf -v placement '\033[%d;%dH\033_Ga=T,f=100,t=f,q=2,i=%d,p=1,c=%d,r=%d,C=1;%s\033\\' \
     "$(( y + 1 ))" "$(( x + 1 ))" "$image_id" "$width" "$height" "$encoded_path"
   render_payload+=$placement
   (( image_id++ ))
@@ -83,3 +116,5 @@ done
 
 render_payload+=$'\e8'
 printf '%s' "$render_payload" > "$render_tty"
+
+exit "$failed"

@@ -34,6 +34,7 @@
 #undef private
 #include "../src/uiview.h"
 #include "../src/uiconfig.h"
+#include "../src/uicontroller.h"
 #include "fileutil.h"
 #include "status.h"
 #include "../src/terminalbadge.h"
@@ -406,6 +407,19 @@ static void TestViewOnceTerminal(const std::string& root)
   assert(output && input);
   SCREEN* screen = newterm("xterm-256color", output, input);
   assert(screen); set_term(screen); assert(resizeterm(35, 110) != ERR);
+  // The OS pipe is empty while curses has queued keys. Those keys must drain
+  // without waiting for another byte to arrive on stdin.
+  const int previousInput = dup(STDIN_FILENO);
+  int descriptors[2]; assert(pipe(descriptors) == 0);
+  assert(dup2(descriptors[0], STDIN_FILENO) != -1);
+  close(descriptors[0]);
+  while (UiController::GetKey(0) != 0) {} // Discard initial resize notifications.
+  for (int i = 0; i < 80; ++i) assert(unget_wch(L'x') != ERR);
+  for (int i = 0; i < 80; ++i) assert(UiController::GetKey(0) == L'x');
+  assert(UiController::GetKey(0) == 0);
+  assert(dup2(previousInput, STDIN_FILENO) != -1);
+  close(previousInput); close(descriptors[1]);
+  std::cout << "PASS: buffered key bursts drain with an empty terminal descriptor and retain every key\n";
   AppConfig::Init(); AppConfig::SetNum("attachment_prefetch", AttachmentPrefetchAll);
   UiColorConfig::Init();
   const auto path = root + "/synthetic-view-once.jpg";
@@ -478,16 +492,18 @@ static void TestViewOnceTerminal(const std::string& root)
     {
       impl.m_SelectMessageActive = selected;
       const auto previousCommands = thumbnailCommands.size();
+      const bool hadImage = history.m_ThumbnailCommandHasImages;
       {
         std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
         history.SetDirty(true); history.Draw();
       }
       assert(history.m_ThumbnailCommandHasImages);
-      std::this_thread::sleep_for(std::chrono::milliseconds(550));
+      if (hadImage) assert(thumbnailCommands.size() == previousCommands); // No image-clearing flash.
       UiHistoryView::FlushThumbnails();
       assert(thumbnailCommands.size() > previousCommands);
       assert(thumbnailCommands.back().find(path) != std::string::npos &&
              thumbnailCommands.back().find("--rows") == std::string::npos);
+      assert(thumbnailCommands.back().back() == (hadImage ? '1' : '0'));
       int firstContentRow = -1;
       for (int y = 0; y < history.m_PaddedH; ++y)
       {
@@ -505,6 +521,18 @@ static void TestViewOnceTerminal(const std::string& root)
       assert(firstContentRow > 0 && firstContentRow < history.m_PaddedH - 10);
       assert(message.text == original);
     }
+    const auto previousPlacement = thumbnailCommands.back();
+    const auto previousCommands = thumbnailCommands.size();
+    message.text += "\nextra line"; // Move the same image up by one row.
+    {
+      std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
+      history.SetDirty(true); history.Draw();
+    }
+    assert(thumbnailCommands.size() == previousCommands);
+    UiHistoryView::FlushThumbnails();
+    assert(thumbnailCommands.size() == previousCommands + 1);
+    assert(thumbnailCommands.back() != previousPlacement && thumbnailCommands.back().back() == '1');
+    std::cout << "PASS: scrolling and selection changes reuse existing image IDs without clearing or retransmitting pixels\n";
     std::cout << "PASS: selected message forms a full-width block across caption, blank lines, wrapped URL, image space and reactions; deselection clears it\n";
   }
   FileUtil::RmFile(path);

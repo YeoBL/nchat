@@ -101,12 +101,18 @@ void Ui::Run()
 
   raw();
   curs_set(1);
+  const wint_t keyUp = UiKeyConfig::GetKey("up");
+  const wint_t keyDown = UiKeyConfig::GetKey("down");
   while (m_Model->Process())
   {
-    wint_t key = UiController::GetKey(50);
-    if (key != 0)
+    // Apply a navigation burst before drawing its final position. Bound the batch
+    // so incoming messages and other model work still get regular processing.
+    for (int count = 0; count < 32; ++count)
     {
+      const wint_t key = UiController::GetKey(count == 0 ? 50 : 0);
+      if (key == 0) break;
       m_Model->KeyHandler(key);
+      if (key != keyUp && key != keyDown) break;
     }
   }
 
