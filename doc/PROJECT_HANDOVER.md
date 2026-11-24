@@ -168,6 +168,16 @@ patch is `lib/wmchat/go/ext/nchat-whatsmeow.patch`. Review the existing
 library versions. Telegram's generated TDLib objects and library build are under
 `lib/tgchat/ext/td` and `build`.
 
+## Selection highlight preference — 24 November 2026
+
+The installed monochrome `color.conf` uses `reverse` for `list_attr_selected`,
+`history_text_attr_selected` and `history_name_attr_selected`. Preserve this
+white selection background when updating configuration. It uses the existing
+renderer. The three-key reapplication snippet is in `doc/custom-settings.md`.
+Stop nchat before editing its colour file because cleanup saves loaded values,
+then restart in the original Screen window. A private predecessor is recorded
+in `changes.md`.
+
 ## Runtime files and configuration
 
 | Path under `/Users/bingl/.config/nchat` | Purpose |
