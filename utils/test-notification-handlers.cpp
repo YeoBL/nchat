@@ -42,9 +42,12 @@
 #include "../src/presencecontacts.h"
 
 // Do not run the real thumbnail helper against the user's terminal in UI tests.
-bool SysUtil::RunCommand(const std::string& command, std::string*)
+static std::vector<std::string> thumbnailCommands;
+bool SysUtil::RunCommand(const std::string& command, std::string* output)
 {
-  assert(command == "nchat-thumbnails");
+  assert(command == "nchat-thumbnails" || command.rfind("nchat-thumbnails ", 0) == 0);
+  thumbnailCommands.push_back(command);
+  if (output) *output = "8";
   return true;
 }
 
@@ -463,6 +466,46 @@ static void TestViewOnceTerminal(const std::string& root)
     protocol->requests.clear();
     impl.DownloadAttachment(profile, "chat", "photo", ordinary.fileId, DownloadFileActionNone);
     assert(protocol->requests.size() == 1); // Ordinary image prefetch is unchanged.
+
+    // A selected caption, blank line, wrapped URL, thumbnail and reaction form
+    // one rectangle, including the space to the right of every content row.
+    ordinary.fileStatus = FileStatusDownloaded;
+    message.fileInfo = ProtocolUtil::FileInfoToHex(ordinary);
+    const std::string original = "short caption\n\nhttps://example.test/" + std::string(180, 'x') + "\nend";
+    message.text = original;
+    message.reactions.emojiCounts["🙏"] = 1;
+    for (bool selected : {true, false, true})
+    {
+      impl.m_SelectMessageActive = selected;
+      const auto previousCommands = thumbnailCommands.size();
+      {
+        std::lock_guard<owned_mutex> lock(model.m_ModelMutex);
+        history.SetDirty(true); history.Draw();
+      }
+      assert(history.m_ThumbnailCommandHasImages);
+      std::this_thread::sleep_for(std::chrono::milliseconds(550));
+      UiHistoryView::FlushThumbnails();
+      assert(thumbnailCommands.size() > previousCommands);
+      assert(thumbnailCommands.back().find(path) != std::string::npos &&
+             thumbnailCommands.back().find("--rows") == std::string::npos);
+      int firstContentRow = -1;
+      for (int y = 0; y < history.m_PaddedH; ++y)
+      {
+        wchar_t text[111] = {};
+        mvwinnwstr(history.m_PaddedWin, y, 0, text, history.m_PaddedW);
+        if (firstContentRow == -1 && std::wstring(text).find_first_not_of(L" ") != std::wstring::npos)
+          firstContentRow = y;
+        for (int x = 0; x < history.m_PaddedW; ++x)
+        {
+          cchar_t cell = {};
+          assert(mvwin_wch(history.m_PaddedWin, y, x, &cell) != ERR);
+          assert(bool(cell.attr & A_REVERSE) == (selected && firstContentRow != -1));
+        }
+      }
+      assert(firstContentRow > 0 && firstContentRow < history.m_PaddedH - 10);
+      assert(message.text == original);
+    }
+    std::cout << "PASS: selected message forms a full-width block across caption, blank lines, wrapped URL, image space and reactions; deselection clears it\n";
   }
   FileUtil::RmFile(path);
   endwin(); delscreen(screen); fclose(output); fclose(input);
