@@ -34,6 +34,7 @@
 #undef private
 #include "../src/uiview.h"
 #include "../src/uiconfig.h"
+#include "../src/uicontroller.h"
 #include "fileutil.h"
 #include "status.h"
 #include "../src/terminalbadge.h"
@@ -406,6 +407,19 @@ static void TestViewOnceTerminal(const std::string& root)
   assert(output && input);
   SCREEN* screen = newterm("xterm-256color", output, input);
   assert(screen); set_term(screen); assert(resizeterm(35, 110) != ERR);
+  // The OS pipe is empty while curses has queued keys. Those keys must drain
+  // without waiting for another byte to arrive on stdin.
+  const int previousInput = dup(STDIN_FILENO);
+  int descriptors[2]; assert(pipe(descriptors) == 0);
+  assert(dup2(descriptors[0], STDIN_FILENO) != -1);
+  close(descriptors[0]);
+  while (UiController::GetKey(0) != 0) {} // Discard initial resize notifications.
+  for (int i = 0; i < 80; ++i) assert(unget_wch(L'x') != ERR);
+  for (int i = 0; i < 80; ++i) assert(UiController::GetKey(0) == L'x');
+  assert(UiController::GetKey(0) == 0);
+  assert(dup2(previousInput, STDIN_FILENO) != -1);
+  close(previousInput); close(descriptors[1]);
+  std::cout << "PASS: buffered key bursts drain with an empty terminal descriptor and retain every key\n";
   AppConfig::Init(); AppConfig::SetNum("attachment_prefetch", AttachmentPrefetchAll);
   UiColorConfig::Init();
   const auto path = root + "/synthetic-view-once.jpg";
