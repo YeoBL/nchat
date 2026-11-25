@@ -1,6 +1,7 @@
 #!/bin/zsh
 
 image=${1:?missing image path}
+clear_helper="${0:A:h}/nchat-image-clear"
 [[ -f $image ]] || { print -u2 -- "File not found: $image"; exit 1; }
 
 # Quick Look's video player can crash while opening video notes. Use the native
@@ -25,7 +26,12 @@ if [[ -n ${STY:-} ]]; then
 fi
 
 clear_image() {
-  printf '\033_Ga=d,d=A,q=2\033\\\033[2J\033[H' > "$render_tty"
+  if [[ -x $clear_helper ]]; then
+    "$clear_helper"
+  else
+    printf '\033_Ga=d,d=A,q=2\033\\' > "$render_tty"
+  fi
+  printf '\033[2J\033[H' > "$render_tty"
   [[ -n ${STY:-} ]] && command screen -S "$STY" -X redisplay 2>/dev/null
 }
 trap clear_image EXIT INT TERM

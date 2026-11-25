@@ -14,12 +14,12 @@ from kitty_tests import parse_bytes
 HELPER = Path(__file__).with_name('nchat-thumbnails').resolve()
 
 
-def run_helper(arguments, cache):
+def run_helper(arguments, cache, helper=HELPER):
     child, master = pty.fork()
     if child == 0:
         os.environ.pop('STY', None)
         os.environ['XDG_CACHE_HOME'] = str(cache)
-        os.execv(str(HELPER), [str(HELPER), *map(str, arguments)])
+        os.execv(str(helper), [str(helper), *map(str, arguments)])
     output = bytearray()
     finished = False
     try:
@@ -50,19 +50,36 @@ with tempfile.TemporaryDirectory(prefix='nchat-thumbnail-placements-') as direct
     image.write_bytes(base64.b64decode(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2uoAAAAASUVORK5CYII='))
     screen = Screen(None, 24, 80, 0)
-    initial = run_helper(['--frame', '', image, 1, 1, 8, 8, 200, 0], root / 'cache')
+    initial = run_helper(['--frame', str(os.getpid()), '', image, 1, 1, 8, 8, 200, 0], root / 'cache')
     parse_bytes(screen, initial)
     uploaded = screen.grman.image_for_client_id(200)
     if not uploaded or b'a=T' not in initial:
         raise AssertionError('Initial image was not uploaded')
-    moved = run_helper(['--frame', '', image, 10, 5, 8, 8, 200, 1], root / 'cache')
+    moved = run_helper(['--frame', str(os.getpid()), '', image, 10, 5, 8, 8, 200, 1], root / 'cache')
     if b'a=p' not in moved or b'a=T' in moved or b'd=A' in moved or b'f=100' in moved:
         raise AssertionError('Moving an image retransmits or clears its data')
     parse_bytes(screen, moved)
     retained = screen.grman.image_for_client_id(200)
     if not retained or retained['internal_id'] != uploaded['internal_id'] or retained['refs.count'] != 1 or screen.grman.image_count != 1:
         raise AssertionError('Moving the placement replaced the image resource')
-    removed = run_helper(['--frame', '200'], root / 'cache')
+    cleared = run_helper([], root / 'cache', HELPER.with_name('nchat-image-clear'))
+    parse_bytes(screen, cleared)
+    recovered = run_helper(['--frame', str(os.getpid()), '', image, 10, 5, 8, 8, 200, 1], root / 'cache')
+    if b'a=T' not in recovered:
+        raise AssertionError('Image clear did not invalidate the retained data')
+    parse_bytes(screen, recovered)
+    guard = pty.openpty()  # Keep the previous output endpoint occupied.
+    try:
+        reattached = run_helper(['--frame', str(os.getpid()), '', image, 10, 5, 8, 8, 200, 1], root / 'cache')
+    finally:
+        os.close(guard[0]); os.close(guard[1])
+    if b'a=T' not in reattached:
+        raise AssertionError('A different terminal did not reload image data')
+    fresh_terminal = Screen(None, 24, 80, 0)
+    parse_bytes(fresh_terminal, reattached)
+    if not fresh_terminal.grman.image_for_client_id(200):
+        raise AssertionError('Reattached terminal has no image')
+    removed = run_helper(['--frame', str(os.getpid()), '200'], root / 'cache')
     parse_bytes(screen, removed)
     if screen.grman.image_for_client_id(200):
         raise AssertionError('Off-screen image resource was not freed')

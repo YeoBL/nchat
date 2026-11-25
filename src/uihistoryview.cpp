@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <map>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "appconfig.h"
 #include "apputil.h"
@@ -31,6 +32,7 @@ namespace
   std::map<std::string, unsigned> s_VisibleThumbnailIds;
   std::map<std::string, unsigned> s_PendingThumbnailIds;
   unsigned s_NextThumbnailId = 200;
+  bool s_ThumbnailSessionStarted = false;
   unsigned s_ThumbnailDialogDepth = 0;
   uint64_t s_ThumbnailRevision = 0;
   const std::wstring s_ThumbnailLine = L"\x1";
@@ -582,6 +584,8 @@ void UiHistoryView::Draw()
     return;
   }
 
+  const std::string helper = ThumbnailCommand();
+  const bool retainPlacements = FileUtil::BaseName(helper) == "nchat-thumbnails";
   std::map<std::string, unsigned> frameIds;
   std::map<std::string, unsigned> occurrences;
   std::string placements;
@@ -597,19 +601,22 @@ void UiHistoryView::Draw()
     frameIds[key] = id;
     placements += " '" + StrUtil::EscapeSingleQuote(placement.path) + "' " +
       std::to_string(m_X + 1) + " " + std::to_string(m_Y + placement.row + 1) + " " +
-      std::to_string(placement.width) + " " + std::to_string(placement.rows) + " " +
-      std::to_string(id) + " " + (reuse ? "1" : "0");
+      std::to_string(placement.width) + " " + std::to_string(placement.rows);
+    if (retainPlacements) placements += " " + std::to_string(id) + " " + (reuse ? "1" : "0");
   }
   std::string removedIds;
   for (const auto& previous : s_VisibleThumbnailIds)
     if (!frameIds.count(previous.first))
       removedIds += (removedIds.empty() ? "" : ",") + std::to_string(previous.second);
-  const std::string thumbnailCommand = ThumbnailCommand() + " --frame '" + removedIds + "'" + placements;
+  const std::string thumbnailCommand = retainPlacements ?
+    helper + " --frame " + std::to_string(getpid()) + " '" + removedIds + "'" + placements : helper + placements;
   const bool selectionActive = m_Model->GetSelectMessageActiveLocked();
   if ((thumbnailCommand != m_ThumbnailCommand) ||
       (!frameIds.empty() && selectionActive != m_ThumbnailSelectionActive))
   {
-    // The helper updates existing placements and retires only removed images.
+    // Custom renderers retain the original five-argument protocol.
+    if (!retainPlacements && m_ThumbnailsVisible) SysUtil::RunCommand(helper);
+    // The bundled helper updates placements and retires only removed images.
     m_ThumbnailCommand = thumbnailCommand;
     m_ThumbnailCommandHasImages = !frameIds.empty();
     m_ThumbnailsVisible = m_ThumbnailCommandHasImages;
@@ -641,6 +648,11 @@ void UiHistoryView::FlushThumbnails()
   {
     const std::string command = std::move(s_PendingThumbnailCommand);
     s_PendingThumbnailCommand.clear();
+    if (!s_ThumbnailSessionStarted)
+    {
+      SysUtil::RunCommand(ThumbnailCommand());
+      s_ThumbnailSessionStarted = true;
+    }
     if (SysUtil::RunCommand(command))
       s_VisibleThumbnailIds = std::move(s_PendingThumbnailIds);
     else
