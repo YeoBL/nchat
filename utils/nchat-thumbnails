@@ -39,10 +39,12 @@ fi
 frame_mode=0
 removed_ids=""
 if [[ ${1:-} == --frame ]]; then
-  (( $# >= 2 )) || exit 2
+  (( $# >= 3 )) || exit 2
   frame_mode=1
-  removed_ids=$2
-  shift 2
+  frame_session=$2
+  removed_ids=$3
+  [[ $frame_session == <-> ]] || exit 2
+  shift 3
   [[ $removed_ids != *[^0-9,]* ]] || exit 2
   (( $# % 7 == 0 )) || exit 2
 else
@@ -50,6 +52,9 @@ else
 fi
 
 render_tty=/dev/tty
+if [[ -z ${STY:-} ]]; then
+  direct_tty=$(/usr/bin/tty 2>/dev/null) && render_tty=$direct_tty
+fi
 if [[ -n ${STY:-} ]]; then
   screen_pid=${STY%%.*}
   attached_tty=$(/usr/sbin/lsof -a -p "$screen_pid" -Fn 2>/dev/null |
@@ -71,6 +76,20 @@ else
 fi
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/nchat-thumbnails"
 /bin/mkdir -p "$cache_dir"
+force_reload=0
+if (( !frame_mode )); then
+  for marker in "$cache_dir"/session-*.tty(N); do
+    marker_tty=""
+    IFS= read -r marker_tty < "$marker"
+    [[ $marker_tty == $render_tty ]] && /bin/rm -f "$marker"
+  done
+fi
+if (( frame_mode )); then
+  terminal_marker="$cache_dir/session-$frame_session.tty"
+  previous_tty=""
+  [[ -f $terminal_marker ]] && IFS= read -r previous_tty < "$terminal_marker"
+  [[ $previous_tty == $render_tty ]] || force_reload=1
+fi
 
 image_id=200
 failed=0
@@ -85,7 +104,7 @@ while (( $# >= 5 )); do
     shift 5
   fi
   [[ -f $image ]] || { failed=1; continue; }
-  if (( reuse )); then
+  if (( reuse && !force_reload )); then
     printf -v placement '\033[%d;%dH\033_Ga=p,q=2,i=%d,p=1,c=%d,r=%d,C=1\033\\' \
       "$(( y + 1 ))" "$(( x + 1 ))" "$image_id" "$width" "$height"
     render_payload+=$placement
@@ -117,4 +136,7 @@ done
 render_payload+=$'\e8'
 printf '%s' "$render_payload" > "$render_tty"
 
+if (( frame_mode && !failed )); then
+  print -r -- "$render_tty" > "$terminal_marker"
+fi
 exit "$failed"
