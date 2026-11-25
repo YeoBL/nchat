@@ -173,10 +173,35 @@ library versions. Telegram's generated TDLib objects and library build are under
 The installed monochrome `color.conf` uses `reverse` for `list_attr_selected`,
 `history_text_attr_selected` and `history_name_attr_selected`. Preserve this
 white selection background when updating configuration. It uses the existing
-renderer. The three-key reapplication snippet is in `doc/custom-settings.md`.
+renderer configuration. `UiHistoryView::Draw` fills every selected message row
+across the full width, including thumbnail space, blank lines and reactions.
+`m_ThumbnailSelectionActive` triggers image placement refresh when selection
+changes. The three-key reapplication snippet is in `doc/custom-settings.md`.
 Stop nchat before editing its colour file because cleanup saves loaded values,
 then restart in the original Screen window. A private predecessor is recorded
 in `changes.md`.
+
+## Scrolling and retained thumbnail protocol — 25 November 2026
+
+`UiController::GetKey` checks curses' buffered keys before `select`. `Ui::Run`
+drains up/down bursts in groups of at most 32, then runs model work and draws.
+Non-navigation commands end the batch immediately. Preserve pending keys and
+normal modal/quit handling when changing this loop.
+
+The bundled `nchat-thumbnails` helper accepts internal
+`--frame CORE_PID REMOVED_IDS PATH X Y WIDTH HEIGHT IMAGE_ID REUSE ...` calls.
+C++ tracks currently visible image IDs and commits them after successful helper
+output. Existing image/placement pairs move with `a=p`; new images use `a=T`.
+Removed IDs use scoped deletion, and shutdown/modal clears release image data.
+Legacy five-argument helper calls and custom renderer commands remain supported.
+A small per-core terminal marker under the thumbnail cache detects a new output
+TTY. Graphics-clear helpers invalidate it so retained frames reload safely.
+Deploy `nchat-thumbnails`, `nchat-image-clear` and `nchat-image` with this core.
+The installed `nchat-peek-view.py` also calls the clear helper on exit to invalidate
+shared-terminal image state after cached previews.
+The native graphics regression is `utils/test-thumbnail-placements.py`, invoked
+by `utils/test-notifications.sh` using Kitty's embedded Python. All fixtures use
+isolated PTYs and temporary synthetic images.
 
 ## Runtime files and configuration
 

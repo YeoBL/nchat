@@ -16,6 +16,29 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## Rectangular selection and responsive scrolling — 25 November 2026
+
+| Change | Access / effect | Implementation commit | Verification / limits |
+|---|---|---|---|
+| Full selected message block | The selected message fills the full history width from its heading through text, blank lines, image space and reactions. Existing selection colours apply. | [e1aa1399](https://github.com/YeoBL/nchat/commit/e1aa1399) | Production curses fixture checks every cell through selected/deselected/reselected states, including a wrapped URL and an image. Raw message text stays intact. Physical Kitty appearance has not been visually checked. |
+| Drain queued navigation input | Curses' buffered input is read before waiting on the OS descriptor. Up/down bursts apply in bounded batches of 32 before drawing their final position. Other commands finish their batch immediately. | [b887aede](https://github.com/YeoBL/nchat/commit/b887aede) | A synthetic empty-stdin pipe plus 80 queued curses keys drains without waiting for a new OS event or losing keys. Existing model, cache and terminal regressions pass. |
+| Move retained thumbnails | Visible image textures keep stable image/placement IDs. Updates send placement commands, and removed images release their data. The former 500ms thumbnail delay is removed. First appearance still requires an image load. | [f0f57c23](https://github.com/YeoBL/nchat/commit/f0f57c23), [recovery/compatibility 4b4d2a00](https://github.com/YeoBL/nchat/commit/4b4d2a00), [peek compatibility 7705f38b](https://github.com/YeoBL/nchat/commit/7705f38b) | Real helper output is parsed by Kitty's native in-memory graphics engine. Tests confirm stable image resources, one moved placement, off-screen deletion, clear/terminal-change recovery and legacy five-argument helper calls. Production view fixture verifies reuse across scroll and selection changes. Custom renderer commands retain the legacy argument format. |
+
+Full CMake build and `bash utils/test-notifications.sh` pass, including native
+Screen/xterm frame replay and the thumbnail placement regression. The current
+keyboard configuration already binds Option+Q to the replied-to message and End
+(usually Fn+Right on Mac) to the latest message. Those bindings use existing
+functions.
+
+Activated after testing in the original Screen `2003.nchat`, window `0` (`zsh`),
+shell `2004`, terminal `ttys001`. New core PID `71555` reached Online. The installed
+`nchat-thumbnails`, `nchat-image-clear`, `nchat-image` and cached-preview Python
+helper match their tested sources. Their verified predecessors are retained
+privately under
+`~/.local/.nchat-helper-install/backups/20261125T001237Z-retained-thumbnails/`.
+The peek self-test passes. Actual fast scrolling in the user's Kitty window has
+not been interactively measured.
+
 ## White selection highlighting — 24 November 2026
 
 | Change | Access / effect | Configuration record | Verification / limits |

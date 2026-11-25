@@ -290,7 +290,22 @@ history_name_attr_selected=reverse
 ```
 
 The chat setting highlights the full selected row. The history settings apply to
-the selected message's text and heading. Message highlighting appears while
-message-selection mode is active. Restart nchat after changing these settings,
+the selected message as a rectangular block from its heading through its final
+text or reaction row, including internal blank lines and space beside images.
+Thumbnail placements refresh when selection changes. Message highlighting appears
+while message-selection mode is active. Restart nchat after changing these settings,
 using the same Screen session and window. Shut it down before editing because
 nchat saves its loaded colour configuration during shutdown.
+
+## History navigation and image movement
+
+| Action | Configured shortcut |
+|---|---|
+| Jump to the original message the selected message replies to | Option+Q |
+| Return to the latest message in the chat | End, usually Fn+Right on a Mac keyboard |
+
+Fast up/down input drains in batches while the UI continues servicing incoming
+updates. The bundled thumbnail helper moves existing image placements immediately.
+Images on screen reuse their loaded data. Images leaving the view release their
+terminal resources, and newly visible images load once. Text retains its normal
+terminal redraw path.
