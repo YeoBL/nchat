@@ -739,6 +739,15 @@ def main():
         curses.wrapper(viewer, title, messages, sizes)
     finally:
         render_images([])
+        # This viewer shares the terminal image store with nchat. Invalidate
+        # retained placements after clearing it so returning to nchat reloads them.
+        clear_helper = shutil.which('nchat-image-clear')
+        if clear_helper:
+            try:
+                subprocess.run([clear_helper], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=2, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
 
 
 if __name__ == '__main__':
