@@ -834,7 +834,7 @@ int main()
     assert(sent.quotedText == "Custom quote text" && sent.quotedSender == "someone");
     assert(impl.GetMessages(whatsapp->profile, "quote-chat").at("source").text == original.text);
     model.Cleanup();
-    std::cout << "PASS: real quote editor keyboard workflow forwards custom WhatsApp quote and original reply ID to a fake provider; no network send\n";
+    std::cout << "PASS: real quote editor keyboard workflow forwards custom WhatsApp quote as a standalone snapshot to a fake provider; no network send\n";
   }
   UiKeyConfig::Cleanup();
   UiColorConfig::Cleanup();
