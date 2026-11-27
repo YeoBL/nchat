@@ -28,6 +28,7 @@ class UiModel
 private:
   class Impl
   {
+    friend class UiModel;
   public:
     Impl(UiModel* p_UiModel);
     virtual ~Impl();
@@ -246,6 +247,7 @@ private:
     void PerformFindNext(const std::string& p_FindText);
     bool IsChatForceHidden(const std::string& p_ChatId);
     bool IsChatForceMuted(const std::string& p_ChatId);
+    std::map<std::pair<std::string, std::string>, std::pair<std::string, std::string>> m_ReplyQuotes;
     void AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage);
 
   private:
@@ -440,6 +442,7 @@ private:
   void OnKeyClientActions(const std::string& p_Operation = "local.menu",
                           std::map<std::string, std::string> p_Params = {});
   void OnKeyMessageInfo();
+  void OnKeyEditReplyQuote();
   void OnKeyFind();
   void OnKeyFindNext();
   void OnKeyForwardMsg();

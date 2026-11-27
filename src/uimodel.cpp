@@ -3681,6 +3681,7 @@ bool UiModel::Impl::GetSelectMessageActive()
 void UiModel::Impl::SetSelectMessageActive(bool p_SelectMessageActive)
 {
   m_SelectMessageActive = p_SelectMessageActive;
+  if (!p_SelectMessageActive) m_ReplyQuotes.erase(m_CurrentChat);
   SetHelpOffset(0);
   UpdateHelp();
 }
@@ -4942,6 +4943,7 @@ void UiModel::Impl::AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage)
   const int messageOffset = m_MessageOffset[profileId][chatId];
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
 
+  if (messageOffset < 0 || messageOffset >= (int)messageVec.size()) return;
   auto it = std::next(messageVec.begin(), messageOffset);
   if (it == messageVec.end())
   {
@@ -4959,6 +4961,20 @@ void UiModel::Impl::AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage)
   p_ChatMessage.quotedId = msg->second.id;
   p_ChatMessage.quotedText = msg->second.text;
   p_ChatMessage.quotedSender = msg->second.senderId;
+  const auto custom = m_ReplyQuotes.find(m_CurrentChat);
+  if (custom != m_ReplyQuotes.end() && custom->second.first == msg->second.id)
+  {
+    const auto& text = custom->second.second;
+    const auto pos = msg->second.text.find(text);
+    if (profileId.rfind("Telegram", 0) == 0 && pos == std::string::npos) return;
+    p_ChatMessage.quotedText = text;
+    if (profileId.rfind("Telegram", 0) == 0)
+    {
+      p_ChatMessage.quotedOffset = 0;
+      for (wchar_t ch : StrUtil::ToWString(msg->second.text.substr(0, pos)))
+        p_ChatMessage.quotedOffset += ch > 0xffff ? 2 : 1;
+    }
+  }
 }
 
 void UiModel::Impl::Draw()
@@ -5165,6 +5181,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyTranscribe = UiKeyConfig::GetKey("transcribe");
   static wint_t keySpell = UiKeyConfig::GetKey("spell");
 
+  static wint_t keyEditReplyQuote = UiKeyConfig::GetKey("edit_reply_quote");
   static wint_t keyJumpQuoted = UiKeyConfig::GetKey("jump_quoted");
   static wint_t keyJumpPinned = UiKeyConfig::GetKey("jump_pinned");
   static wint_t keyFind = UiKeyConfig::GetKey("find");
@@ -5413,6 +5430,10 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keyExtCall)
   {
     OnKeyExtCall();
+  }
+  else if (p_Key == keyEditReplyQuote)
+  {
+    OnKeyEditReplyQuote();
   }
   else if (p_Key == keyJumpQuoted)
   {
@@ -6693,6 +6714,45 @@ void UiModel::OnKeyReact()
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
     GetImpl().ReinitView();
   }
+}
+
+void UiModel::OnKeyEditReplyQuote()
+{
+  std::pair<std::string, std::string> chat;
+  ChatMessage original;
+  std::string initial;
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    auto& impl = GetImpl();
+    if (!impl.GetSelectMessageActive() || impl.GetEditMessageActive()) return;
+    chat = impl.m_CurrentChat;
+    ChatMessage selected; impl.AddQuoteFromSelectedMessage(selected);
+    const auto id = selected.quotedId;
+    const auto message = impl.m_Messages[chat.first][chat.second].find(id);
+    if (message == impl.m_Messages[chat.first][chat.second].end()) return;
+    original = message->second;
+    const auto custom = impl.m_ReplyQuotes.find(chat);
+    initial = custom != impl.m_ReplyQuotes.end() && custom->second.first == original.id ?
+      custom->second.second : original.text;
+  }
+  if (chat.first.rfind("Telegram", 0) != 0 && chat.first.rfind("WhatsApp", 0) != 0)
+  { MessageDialog("Reply quote", "Custom reply quotes are supported for Telegram and WhatsApp.", 0.8, 5); return; }
+  UiDialogParams params(this, "Reply quote — empty resets; Enter applies; Escape cancels", 0.9, 5);
+  UiTextInputDialog dialog(params, "Quote: ", initial);
+  if (!dialog.Run()) { ReinitView(); return; }
+  const auto text = dialog.GetInput();
+  if (!text.empty() && chat.first.rfind("Telegram", 0) == 0 && original.text.find(text) == std::string::npos)
+  { MessageDialog("Reply quote", "Telegram quotes must be an exact excerpt of the original message.", 0.8, 5); return; }
+  std::unique_lock<owned_mutex> lock(m_ModelMutex);
+  auto& impl = GetImpl();
+  ChatMessage selected;
+  if (impl.GetSelectMessageActive()) impl.AddQuoteFromSelectedMessage(selected);
+  if (impl.m_CurrentChat == chat && impl.GetSelectMessageActive() && selected.quotedId == original.id)
+  {
+    if (text.empty()) impl.m_ReplyQuotes.erase(chat);
+    else impl.m_ReplyQuotes[chat] = {original.id, text};
+  }
+  impl.ReinitView();
 }
 
 void UiModel::OnKeyFind()

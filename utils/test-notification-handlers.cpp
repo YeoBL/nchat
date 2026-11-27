@@ -1335,6 +1335,32 @@ int main(int argc, char** argv)
     }
     std::cout << "production unread markers: membership-only, earlier unread/read message, cached replay and provider refresh passed for both services\n";
   }
+  {
+    for (const std::string profile : {"Telegram_fixture", "WhatsApp_fixture"})
+    {
+      UiModel::Impl model(nullptr);
+      incoming(model, "source", "🙂 hello", true, profile);
+      model.m_CurrentChat = {profile, "chat"};
+      model.SetSelectMessageActive(true);
+      model.m_ReplyQuotes[model.m_CurrentChat] = {"source", "hello"};
+      ChatMessage reply;
+      model.AddQuoteFromSelectedMessage(reply);
+      assert(reply.quotedId == "source" && reply.quotedText == "hello");
+      assert(reply.quotedOffset == (profile.rfind("Telegram", 0) == 0 ? 3 : -1));
+      assert(model.m_Messages[profile]["chat"].at("source").text == "🙂 hello");
+      model.m_ReplyQuotes[model.m_CurrentChat] = {"source", "custom words"};
+      ChatMessage custom;
+      model.AddQuoteFromSelectedMessage(custom);
+      assert(custom.quotedText == (profile.rfind("Telegram", 0) == 0 ? "🙂 hello" : "custom words"));
+      model.SetSelectMessageActive(false);
+      assert(model.m_ReplyQuotes.empty());
+      model.m_ReplyQuotes[model.m_CurrentChat] = {"other-source", "wrong quote"};
+      ChatMessage unchanged;
+      model.AddQuoteFromSelectedMessage(unchanged);
+      assert(unchanged.quotedText == "🙂 hello");
+    }
+    std::cout << "PASS: custom reply quotes preserve source/id, validate Telegram excerpts and UTF-16 offsets, isolate selections and clear on cancel/send\n";
+  }
   TestViewOnceTerminal(argv[1]);
   TestHistoryEmojiRendering(argv[1], "xterm-256color", "xterm", 24, 96);
   TestHistoryEmojiRendering(argv[1], "screen", "screen", 24, 96);

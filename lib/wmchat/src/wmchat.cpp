@@ -1104,7 +1104,7 @@ void WmNewGroupMembersNotify(int p_ConnId, char* p_ChatId, char* p_MembersJson)
 
 void WmNewMessagesNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_SenderId, char* p_Text, int p_FromMe,
                          char* p_QuotedId, char* p_FileId, char* p_FilePath, int p_FileStatus, int p_TimeSent,
-                         int p_IsRead, int p_IsEdited)
+                         int p_IsRead, int p_IsEdited, char* p_QuotedText)
 {
   WmChat* instance = WmChat::GetInstance(p_ConnId);
   if (instance != nullptr)
@@ -1115,6 +1115,7 @@ void WmNewMessagesNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_Se
     chatMessage.text = std::string(p_Text);
     chatMessage.isOutgoing = (p_FromMe == 1);
     chatMessage.quotedId = std::string(p_QuotedId);
+    chatMessage.quotedText = std::string(p_QuotedText);
     chatMessage.timeSent = (((int64_t)p_TimeSent) * 1000) + (std::hash<std::string>{ }(chatMessage.id) % 256);
     chatMessage.isRead = (p_IsRead == 1);
     chatMessage.isEdited = (p_IsEdited == 1);
@@ -1171,6 +1172,7 @@ void WmNewMessagesNotify(int p_ConnId, char* p_ChatId, char* p_MsgId, char* p_Se
   free(p_SenderId);
   free(p_Text);
   free(p_QuotedId);
+  free(p_QuotedText);
   free(p_FileId);
   free(p_FilePath);
 }
