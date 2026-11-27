@@ -955,3 +955,20 @@ The WhatsApp C bridge now carries quote snapshots from text/media context info,
 and Telegram reads native quote snapshots. History rendering prefers snapshots,
 which the existing message cache stores. `quotedOffset` is send-only. Never
 modify the original row to implement quote customization.
+
+### WhatsApp quote rendering follow-up — 27 November 2026
+
+Live tests in the sole-member Self group confirmed that the official Mac client
+renders source text for a quote with its real source ID, despite custom text in
+the outgoing protobuf. Modified WhatsApp quotes therefore use
+`ProtocolUtil::QuoteSnapshotId()` (random standalone reference) and keep the
+source sender and edited text. This displays a native quote bubble but has no
+original-message jump link. Unmodified replies and Telegram excerpts preserve
+real references. Editor selection capture passes `p_ApplyCustom=false` so a
+reopened editor looks up the actual source, not the generated snapshot ID.
+`WidgetReplies` has an explicit authenticated `.quote` probe path (quote text,
+newline, body in the fourth hex field; optional literal `detached` fifth line).
+Normal widget requests are unchanged. Probes validate the real cached reference
+and sender before building a standalone snapshot. No new service credentials or
+separate session are used. Live test messages are labelled `[nchat quote test]`
+in Self; they were sent with explicit user authorization.
