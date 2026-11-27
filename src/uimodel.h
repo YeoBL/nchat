@@ -248,7 +248,7 @@ private:
     bool IsChatForceHidden(const std::string& p_ChatId);
     bool IsChatForceMuted(const std::string& p_ChatId);
     std::map<std::pair<std::string, std::string>, std::pair<std::string, std::string>> m_ReplyQuotes;
-    void AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage);
+    void AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage, bool p_ApplyCustom = true);
 
   private:
     bool m_Running = true;

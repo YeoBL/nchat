@@ -237,7 +237,7 @@ private:
     request->chatMessage.text = quote ? fields[3].substr(quoteEnd + 1) : fields[3];
     if (quote)
     {
-      request->chatMessage.quotedId = detached ? "3EB0" + path.substr(path.find_last_of('/') + 1, 16) : messages.front().id;
+      request->chatMessage.quotedId = detached ? ProtocolUtil::QuoteSnapshotId() : messages.front().id;
       request->chatMessage.quotedSender = messages.front().senderId;
       request->chatMessage.quotedText = fields[3].substr(0, quoteEnd);
     }

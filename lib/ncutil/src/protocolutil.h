@@ -12,6 +12,7 @@
 class ProtocolUtil
 {
 public:
+  static std::string QuoteSnapshotId();
   static FileInfo FileInfoFromHex(const std::string& p_Str);
   static std::string FileInfoToHex(const FileInfo& p_FileInfo);
   static bool IsViewOnce(const ChatMessage& p_Message);

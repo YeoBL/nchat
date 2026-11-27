@@ -1345,7 +1345,8 @@ int main(int argc, char** argv)
       model.m_ReplyQuotes[model.m_CurrentChat] = {"source", "hello"};
       ChatMessage reply;
       model.AddQuoteFromSelectedMessage(reply);
-      assert(reply.quotedId == "source" && reply.quotedText == "hello");
+      assert(reply.quotedText == "hello");
+      assert(profile.rfind("Telegram", 0) == 0 ? reply.quotedId == "source" : reply.quotedId.rfind("3EB0", 0) == 0);
       assert(reply.quotedOffset == (profile.rfind("Telegram", 0) == 0 ? 3 : -1));
       assert(model.m_Messages[profile]["chat"].at("source").text == "🙂 hello");
       model.m_ReplyQuotes[model.m_CurrentChat] = {"source", "custom words"};

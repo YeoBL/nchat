@@ -6,6 +6,7 @@
 // nchat is distributed under the MIT license, see LICENSE for details.
 
 #include "protocolutil.h"
+#include <random>
 
 #include "log.h"
 #include "protocol.h"
@@ -176,4 +177,12 @@ bool ProtocolUtil::IsViewOnce(const ChatMessage& p_Message)
   return p_Message.text.find("[View once]") == 0 ||
     p_Message.text.find("[View-once ") == 0 ||
     (!p_Message.fileInfo.empty() && FileInfoFromHex(p_Message.fileInfo).isViewOnce);
+}
+
+std::string ProtocolUtil::QuoteSnapshotId()
+{
+  std::random_device random;
+  std::string id = "3EB0";
+  for (int i = 0; i < 16; ++i) id += "0123456789ABCDEF"[random() % 16];
+  return id;
 }
