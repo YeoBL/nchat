@@ -3315,21 +3315,7 @@ func WmSendMessage(connId int, chatId string, text string, quotedId string, quot
 	isEdited := (len(editMsgId) > 0)
 
 	// quote context
-	contextInfo := waE2E.ContextInfo{}
-	if len(quotedId) > 0 {
-		quotedMessage := waE2E.Message{
-			Conversation: &quotedText,
-		}
-
-		quotedSender = strings.Replace(quotedSender, "@c.us", "@s.whatsapp.net", 1)
-
-		LOG_TRACE("send quoted " + quotedId + ", " + quotedText + ", " + quotedSender)
-		contextInfo = waE2E.ContextInfo{
-			QuotedMessage: &quotedMessage,
-			StanzaID:      &quotedId,
-			Participant:   &quotedSender,
-		}
-	}
+	contextInfo := replyContext(quotedId, quotedText, quotedSender)
 
 	expiration := GetExpiration(connId, chatId)
 	if expiration != 0 {
@@ -4362,4 +4348,14 @@ func replyQuoteText(msg *waE2E.Message) string {
 		return q.GetVideoMessage().GetCaption()
 	}
 	return q.GetDocumentMessage().GetCaption()
+}
+
+// Keep the exact quote snapshot in the outgoing protobuf. Referencing a source
+// ID does not guarantee that another WhatsApp client renders this snapshot.
+func replyContext(id, text, sender string) waE2E.ContextInfo {
+	if id == "" {
+		return waE2E.ContextInfo{}
+	}
+	sender = strings.Replace(sender, "@c.us", "@s.whatsapp.net", 1)
+	return waE2E.ContextInfo{QuotedMessage: &waE2E.Message{Conversation: &text}, StanzaID: &id, Participant: &sender}
 }

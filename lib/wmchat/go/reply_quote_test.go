@@ -24,3 +24,20 @@ func TestReplyQuoteSnapshot(t *testing.T) {
 		}
 	}
 }
+
+func TestOutgoingReplyQuoteWireSnapshot(t *testing.T) {
+	context := replyContext("real-source-id", "Changed quote Ω", "sender@c.us")
+	message := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("Actual reply"), ContextInfo: &context}}
+	wire, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded waE2E.Message
+	if err = proto.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got := decoded.GetExtendedTextMessage().GetContextInfo()
+	if got.GetStanzaID() != "real-source-id" || got.GetQuotedMessage().GetConversation() != "Changed quote Ω" || got.GetParticipant() != "sender@s.whatsapp.net" {
+		t.Fatal("quote changed during wire encoding")
+	}
+}

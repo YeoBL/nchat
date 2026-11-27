@@ -39,7 +39,7 @@ public:
         for (const auto& name : FileUtil::ListDirNames(m_Dir))
         {
           if (m_Stop) break;
-          if (!((name.size() == 40 && name.substr(32) == ".request") ||
+          if (!((name.size() == 38 && name.substr(32) == ".quote") || (name.size() == 40 && name.substr(32) == ".request") ||
                 (name.size() == 37 && (name.substr(32) == ".read" || name.substr(32) == ".poll" || name.substr(32) == ".vote"))) ||
               name.substr(0, 32).find_first_not_of("0123456789abcdef") != std::string::npos) continue;
           Process(m_Dir + "/" + name);
@@ -72,6 +72,7 @@ private:
 
   void Process(const std::string& path)
   {
+    const bool quote = path.size() >= 6 && path.substr(path.size() - 6) == ".quote";
     const bool markRead = path.size() >= 5 && path.substr(path.size() - 5) == ".read";
     const bool poll = path.size() >= 5 && path.substr(path.size() - 5) == ".poll";
     const bool vote = path.size() >= 5 && path.substr(path.size() - 5) == ".vote";
@@ -84,7 +85,7 @@ private:
     ssize_t len = read(fd, &data[0], data.size());
     close(fd);
     unlink(path.c_str()); // Claim exactly once, before any network action.
-    const std::string result = path.substr(0, path.size() - (markRead || poll || vote ? 5 : 8)) + ".result";
+    const std::string result = path.substr(0, path.size() - (quote ? 6 : markRead || poll || vote ? 5 : 8)) + ".result";
     if (access(result.c_str(), F_OK) == 0) return; // Duplicate request ID never resends.
     auto reject = [&] { Write(result, "rejected\n"); };
     if (len != (ssize_t)data.size() || time(nullptr) - st.st_mtime > 30 || st.st_mtime > time(nullptr) + 5)
@@ -128,6 +129,14 @@ private:
     }
     else if (!MessageCache::GetOneMessage(fields[0], fields[1], fields[2], messages) || messages.empty() || messages.front().isDeleted)
       { reject(); return; }
+    size_t quoteEnd = std::string::npos;
+    if (quote)
+    {
+      quoteEnd = fields[3].find('\n');
+      if (fields[0].rfind("WhatsAppMd_", 0) != 0 || quoteEnd == std::string::npos ||
+          quoteEnd == 0 || fields[3].substr(quoteEnd + 1).find_first_not_of(" \t\r\n") == std::string::npos)
+        { reject(); return; }
+    }
     std::vector<int> choices;
     if (poll || vote)
     {
@@ -220,7 +229,13 @@ private:
     }
     auto request = std::make_shared<SendMessageRequest>();
     request->chatId = fields[1];
-    request->chatMessage.text = fields[3];
+    request->chatMessage.text = quote ? fields[3].substr(quoteEnd + 1) : fields[3];
+    if (quote)
+    {
+      request->chatMessage.quotedId = messages.front().id;
+      request->chatMessage.quotedSender = messages.front().senderId;
+      request->chatMessage.quotedText = fields[3].substr(0, quoteEnd);
+    }
     request->onResult = [result](bool success) { Write(result, success ? "accepted\n" : "failed\n"); };
     protocol->second->SendRequest(request);
   }
