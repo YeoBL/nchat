@@ -823,11 +823,14 @@ int main()
     for (int i = 0; i < 100; ++i) Key(i == 0 ? "Quote:" : "", "backspace");
     Text("Custom quote text"); Key("", "ok");
     Run(model, "edit_reply_quote");
+    // Reopening must select the original source, not the snapshot's wire ID.
+    Key("Quote:", "ok");
+    Run(model, "edit_reply_quote");
     Type(model, L"My actual reply");
     Run(model, "send_msg");
     assert(whatsapp->sentReplies.size() == 1);
     const auto& sent = whatsapp->sentReplies.front();
-    assert(sent.text == "My actual reply" && sent.quotedId == "source");
+    assert(sent.text == "My actual reply" && sent.quotedId != "source" && sent.quotedId.rfind("3EB0", 0) == 0);
     assert(sent.quotedText == "Custom quote text" && sent.quotedSender == "someone");
     assert(impl.GetMessages(whatsapp->profile, "quote-chat").at("source").text == original.text);
     model.Cleanup();

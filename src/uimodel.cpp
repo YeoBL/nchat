@@ -4935,7 +4935,7 @@ void UiModel::Impl::GotoChat(const std::pair<std::string, std::string>& p_Chat, 
   ReinitView();
 }
 
-void UiModel::Impl::AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage)
+void UiModel::Impl::AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage, bool p_ApplyCustom)
 {
   const std::string profileId = m_CurrentChat.first;
   const std::string chatId = m_CurrentChat.second;
@@ -4962,12 +4962,16 @@ void UiModel::Impl::AddQuoteFromSelectedMessage(ChatMessage& p_ChatMessage)
   p_ChatMessage.quotedText = msg->second.text;
   p_ChatMessage.quotedSender = msg->second.senderId;
   const auto custom = m_ReplyQuotes.find(m_CurrentChat);
-  if (custom != m_ReplyQuotes.end() && custom->second.first == msg->second.id)
+  if (p_ApplyCustom && custom != m_ReplyQuotes.end() && custom->second.first == msg->second.id)
   {
     const auto& text = custom->second.second;
     const auto pos = msg->second.text.find(text);
     if (profileId.rfind("Telegram", 0) == 0 && pos == std::string::npos) return;
     p_ChatMessage.quotedText = text;
+    // A real source ID makes official WhatsApp clients prefer its cached text.
+    // An explicit edited quote is a standalone snapshot, not a navigable reply.
+    if (profileId.rfind("WhatsApp", 0) == 0 && text != msg->second.text)
+      p_ChatMessage.quotedId = ProtocolUtil::QuoteSnapshotId();
     if (profileId.rfind("Telegram", 0) == 0)
     {
       p_ChatMessage.quotedOffset = 0;
@@ -6726,7 +6730,7 @@ void UiModel::OnKeyEditReplyQuote()
     auto& impl = GetImpl();
     if (!impl.GetSelectMessageActive() || impl.GetEditMessageActive()) return;
     chat = impl.m_CurrentChat;
-    ChatMessage selected; impl.AddQuoteFromSelectedMessage(selected);
+    ChatMessage selected; impl.AddQuoteFromSelectedMessage(selected, false);
     const auto id = selected.quotedId;
     const auto message = impl.m_Messages[chat.first][chat.second].find(id);
     if (message == impl.m_Messages[chat.first][chat.second].end()) return;
@@ -6738,7 +6742,7 @@ void UiModel::OnKeyEditReplyQuote()
   if (chat.first.rfind("Telegram", 0) != 0 && chat.first.rfind("WhatsApp", 0) != 0)
   { MessageDialog("Reply quote", "Custom reply quotes are supported for Telegram and WhatsApp.", 0.8, 5); return; }
   const auto title = chat.first.rfind("WhatsApp", 0) == 0 ?
-    "Reply quote — WhatsApp may display the original" :
+    "Custom quote — snapshot; no jump to original" :
     "Reply quote — empty resets; Enter applies; Escape cancels";
   UiDialogParams params(this, title, 0.9, 5);
   UiTextInputDialog dialog(params, "Quote: ", initial);
@@ -6749,7 +6753,7 @@ void UiModel::OnKeyEditReplyQuote()
   std::unique_lock<owned_mutex> lock(m_ModelMutex);
   auto& impl = GetImpl();
   ChatMessage selected;
-  if (impl.GetSelectMessageActive()) impl.AddQuoteFromSelectedMessage(selected);
+  if (impl.GetSelectMessageActive()) impl.AddQuoteFromSelectedMessage(selected, false);
   if (impl.m_CurrentChat == chat && impl.GetSelectMessageActive() && selected.quotedId == original.id)
   {
     if (text.empty()) impl.m_ReplyQuotes.erase(chat);
