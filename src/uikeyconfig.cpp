@@ -235,6 +235,7 @@ void UiKeyConfig::Init(bool p_MapKeys)
     { "bulk_select", "KEY_F6" },
     { "transcribe", "\\33\\124" }, // alt/opt-shift-t
     { "spell", "\\33\\44" }, // alt/opt-$
+    { "edit_reply_quote", "\\33\\121" }, // alt/opt-shift-q
     { "jump_quoted", "\\33\\161" }, // alt/opt-q
     { "jump_pinned", "KEY_CTRLP" },
     { "find", "\\33\\57" }, // alt/opt-/

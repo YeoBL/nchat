@@ -1285,9 +1285,17 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
         if (!sendMessageRequest->chatMessage.quotedId.empty())
         {
+          td::td_api::object_ptr<td::td_api::inputTextQuote> quote;
+          if (sendMessageRequest->chatMessage.quotedOffset >= 0)
+          {
+            auto text = td::td_api::make_object<td::td_api::formattedText>();
+            text->text_ = sendMessageRequest->chatMessage.quotedText;
+            quote = td::td_api::make_object<td::td_api::inputTextQuote>(
+              std::move(text), sendMessageRequest->chatMessage.quotedOffset);
+          }
           send_message->reply_to_ =
             td::td_api::make_object<td::td_api::inputMessageReplyToMessage>(StrUtil::NumFromHex<int64_t>(sendMessageRequest->chatMessage.quotedId),
-                                                                            nullptr /*quote_*/, 0 /*checklist_task_id_*/, "" /*poll_option_id_*/);
+                                                                            std::move(quote), 0 /*checklist_task_id_*/, "" /*poll_option_id_*/);
         }
 
         const auto& mentions = sendMessageRequest->chatMessage.mentions;
@@ -4203,6 +4211,8 @@ void TgChat::Impl::TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessag
   {
     auto& reply_to_message = static_cast<const td::td_api::messageReplyToMessage&>(*p_TdMessage.reply_to_);
     p_ChatMessage.quotedId = StrUtil::NumToHex(reply_to_message.message_id_);
+    if (reply_to_message.quote_ && reply_to_message.quote_->text_)
+      p_ChatMessage.quotedText = reply_to_message.quote_->text_->text_;
   }
 
   p_ChatMessage.hasMention = p_TdMessage.contains_unread_mention_;

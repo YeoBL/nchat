@@ -64,9 +64,13 @@ type messageNotifyFunc func(connID int, chatID, messageID, senderID, text string
 	fromMe int, quotedID, fileID, filePath string, fileStatus, timeSent, isRead, isEdited int)
 
 func (handler *WmEventHandler) NotifyNewMessage(connID int, chatID, messageID, senderID, text string,
-	fromMe int, quotedID, fileID, filePath string, fileStatus, timeSent, isRead, isEdited int) {
+	fromMe int, quotedID, fileID, filePath string, fileStatus, timeSent, isRead, isEdited int, quote ...string) {
 	if handler.importedHistory {
 		isRead = -1 // The C++ cache preserves known read state; this never sends a receipt.
+	}
+	if handler.notifyMessage == nil && len(quote) > 0 {
+		CWmNewMessagesWithQuote(connID, chatID, messageID, senderID, text, fromMe, quotedID, fileID, filePath, fileStatus, timeSent, isRead, isEdited, quote[0])
+		return
 	}
 	notify := handler.notifyMessage
 	if notify == nil {

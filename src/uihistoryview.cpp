@@ -244,7 +244,12 @@ void UiHistoryView::Draw()
     {
       std::string quotedText;
       auto quotedIt = messages.find(msg.quotedId);
-      if (quotedIt != messages.end())
+      if (!msg.quotedText.empty())
+      {
+        quotedText = StrUtil::Split(msg.quotedText, '\n').at(0);
+        if (!emojiEnabled) quotedText = StrUtil::Textize(quotedText);
+      }
+      else if (quotedIt != messages.end())
       {
         if (!quotedIt->second.text.empty())
         {

@@ -230,6 +230,7 @@ struct ChatMessage
   std::string text;
   std::string quotedId;
   std::string quotedText;
+  int quotedOffset = -1; // UTF-16 position for an explicitly selected Telegram excerpt; send-only.
   std::string quotedSender;
   std::string fileInfo;
   std::string link; // only required for tgchat, sponsored msg, not db cached

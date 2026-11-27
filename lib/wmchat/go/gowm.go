@@ -895,13 +895,13 @@ func (s *ncSignalLogger) Configure(ss string) {
 
 // event handling
 type WmEventHandler struct {
-	mutes *chatMuteState // Shared by copied history importers for this connection.
-	notifyMute func(int, string, int) // Optional offline mute sink.
-	connId int
+	mutes           *chatMuteState         // Shared by copied history importers for this connection.
+	notifyMute      func(int, string, int) // Optional offline mute sink.
+	connId          int
 	importedHistory bool
-	notifyMessage messageNotifyFunc // Optional per-handler sink for offline bridge fixtures.
-	notifyStatus func(int, string, int, int) // Optional offline presence sink.
-	notifyContact func(int, string, string, string, int, int, int) // Optional offline contact sink.
+	notifyMessage   messageNotifyFunc                                // Optional per-handler sink for offline bridge fixtures.
+	notifyStatus    func(int, string, int, int)                      // Optional offline presence sink.
+	notifyContact   func(int, string, string, string, int, int, int) // Optional offline contact sink.
 }
 
 func (handler *WmEventHandler) HandleEvent(rawEvt interface{}) {
@@ -2216,7 +2216,7 @@ func (handler *WmEventHandler) HandleTextMessage(messageInfo types.MessageInfo, 
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: %s", chatId, text))
 	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
-		BoolToInt(isRead), BoolToInt(isEdited))
+		BoolToInt(isRead), BoolToInt(isEdited), replyQuoteText(msg))
 }
 
 func (handler *WmEventHandler) HandleImageMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
@@ -2272,7 +2272,7 @@ func (handler *WmEventHandler) HandleImageMessage(messageInfo types.MessageInfo,
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: image", chatId))
 	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
-		BoolToInt(isRead), BoolToInt(isEdited))
+		BoolToInt(isRead), BoolToInt(isEdited), replyQuoteText(msg))
 }
 
 func (handler *WmEventHandler) HandleVideoMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
@@ -2339,7 +2339,7 @@ func (handler *WmEventHandler) HandleVideoMessage(messageInfo types.MessageInfo,
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: video", chatId))
 	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
-		BoolToInt(isRead), BoolToInt(isEdited))
+		BoolToInt(isRead), BoolToInt(isEdited), replyQuoteText(msg))
 }
 
 func (handler *WmEventHandler) HandleAudioMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
@@ -2395,7 +2395,7 @@ func (handler *WmEventHandler) HandleAudioMessage(messageInfo types.MessageInfo,
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: audio", chatId))
 	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
-		BoolToInt(isRead), BoolToInt(isEdited))
+		BoolToInt(isRead), BoolToInt(isEdited), replyQuoteText(msg))
 }
 
 func (handler *WmEventHandler) HandleDocumentMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
@@ -2454,7 +2454,7 @@ func (handler *WmEventHandler) HandleDocumentMessage(messageInfo types.MessageIn
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: document", chatId))
 	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
-		BoolToInt(isRead), BoolToInt(isEdited))
+		BoolToInt(isRead), BoolToInt(isEdited), replyQuoteText(msg))
 }
 
 func (handler *WmEventHandler) HandleStickerMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
@@ -2506,7 +2506,7 @@ func (handler *WmEventHandler) HandleStickerMessage(messageInfo types.MessageInf
 
 	LOG_TRACE(fmt.Sprintf("Call CWmNewMessagesNotify %s: sticker", chatId))
 	handler.NotifyNewMessage(connId, chatId, msgId, senderId, text, BoolToInt(fromMe), quotedId, fileId, filePath, fileStatus, timeSent,
-		BoolToInt(isRead), BoolToInt(isEdited))
+		BoolToInt(isRead), BoolToInt(isEdited), replyQuoteText(msg))
 }
 
 func (handler *WmEventHandler) HandleTemplateMessage(messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
@@ -4329,4 +4329,37 @@ func WmGetPollVotes(connId int, chatID, msgID string) string {
 		return `{"status":"missing"}`
 	}
 	return string(data)
+}
+
+// Preserve the quote snapshot rather than replacing it with the source message.
+func replyQuoteText(msg *waE2E.Message) string {
+	var ci *waE2E.ContextInfo
+	switch {
+	case msg.GetExtendedTextMessage() != nil:
+		ci = msg.GetExtendedTextMessage().GetContextInfo()
+	case msg.GetImageMessage() != nil:
+		ci = msg.GetImageMessage().GetContextInfo()
+	case msg.GetVideoMessage() != nil:
+		ci = msg.GetVideoMessage().GetContextInfo()
+	case msg.GetAudioMessage() != nil:
+		ci = msg.GetAudioMessage().GetContextInfo()
+	case msg.GetDocumentMessage() != nil:
+		ci = msg.GetDocumentMessage().GetContextInfo()
+	case msg.GetStickerMessage() != nil:
+		ci = msg.GetStickerMessage().GetContextInfo()
+	}
+	q := ci.GetQuotedMessage()
+	if q.GetConversation() != "" {
+		return q.GetConversation()
+	}
+	if q.GetExtendedTextMessage() != nil {
+		return q.GetExtendedTextMessage().GetText()
+	}
+	if q.GetImageMessage() != nil {
+		return q.GetImageMessage().GetCaption()
+	}
+	if q.GetVideoMessage() != nil {
+		return q.GetVideoMessage().GetCaption()
+	}
+	return q.GetDocumentMessage().GetCaption()
 }
