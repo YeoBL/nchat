@@ -7,6 +7,23 @@ on GitHub. The operational snapshot was checked on **9 November 2026**, in
 Europe/London. Process IDs, terminal names and connection state require a fresh
 check before an action.
 
+## Quiet membership unread markers — 27 November 2026
+
+`UiModel::Impl::GetLastMessageId` accepts an optional membership filter used by
+`UpdateChatInfoIsUnread`. Other callers retain the actual latest message for
+activity ordering, navigation and mark-as-read. The filter uses the existing
+`NotificationState::IsMembershipEvent` labels for both providers. Membership-only
+loaded histories clear the local `isUnread` flag; earlier conversation unread
+state is preserved. Do not emit a desktop notification for an older conversation
+message rediscovered under a newer membership row. `MessageCache::FetchChats`
+computes unread from the latest non-membership row separately from latest
+activity; keep its SQL predicate aligned with the UI classifier and widget.
+Raw service unread metadata without locally loaded/cached messages still follows
+the provider until message content becomes available. Regression coverage is in
+`utils/test-notification-handlers.cpp` and `utils/test-notification-cache.cpp`,
+run by `bash utils/test-notifications.sh`. No receipt or history rows are changed
+by this display policy.
+
 ## Telegram sponsored ads — 11 November 2026
 
 The Telegram provider no longer fetches or injects sponsored messages into channel

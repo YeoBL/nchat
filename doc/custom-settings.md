@@ -72,6 +72,16 @@ The menu-bar companion accepts `--history-root /path/to/nchat/history` for a
 nondefault profile location. Account credentials, databases, cached media and
 private drafts must remain outside Git.
 
+## Join and leave events
+
+Telegram and WhatsApp membership entries (`[Joined]`, `[Left]`, `[Added …]`,
+`[Removed …]`) stay visible in history but do not create the chat-list `*`.
+The newest conversation message determines that marker, so a later membership
+entry does not hide an earlier unread message. This applies automatically,
+including chat lists restored from the message cache; no setting or shortcut is
+needed. Filtering the display does not mark the events read on either service.
+Existing sound, desktop and widget suppression for membership events remains.
+
 ## Continuous presence polling
 
 While nchat runs, a background poller samples the online/last-seen status of
