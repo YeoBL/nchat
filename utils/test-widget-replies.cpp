@@ -31,6 +31,8 @@ struct FakeProtocol : Protocol {
   bool Login() override { return false; }
   bool Logout() override { return true; }
   void SetMessageHandler(const std::function<void(std::shared_ptr<ServiceMessage>)>&) override {}
+  bool expectQuote = false;
+  ChatMessage lastSent;
   void SendRequest(std::shared_ptr<RequestMessage> request) override {
     if (request->GetMessageType() == GetPollVotesRequestType) {
       auto poll = std::static_pointer_cast<GetPollVotesRequest>(request);
@@ -73,7 +75,8 @@ struct FakeProtocol : Protocol {
     }
     assert(request->GetMessageType() == SendMessageRequestType);
     auto send = std::static_pointer_cast<SendMessageRequest>(request);
-    assert(send->chatMessage.quotedId.empty()); // Normal reply, not an unintended quote.
+    if (!expectQuote) assert(send->chatMessage.quotedId.empty()); // Normal requests never become quotes.
+    lastSent = send->chatMessage;
     assert(send->chatMessage.fileInfo.empty());
     chat = send->chatId; text = send->chatMessage.text;
     send->onResult(success);
@@ -252,6 +255,20 @@ int main() {
     }
     assert(fake->calls == 2 && fake->reads == 2 && waFake->calls == 0 && waFake->reads == 1);
     std::cout << "PASS: widget polls use exact account/chat/message, metadata-only results, explicit single/multiple/withdraw votes, duplicate protection and unchanged read flags on both services\n";
+    waFake->expectQuote = true;
+    for (int detached : {0, 1}) {
+      const int id = 500 + detached;
+      const std::string body = nonce + "\n" + StrUtil::StrToHex(waProfile) + "\n" +
+        StrUtil::StrToHex("right-chat") + "\n" + StrUtil::StrToHex("reference") + "\n" +
+        StrUtil::StrToHex("Custom quote\nReply body") + "\n" + (detached ? "detached\n" : "");
+      Write(path(id) + ".quote", body);
+      Await([&] { return Read(path(id) + ".result") == "accepted\n"; });
+      assert(waFake->lastSent.quotedText == "Custom quote" && waFake->lastSent.text == "Reply body");
+      assert(waFake->lastSent.quotedSender == "sender");
+      assert(detached ? waFake->lastSent.quotedId != "reference" : waFake->lastSent.quotedId == "reference");
+    }
+    std::cout << "PASS: explicit native/detached quote probes keep reference sender, separate quote/body and require current-session authentication\n";
+
   }
   assert(access((dir + "/server").c_str(), F_OK) != 0);
   {
