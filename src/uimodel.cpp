@@ -2960,7 +2960,8 @@ void UiModel::Impl::SortChats()
   }
 }
 
-std::string UiModel::Impl::GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId)
+std::string UiModel::Impl::GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId,
+                                            bool p_SkipMembership)
 {
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[p_ProfileId][p_ChatId];
   const std::vector<std::string>& messageVec = m_MessageVec[p_ProfileId][p_ChatId];
@@ -2973,6 +2974,7 @@ std::string UiModel::Impl::GetLastMessageId(const std::string& p_ProfileId, cons
     if (messageIt == messages.end()) continue;
 
     const ChatMessage& lastChatMessage = messageIt->second;
+    if (p_SkipMembership && NotificationState::IsMembershipEvent(lastChatMessage.text)) continue;
     if (lastChatMessage.timeSent != std::numeric_limits<int64_t>::max()) // skip sponsored messages
     {
       lastMessageId = messageId;
@@ -3024,8 +3026,18 @@ void UiModel::Impl::UpdateChatInfoLastMessageTime(const std::string& p_ProfileId
 void UiModel::Impl::UpdateChatInfoIsUnread(const std::string& p_ProfileId, const std::string& p_ChatId)
 {
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[p_ProfileId][p_ChatId];
-  const std::string lastMessageId = GetLastMessageId(p_ProfileId, p_ChatId);
-  if (lastMessageId.empty()) return;
+  const std::string latestMessageId = GetLastMessageId(p_ProfileId, p_ChatId);
+  if (latestMessageId.empty()) return;
+
+  // Membership rows stay visible and keep the chat's activity time, but cannot
+  // create unread attention or hide an earlier unread conversation message.
+  const std::string lastMessageId = GetLastMessageId(p_ProfileId, p_ChatId, true);
+  if (lastMessageId.empty())
+  {
+    auto chat = m_ChatInfos[p_ProfileId].find(p_ChatId);
+    if (chat != m_ChatInfos[p_ProfileId].end()) chat->second.isUnread = false;
+    return;
+  }
 
   bool isRead = true;
   const ChatMessage& chatMessage = messages.at(lastMessageId);
@@ -3050,7 +3062,7 @@ void UiModel::Impl::UpdateChatInfoIsUnread(const std::string& p_ProfileId, const
       {
         const bool receivedAfterConnect = (m_ConnectTime.count(p_ProfileId) > 0) &&
           (chatMessage.timeSent > m_ConnectTime[p_ProfileId]);
-        if (receivedAfterConnect && !NotificationState::IsMembershipEvent(chatMessage.text))
+        if (receivedAfterConnect && lastMessageId == latestMessageId)
         {
           QueueTerminalNotification(p_ProfileId, p_ChatId, chatMessage);
 

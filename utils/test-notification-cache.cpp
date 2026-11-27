@@ -183,6 +183,36 @@ int main() try
     MessageCache::Init();
   }
   std::cout << "production edits: nonsequence persistence, repeated edits, replay protection and preserved history boundaries passed\n";
+  {
+    writer << "INSERT INTO messages(chatId,id,text,timeSent,isOutgoing,isRead) VALUES "
+      "('membership-only','j','[Joined]',2000,0,0),('membership-only','l','[Left]',3000,0,0),"
+      "('membership-read','r','ordinary read text',1000,0,1),('membership-read','a','[Added Alice]',2000,0,0),"
+      "('membership-unread','u','ordinary unread text',1000,0,0),('membership-unread','x','[Removed Bob]',2000,0,0),"
+      "('membership-null','n',NULL,1000,0,0),('membership-null','j','[Joined]',2000,0,0),"
+      "('membership-outgoing','u','old unread',1000,0,0),('membership-outgoing','o','my reply',2000,1,0),"
+      "('membership-outgoing','j','[Joined]',3000,0,0);";
+    auto fetch = std::make_shared<MessageCache::FetchChatsRequest>();
+    fetch->profileId = "test";
+    std::map<std::string, ChatInfo> chats;
+    MessageCache::SetMessageHandler([&](std::shared_ptr<ServiceMessage> event) {
+      assert(event->GetMessageType() == NewChatsNotifyType);
+      for (const auto& info : std::static_pointer_cast<NewChatsNotify>(event)->chatInfos) chats[info.id] = info;
+    });
+    MessageCache::PerformRequest(fetch);
+    assert(!chats.at("membership-only").isUnread && chats.at("membership-only").lastMessageTime == 3000);
+    assert(!chats.at("membership-read").isUnread);
+    assert(chats.at("membership-unread").isUnread && chats.at("membership-unread").lastMessageTime == 2000);
+    assert(chats.at("membership-null").isUnread);
+    assert(!chats.at("membership-outgoing").isUnread);
+    fetch->chatIds = {"membership-only"}; chats.clear();
+    MessageCache::PerformRequest(fetch);
+    assert(chats.size() == 1 && !chats.at("membership-only").isUnread);
+    writer << "SELECT count(*) FROM messages WHERE chatId LIKE 'membership-%' AND isRead=0;" >> count;
+    assert(count == 10); // Display filtering never rewrites receipt state.
+    writer << "DELETE FROM messages WHERE chatId LIKE 'membership-%';";
+    MessageCache::SetMessageHandler(nullptr);
+    std::cout << "production cache: membership events preserve activity/receipt state without creating or hiding unread markers\n";
+  }
   auto membership = std::make_shared<MessageCache::UpdateMembershipRequest>();
   membership->profileId = "test"; membership->chatId = "chat";
   int membershipNotifications = 0;

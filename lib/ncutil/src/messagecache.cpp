@@ -1872,15 +1872,28 @@ void MessageCache::PerformRequest(std::shared_ptr<Request> p_Request)
               chatIdArchived[chatId] = isArchived;
             };
 
+          // Match NotificationState::IsMembershipEvent (and the widget filter).
+          // Compute unread from the newest conversation message, independently
+          // of the latest activity timestamp, which includes joins and leaves.
+          std::map<std::string, bool> chatIdUnread;
           *m_Dbs[profileId] << "SELECT chatId, MAX(timeSent), isOutgoing, isRead FROM " + s_TableMessages + " "
+            "WHERE COALESCE(text,'') NOT IN ('[Joined]','[Left]') "
+            "AND NOT (length(COALESCE(text,''))>8 AND (text GLOB '[[]Added *]' OR text GLOB '[[]Removed *]')) "
             "GROUP BY chatId;" >>
-            [&](const std::string& chatId, int64_t timeSent, int32_t isOutgoing, int32_t isRead)
+            [&](const std::string& chatId, int64_t /*timeSent*/, int32_t isOutgoing, int32_t isRead)
+            {
+              chatIdUnread[chatId] = !isOutgoing && !isRead;
+            };
+
+          *m_Dbs[profileId] << "SELECT chatId, MAX(timeSent) FROM " + s_TableMessages + " "
+            "GROUP BY chatId;" >>
+            [&](const std::string& chatId, int64_t timeSent)
             {
               if (noFilter || fetchChatsRequest->chatIds.count(chatId))
               {
                 ChatInfo chatInfo;
                 chatInfo.id = chatId;
-                chatInfo.isUnread = !isOutgoing && !isRead;
+                chatInfo.isUnread = chatIdUnread[chatId];
                 chatInfo.isMuted = chatIdMuted[chatId];
                 chatInfo.isPinned = chatIdPinned[chatId];
                 chatInfo.isArchived = chatIdArchived[chatId];

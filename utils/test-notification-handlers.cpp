@@ -851,6 +851,8 @@ int main(int argc, char** argv)
     incoming(model, "2", "[Added someone]"); model.Process(); assert(bells == 1);
     incoming(model, "3", "[Left]"); model.Process(); assert(bells == 1);
     incoming(model, "4", "[Removed someone]"); model.Process(); assert(bells == 1);
+    assert(!model.GetChatIsUnread("tg", "chat"));
+    assert(!model.m_Messages["tg"]["chat"].at("1").isRead); // No synthetic read receipt.
   }
   {
     UiModel::Impl model(nullptr);
@@ -1299,6 +1301,39 @@ int main(int argc, char** argv)
     assert(model.m_ChatVec == order && protocol->requests.empty());
     assert(model.m_HistoryInteraction && model.m_HomeFetchAll && model.m_Notifications.PendingChats() == 1);
     std::cout << "PASS: requested historical snapshots preserve live read/download state, unread badges, chat order/metadata and interaction while storing sorted history without provider requests\n";
+  }
+  {
+    for (const std::string profile : {"Telegram_fixture", "WhatsApp_fixture"})
+    {
+      UiModel::Impl model(nullptr);
+      for (const std::string text : {"[Joined]", "[Left]", "[Added Alice]", "[Removed Bob]"})
+      {
+        incoming(model, text, text, true, profile);
+        assert(!model.GetChatIsUnread(profile, "chat"));
+      }
+      const int beforeBells = bells;
+      incoming(model, "normal", "real unread message", false, profile);
+      model.Process();
+      assert(model.GetChatIsUnread(profile, "chat") && bells == beforeBells + 1);
+      incoming(model, "join-after-unread", "[Joined]", false, profile);
+      model.Process();
+      assert(model.GetChatIsUnread(profile, "chat") && bells == beforeBells + 1);
+      const auto activity = model.m_ChatInfos[profile]["chat"].lastMessageTime;
+      assert(activity == model.m_Messages[profile]["chat"].at("join-after-unread").timeSent);
+      read(model, "normal", "", profile);
+      assert(!model.GetChatIsUnread(profile, "chat"));
+      incoming(model, "leave-after-read", "[Left]", false, profile);
+      assert(!model.GetChatIsUnread(profile, "chat"));
+      // A provider refresh with a raw service unread count must not restore it.
+      auto refresh = std::make_shared<NewChatsNotify>(profile);
+      refresh->success = true;
+      ChatInfo info; info.id = "chat"; info.isUnread = true;
+      refresh->chatInfos = {info};
+      model.MessageHandler(refresh);
+      assert(!model.GetChatIsUnread(profile, "chat"));
+      assert(model.m_Messages[profile]["chat"].size() == 7);
+    }
+    std::cout << "production unread markers: membership-only, earlier unread/read message, cached replay and provider refresh passed for both services\n";
   }
   TestViewOnceTerminal(argv[1]);
   TestHistoryEmojiRendering(argv[1], "xterm-256color", "xterm", 24, 96);
