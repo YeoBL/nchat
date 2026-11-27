@@ -20,7 +20,7 @@ independently runnable. The widget snapshots were independently compiled.
 
 | Change | Description / access | Commit | Verification / limits |
 |---|---|---|---|
-| Custom reply bubble text | Select a message → Option+Shift+Q → edit → Enter → compose/send normally. Empty restores default; Escape cancels. Quote snapshots take precedence over source text when rendered. | [ca7dbf20](https://github.com/YeoBL/nchat/commit/ca7dbf20) | Offline UI checks exercise quote application, source preservation, selection isolation and UTF-16 emoji offsets. WhatsApp carries custom text; Telegram accepts exact excerpts only. No live test message sent. Overrides are session-only; terminal composer only. |
+| Custom reply bubble text | Select a message → Option+Shift+Q → edit → Enter → compose/send normally. Empty restores default; Escape cancels. Quote snapshots take precedence over source text when rendered. | [ca7dbf20](https://github.com/YeoBL/nchat/commit/ca7dbf20) | Offline UI checks exercise quote application, source preservation, selection isolation and UTF-16 emoji offsets. Edited WhatsApp quotes use standalone native snapshots without an original-message jump link; Telegram accepts exact excerpts only. No live test message sent. Overrides are session-only; terminal composer only. |
 
 ## Quiet join/leave unread markers — 27 November 2026
 
@@ -473,3 +473,12 @@ calls. Missing service data is shown as unavailable/partial, not fabricated.
 Existing vanilla functions such as Shift-Tab previous chat, Ctrl-A/E line movement,
 Ctrl-C clearing the textbox, basic mentions and ordinary file transport are not
 misrepresented as new custom features.
+
+Live Self-chat checks on 27 November 2026 reproduced official WhatsApp replacing
+a modified quote with the original when its source ID was retained. A detached
+snapshot displayed the edited text inside the native bubble. The editor now uses
+standalone snapshots for modified WhatsApp quotes; these do not jump to the
+original. Normal replies remain linked. [Fix 03492591](https://github.com/YeoBL/nchat/commit/03492591).
+The official Mac client was visually checked with labelled Self-chat test messages;
+other clients have not been independently checked. Keyboard/editor/send, bridge
+validation and outgoing protobuf encoding also have offline regression coverage.

@@ -326,7 +326,15 @@ Select the message you want to reply to, then press **Option+Shift+Q**
 (`edit_reply_quote`). Edit the quote, press Enter to apply, then type and send
 your reply normally. Escape cancels the editor. Applying an empty quote restores
 the original. Deselecting/sending clears the override; selecting a different
-message does not reuse it. WhatsApp allows custom quote text; Telegram requires
+message does not reuse it. Edited WhatsApp quotes are standalone snapshots in the native reply bubble, without a jump link to the original; Telegram requires
 an exact excerpt and sends its UTF-16 position through TDLib. The original
 message is never edited. Unsaved quote overrides are session-only. This shortcut
 is for the terminal composer, not the menu-bar widget or already-sent replies.
+
+
+The original-ID approach was reproduced as ineffective in the official WhatsApp
+Mac client. The snapshot approach was visually verified in Self chat on
+27 November 2026. Normal replies, including quotes left unchanged in the editor,
+keep the original link. Other WhatsApp clients have not been independently
+checked. The editor can be reopened before sending; it still tracks the actual
+selected source internally.
