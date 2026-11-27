@@ -943,3 +943,15 @@ checkpoint are available on GitHub.
 [Repository](https://github.com/YeoBL/nchat),
 [comparison with vanilla](https://github.com/YeoBL/nchat/compare/vanilla-base...codex%2Fpersonal-features),
 [source checkpoint](https://github.com/YeoBL/nchat/tree/checkpoint%2Fnchat-2026-11-09).
+
+## Reply quote editor — 27 November 2026
+
+`edit_reply_quote` defaults to Option+Shift+Q. `UiModel::OnKeyEditReplyQuote`
+opens the text dialog outside the model lock; application checks that the source
+selection is unchanged. `Impl::m_ReplyQuotes` stores transient per-chat source-ID
+and text pairs. `AddQuoteFromSelectedMessage` applies the override and computes
+Telegram UTF-16 offsets; normal WhatsApp sending already accepts quoted text.
+The WhatsApp C bridge now carries quote snapshots from text/media context info,
+and Telegram reads native quote snapshots. History rendering prefers snapshots,
+which the existing message cache stores. `quotedOffset` is send-only. Never
+modify the original row to implement quote customization.

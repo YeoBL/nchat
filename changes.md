@@ -16,6 +16,12 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## Reply quote editor — 27 November 2026
+
+| Change | Description / access | Commit | Verification / limits |
+|---|---|---|---|
+| Custom reply bubble text | Select a message → Option+Shift+Q → edit → Enter → compose/send normally. Empty restores default; Escape cancels. Quote snapshots take precedence over source text when rendered. | [ca7dbf20](https://github.com/YeoBL/nchat/commit/ca7dbf20) | Offline UI checks exercise quote application, source preservation, selection isolation and UTF-16 emoji offsets. WhatsApp carries custom text; Telegram accepts exact excerpts only. No live test message sent. Overrides are session-only; terminal composer only. |
+
 ## Quiet join/leave unread markers — 27 November 2026
 
 | Change | Access / effect | Implementation commit | Verification / limits |
