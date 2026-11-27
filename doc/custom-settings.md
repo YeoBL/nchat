@@ -319,3 +319,14 @@ updates. The bundled thumbnail helper moves existing image placements immediatel
 Images on screen reuse their loaded data. Images leaving the view release their
 terminal resources, and newly visible images load once. Text retains its normal
 terminal redraw path.
+
+## Edit reply quote
+
+Select the message you want to reply to, then press **Option+Shift+Q**
+(`edit_reply_quote`). Edit the quote, press Enter to apply, then type and send
+your reply normally. Escape cancels the editor. Applying an empty quote restores
+the original. Deselecting/sending clears the override; selecting a different
+message does not reuse it. WhatsApp allows custom quote text; Telegram requires
+an exact excerpt and sends its UTF-16 position through TDLib. The original
+message is never edited. Unsaved quote overrides are session-only. This shortcut
+is for the terminal composer, not the menu-bar widget or already-sent replies.
