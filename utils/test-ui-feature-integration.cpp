@@ -79,7 +79,9 @@ void Run(UiModel& model, const std::string& shortcut)
 struct FakeProtocol : Protocol
 {
   std::vector<MessageType> requests;
-  std::string GetProfileId() const override { return Profile; }
+  std::string profile = Profile;
+  std::vector<ChatMessage> sentReplies;
+  std::string GetProfileId() const override { return profile; }
   // Real providers return an empty display name until the user names a profile.
   std::string GetProfileDisplayName() const override { return ""; }
   bool HasFeature(ProtocolFeature) const override { return false; }
@@ -94,6 +96,8 @@ struct FakeProtocol : Protocol
   void SendRequest(std::shared_ptr<RequestMessage> request) override
   {
     requests.push_back(request->GetMessageType());
+    if (request->GetMessageType() == SendMessageRequestType)
+      sentReplies.push_back(std::static_pointer_cast<SendMessageRequest>(request)->chatMessage);
     // This test deliberately never contacts Telegram or launches native helpers.
     if (request->GetMessageType() == ClientActionRequestType)
     {
@@ -800,6 +804,34 @@ int main()
     assert(editing->edits.size() == 2);
     for (const auto type : editing->requests)
       assert(type != SendMessageRequestType && type != DeleteMessageRequestType && type != MarkMessageReadRequestType);
+  }
+  {
+    UiModel model;
+    auto telegram = std::make_shared<FakeProtocol>();
+    Populate(model, telegram);
+    auto whatsapp = std::make_shared<FakeProtocol>();
+    whatsapp->profile = "WhatsAppMd_quote_test";
+    model.AddProtocol(whatsapp);
+    auto& impl = model.GetImpl();
+    impl.GotoChat({whatsapp->profile, "quote-chat"}, true);
+    ChatMessage original;
+    original.id = "source"; original.senderId = "someone"; original.text = "Original message text";
+    impl.GetMessages(whatsapp->profile, "quote-chat")[original.id] = original;
+    impl.GetMessageVec(whatsapp->profile, "quote-chat") = {original.id};
+    impl.GetMessageOffset(whatsapp->profile, "quote-chat") = 0;
+    impl.SetSelectMessageActive(true);
+    for (int i = 0; i < 100; ++i) Key(i == 0 ? "Quote:" : "", "backspace");
+    Text("Custom quote text"); Key("", "ok");
+    Run(model, "edit_reply_quote");
+    Type(model, L"My actual reply");
+    Run(model, "send_msg");
+    assert(whatsapp->sentReplies.size() == 1);
+    const auto& sent = whatsapp->sentReplies.front();
+    assert(sent.text == "My actual reply" && sent.quotedId == "source");
+    assert(sent.quotedText == "Custom quote text" && sent.quotedSender == "someone");
+    assert(impl.GetMessages(whatsapp->profile, "quote-chat").at("source").text == original.text);
+    model.Cleanup();
+    std::cout << "PASS: real quote editor keyboard workflow forwards custom WhatsApp quote and original reply ID to a fake provider; no network send\n";
   }
   UiKeyConfig::Cleanup();
   UiColorConfig::Cleanup();

@@ -6737,7 +6737,10 @@ void UiModel::OnKeyEditReplyQuote()
   }
   if (chat.first.rfind("Telegram", 0) != 0 && chat.first.rfind("WhatsApp", 0) != 0)
   { MessageDialog("Reply quote", "Custom reply quotes are supported for Telegram and WhatsApp.", 0.8, 5); return; }
-  UiDialogParams params(this, "Reply quote — empty resets; Enter applies; Escape cancels", 0.9, 5);
+  const auto title = chat.first.rfind("WhatsApp", 0) == 0 ?
+    "Reply quote — WhatsApp may display the original" :
+    "Reply quote — empty resets; Enter applies; Escape cancels";
+  UiDialogParams params(this, title, 0.9, 5);
   UiTextInputDialog dialog(params, "Quote: ", initial);
   if (!dialog.Run()) { ReinitView(); return; }
   const auto text = dialog.GetInput();
