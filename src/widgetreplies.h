@@ -100,7 +100,12 @@ private:
       field = StrUtil::StrFromHex(field);
       if (field.find('\0') != std::string::npos) { reject(); return; }
     }
-    if (std::getline(input, extra)) { reject(); return; }
+    bool detached = false;
+    if (std::getline(input, extra))
+    {
+      detached = quote && extra == "detached";
+      if (!detached || std::getline(input, extra)) { reject(); return; }
+    }
     try {
       std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
       const auto text = converter.from_bytes(fields[3]);
@@ -232,7 +237,7 @@ private:
     request->chatMessage.text = quote ? fields[3].substr(quoteEnd + 1) : fields[3];
     if (quote)
     {
-      request->chatMessage.quotedId = messages.front().id;
+      request->chatMessage.quotedId = detached ? "3EB0" + path.substr(path.find_last_of('/') + 1, 16) : messages.front().id;
       request->chatMessage.quotedSender = messages.front().senderId;
       request->chatMessage.quotedText = fields[3].substr(0, quoteEnd);
     }
