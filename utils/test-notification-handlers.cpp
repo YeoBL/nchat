@@ -1360,7 +1360,7 @@ int main(int argc, char** argv)
       model.AddQuoteFromSelectedMessage(unchanged);
       assert(unchanged.quotedText == "🙂 hello");
     }
-    std::cout << "PASS: custom reply quotes preserve source/id, validate Telegram excerpts and UTF-16 offsets, isolate selections and clear on cancel/send\n";
+    std::cout << "PASS: custom reply quotes preserve source text, detach modified WhatsApp references, validate Telegram excerpts and UTF-16 offsets, isolate selections and clear on cancel/send\n";
   }
   TestViewOnceTerminal(argv[1]);
   TestHistoryEmojiRendering(argv[1], "xterm-256color", "xterm", 24, 96);

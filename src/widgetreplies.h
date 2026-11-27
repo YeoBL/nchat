@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include "fileutil.h"
 #include "messagecache.h"
+#include "protocolutil.h"
 #include "strutil.h"
 #include "../lib/ncutil/ext/cereal/include/cereal/external/rapidjson/stringbuffer.h"
 #include "../lib/ncutil/ext/cereal/include/cereal/external/rapidjson/writer.h"
