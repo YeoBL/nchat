@@ -16,6 +16,12 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## Quiet join/leave unread markers — 27 November 2026
+
+| Change | Access / effect | Implementation commit | Verification / limits |
+|---|---|---|---|
+| Membership events do not create `*` | Automatic for Telegram and WhatsApp. `[Joined]`, `[Left]`, `[Added …]` and `[Removed …]` remain visible in history but are skipped when computing the chat's unread marker. A preceding unread conversation message keeps its marker. Cache chat enumeration applies the same rule and keeps the actual latest activity time. | [de807ad9](https://github.com/YeoBL/nchat/commit/de807ad9) | Compiled production UI/cache fixtures cover membership-only chats, earlier read/unread messages, provider refresh, cached replay, outgoing replies and NULL text. Receipt flags and chat history stay intact. Event recognition follows the existing provider-generated membership labels; service unread metadata without loaded/cached message content cannot be classified locally. |
+
 ## Rectangular selection and responsive scrolling — 25 November 2026
 
 | Change | Access / effect | Implementation commit | Verification / limits |
