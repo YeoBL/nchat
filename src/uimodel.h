@@ -103,7 +103,8 @@ private:
     void ProcessPresencePoll();
     void SelectPresenceContacts(size_t p_Count);
 
-    std::string GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId);
+    std::string GetLastMessageId(const std::string& p_ProfileId, const std::string& p_ChatId,
+                                 bool p_SkipMembership = false);
     void UpdateChatInfoLastMessageTime(const std::string& p_ProfileId, const std::string& p_ChatId);
     void UpdateChatInfoIsUnread(const std::string& p_ProfileId, const std::string& p_ChatId);
     void QueueTerminalNotification(const std::string& p_ProfileId, const std::string& p_ChatId,
