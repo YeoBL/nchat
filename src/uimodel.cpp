@@ -1199,9 +1199,9 @@ void UiModel::Impl::OnKeyOpenMsg()
   TerminalControlResume();
 }
 
-bool UiModel::Impl::GetMessageAttachmentPath(std::string& p_FilePath, DownloadFileAction p_DownloadFileAction)
+bool UiModel::Impl::GetMessageAttachmentPath(std::string& p_FilePath, DownloadFileAction p_DownloadFileAction,
+                                             bool* p_PhoneOnly)
 {
-
   if (!GetSelectMessageActive()) return false;
 
   std::string profileId = m_CurrentChat.first;
@@ -1210,18 +1210,18 @@ bool UiModel::Impl::GetMessageAttachmentPath(std::string& p_FilePath, DownloadFi
   const int messageOffset = m_MessageOffset[profileId][chatId];
   const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
 
-  auto it = std::next(messageVec.begin(), messageOffset);
-  if (it == messageVec.end())
-  {
-    LOG_WARNING("error finding message id");
-    return false;
-  }
-
-  std::string msgId = *it;
+  if (messageOffset < 0 || messageOffset >= static_cast<int>(messageVec.size())) return false;
+  const std::string& msgId = messageVec[messageOffset];
   auto mit = messages.find(msgId);
   if (mit == messages.end())
   {
     LOG_WARNING("error finding message");
+    return false;
+  }
+
+  if (ProtocolUtil::IsWhatsAppViewOncePhoneOnly(profileId, mit->second))
+  {
+    if (p_PhoneOnly != nullptr) *p_PhoneOnly = true;
     return false;
   }
 
@@ -1245,23 +1245,6 @@ bool UiModel::Impl::GetMessageAttachmentPath(std::string& p_FilePath, DownloadFi
   }
 
   return false;
-}
-
-void UiModel::Impl::OnKeyOpenAttachment(std::string p_FilePath /*= std::string()*/)
-{
-  AnyUserKeyInput();
-  if (p_FilePath.empty())
-  {
-    // user-triggered call
-    if (!GetMessageAttachmentPath(p_FilePath, DownloadFileActionOpen)) return;
-  }
-  else
-  {
-    // protocol-triggered call
-    LOG_TRACE("download file action open %s", p_FilePath.c_str());
-  }
-
-  OpenAttachment(p_FilePath);
 }
 
 void UiModel::Impl::OnKeyTranscribe(std::string p_FilePath, std::map<std::string, std::string> p_Context)
@@ -5328,8 +5311,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   }
   else if (p_Key == keyOpen)
   {
-    std::unique_lock<owned_mutex> lock(m_ModelMutex);
-    GetImpl().OnKeyOpenAttachment();
+    OnKeyOpenAttachment();
   }
   else if (p_Key == keyOpenLink)
   {
@@ -6139,6 +6121,22 @@ void UiModel::OnKeyPoll()
   UiDialogParams params(this, "Poll", 0.75, 0.5);
   UiPollDialog dialog(params, protocol, request, profile, text);
   dialog.Run();
+}
+
+void UiModel::OnKeyOpenAttachment()
+{
+  bool phoneOnly = false;
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    auto& model = GetImpl();
+    model.AnyUserKeyInput();
+    std::string filePath;
+    if (model.GetMessageAttachmentPath(filePath, DownloadFileActionOpen, &phoneOnly))
+      model.OpenAttachment(filePath);
+  }
+  if (phoneOnly)
+    MessageDialog("View Once", "WhatsApp did not deliver the media to nchat.\n"
+      "Open it in WhatsApp on your phone if it is still available.", 0.8, 7);
 }
 
 void UiModel::OnKeyAttachments()

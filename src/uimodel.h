@@ -71,8 +71,8 @@ private:
     void OnKeyArchiveChat();
     void OnKeyPinChat();
     void OnKeyOpenMsg();
-    bool GetMessageAttachmentPath(std::string& p_FilePath, DownloadFileAction p_DownloadFileAction);
-    void OnKeyOpenAttachment(std::string p_FilePath = std::string());
+    bool GetMessageAttachmentPath(std::string& p_FilePath, DownloadFileAction p_DownloadFileAction,
+                                  bool* p_PhoneOnly = nullptr);
     void OnKeyTranscribe(std::string p_FilePath = std::string(),
                          std::map<std::string, std::string> p_Context = {});
     std::string TakePendingTranscription(std::map<std::string, std::string>& p_Context);
@@ -438,6 +438,7 @@ private:
   void OnKeyReact();
   void OnKeyViewReactions();
   void OnKeyPoll();
+  void OnKeyOpenAttachment();
   void OnKeyAttachments();
   void OnKeyClientActions(const std::string& p_Operation = "local.menu",
                           std::map<std::string, std::string> p_Params = {});

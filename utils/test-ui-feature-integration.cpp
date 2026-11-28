@@ -836,6 +836,61 @@ int main()
     model.Cleanup();
     std::cout << "PASS: real quote editor keyboard workflow forwards custom WhatsApp quote as a standalone snapshot to a fake provider; no network send\n";
   }
+  {
+    UiModel model;
+    Populate(model, std::make_shared<FakeProtocol>());
+    auto whatsapp = std::make_shared<FakeProtocol>();
+    whatsapp->profile = "WhatsAppMd_view_once_test";
+    model.AddProtocol(whatsapp);
+    auto& impl = model.GetImpl();
+    const std::string chat = "view-once";
+    impl.GotoChat({whatsapp->profile, chat}, true);
+    ChatMessage message;
+    message.id = "incoming";
+    message.senderId = "sender";
+    message.text = "[View once restricted to phone]";
+    message.isRead = true;
+    message.isOutgoing = false;
+    impl.GetMessageVec(whatsapp->profile, chat) = {message.id};
+    impl.SetSelectMessageActive(true);
+    auto& current = impl.GetMessages(whatsapp->profile, chat)[message.id];
+    for (bool attachmentWithoutContent : {false, true})
+    {
+      current = message;
+      if (attachmentWithoutContent)
+      {
+        current.text = "[View once] caption";
+        FileInfo file;
+        file.fileStatus = FileStatusNotDownloaded;
+        file.filePath = "/no-synthetic-view-once-photo.jpg";
+        file.fileType = "image/jpeg";
+        file.isViewOnce = true;
+        current.fileInfo = ProtocolUtil::FileInfoToHex(file);
+      }
+      model.ReinitView();
+      model.Draw();
+      assert(ScreenText().find("Open in WhatsApp on your phone") != std::string::npos);
+      assert(ScreenText().find("Ctrl+V to view") == std::string::npos);
+      whatsapp->requests.clear();
+      Key("WhatsApp did not deliver the media to nchat.", "ok");
+      Run(model, "open");
+      assert(whatsapp->requests.empty());
+    }
+    FileInfo delivered;
+    delivered.fileStatus = FileStatusNotDownloaded;
+    delivered.fileId = "synthetic-media-reference";
+    delivered.fileType = "image/jpeg";
+    delivered.isViewOnce = true;
+    current.fileInfo = ProtocolUtil::FileInfoToHex(delivered);
+    model.ReinitView();
+    model.Draw();
+    assert(ScreenText().find("Ctrl+V to view") != std::string::npos);
+    whatsapp->requests.clear();
+    Run(model, "open");
+    assert(whatsapp->requests == std::vector<MessageType>{DownloadFileRequestType});
+    model.Cleanup();
+    std::cout << "PASS: Ctrl+V explains phone-only WhatsApp View Once without a provider request and preserves explicit open for delivered media\n";
+  }
   UiKeyConfig::Cleanup();
   UiColorConfig::Cleanup();
   endwin();
