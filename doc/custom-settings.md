@@ -338,3 +338,13 @@ Mac client. The snapshot approach was visually verified in Self chat on
 keep the original link. Other WhatsApp clients have not been independently
 checked. The editor can be reopened before sending; it still tracks the actual
 selected source internally.
+
+
+## WhatsApp View Once
+
+Select a View Once message in terminal nchat and press **Ctrl+V**. If WhatsApp
+has not supplied an attachment, nchat directs you to the WhatsApp phone app,
+where the message may still be available. These rows have a phone-only label in
+the history. Existing delivered attachment references still require an explicit
+open and previews remain hidden. The phone handoff cannot recover a missing or
+expired attachment.

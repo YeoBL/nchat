@@ -8,6 +8,7 @@
 #include "protocolutil.h"
 #include <random>
 
+#include "fileutil.h"
 #include "log.h"
 #include "protocol.h"
 #include "strutil.h"
@@ -177,6 +178,18 @@ bool ProtocolUtil::IsViewOnce(const ChatMessage& p_Message)
   return p_Message.text.find("[View once]") == 0 ||
     p_Message.text.find("[View-once ") == 0 ||
     (!p_Message.fileInfo.empty() && FileInfoFromHex(p_Message.fileInfo).isViewOnce);
+}
+
+bool ProtocolUtil::IsWhatsAppViewOncePhoneOnly(const std::string& p_ProfileId,
+                                            const ChatMessage& p_Message)
+{
+  if (p_ProfileId.rfind("WhatsApp", 0) != 0) return false;
+  if (p_Message.text == "[View once restricted to phone]") return true;
+  if (!IsViewOnce(p_Message)) return false;
+  const auto file = FileInfoFromHex(p_Message.fileInfo);
+  if (!file.fileId.empty()) return false;
+  return file.fileStatus != FileStatusDownloaded ||
+    file.filePath.rfind("/", 0) != 0 || !FileUtil::Exists(file.filePath);
 }
 
 std::string ProtocolUtil::QuoteSnapshotId()

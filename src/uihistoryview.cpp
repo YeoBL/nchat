@@ -214,10 +214,12 @@ void UiHistoryView::Draw()
     std::string thumbnailPath;
     int thumbnailWidth = 0;
     int thumbnailRows = 0;
-    const bool isViewOnce = ProtocolUtil::IsViewOnce(msg);
+    const bool phoneOnly = ProtocolUtil::IsWhatsAppViewOncePhoneOnly(currentChat.first, msg);
+    const bool isViewOnce = phoneOnly || ProtocolUtil::IsViewOnce(msg);
     if (!msg.text.empty())
     {
-      std::string text = msg.text;
+      std::string text = phoneOnly && msg.text == "[View once restricted to phone]"
+        ? "[View Once · Open in WhatsApp on your phone]" : msg.text;
       if (isViewOnce && !msg.fileInfo.empty())
       {
         static const std::vector<std::string> labels = { "[View once]", "[View-once photo]",
@@ -332,7 +334,8 @@ void UiHistoryView::Draw()
       }
 
       const std::string attachmentLabel = isViewOnce ?
-        std::string("[View-once ") + (IsImageAttachment(fileInfo) ? "photo" : "attachment") + " · Ctrl+V to view]" :
+        std::string("[View-once ") + (IsImageAttachment(fileInfo) ? "photo" : "attachment") +
+          (phoneOnly ? " · Open in WhatsApp on your phone]" : " · Ctrl+V to view]") :
         fileName + fileStatus;
       std::wstring fileStr = attachmentIndicator + StrUtil::ToWString(attachmentLabel);
       wlines.insert(wlines.begin(), fileStr);

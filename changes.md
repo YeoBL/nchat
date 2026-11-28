@@ -16,6 +16,12 @@ share an implementation commit. Checks below describe the final integrated
 build, not a claim that every reconstructed intermediate backend snapshot was
 independently runnable. The widget snapshots were independently compiled.
 
+## WhatsApp View Once phone handoff — 28 November 2026
+
+| Change | Access / effect | Commit | Verification / limits |
+|---|---|---|---|
+| Phone-only View Once guidance | Select a WhatsApp View Once row and press Ctrl+V. When nchat has no attachment to open, the terminal row and dialog direct you to WhatsApp on your phone. Delivered attachment references still use the existing explicit opener. | [0a61c16a](https://github.com/YeoBL/nchat/commit/0a61c16a) | The production UI regression exercises existing phone-only rows, incomplete attachment metadata and a synthetic delivered reference. The current local cache had phone-only notices and no incoming View Once attachment references. No live media was opened and linked-device delivery limitations remain. |
+
 ## Reply quote editor — 27 November 2026
 
 | Change | Description / access | Commit | Verification / limits |
